@@ -27,6 +27,58 @@ template <typename T, size_t D, int MajorType = Eigen::RowMajor,
 using EigenTensor = framework::EigenTensor<T, D, MajorType, IndexType>;
 using framework::Tensor;
 
+static std::vector<int> get_new_shape(
+    const std::vector<const Tensor*>& list_new_shape_tensor) {
+  // get tensor from
+  std::vector<int> vec_new_shape;
+  for (size_t i = 0; i < list_new_shape_tensor.size(); ++i) {
+    auto tensor = list_new_shape_tensor[i];
+    PADDLE_ENFORCE_EQ(tensor->dims(), framework::make_ddim({1}),
+                      "shape of dim tensor should be [1]");
+    if (platform::is_gpu_place(tensor->place())) {
+      framework::Tensor temp;
+      TensorCopySync(*tensor, platform::CPUPlace(), &temp);
+
+      vec_new_shape.push_back(static_cast<int32_t>(*temp.data<int32_t>()));
+    } else {
+      vec_new_shape.push_back(static_cast<int32_t>(*tensor->data<int32_t>()));
+    }
+  }
+
+  return vec_new_shape;
+}
+
+static framework::DDim ValidateShape(const std::vector<int> shape,
+                                     const framework::DDim& in_dims) {
+  auto in_dim_size = in_dims.size();
+  auto shape_size = shape.size();
+  PADDLE_ENFORCE_EQ(
+      in_dim_size, shape_size,
+      "shape size should be equal to dimension size of input tensor.");
+  const int64_t unk_dim_val = -1;
+  int unk_dim_idx = -1;
+  std::vector<int64_t> output_shape(shape.size(), 0);
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (shape[i] == unk_dim_val) {
+      PADDLE_ENFORCE_EQ(unk_dim_idx, -1,
+                        "Only one element of shape can be unknown.");
+      PADDLE_ENFORCE_EQ(i, 0, "Only the first element of shape can be -1.");
+      unk_dim_idx = i;
+    } else {
+      PADDLE_ENFORCE_GT(shape[i], 0,
+                        "Each element of shape must be greater than 0 "
+                        "except the first element.");
+    }
+    output_shape[i] = static_cast<int64_t>(shape[i]);
+  }
+
+  if (output_shape[0] == -1) {
+    output_shape[0] = in_dims[0];
+  }
+
+  return framework::make_ddim(output_shape);
+}
+
 static std::vector<int> GetOffsets(const framework::ExecutionContext& ctx) {
   std::vector<int> res;
   int rank = ctx.Input<Tensor>("X")->dims().size();
@@ -59,13 +111,37 @@ static std::vector<int> GetOffsets(const framework::ExecutionContext& ctx) {
 }
 
 template <typename DeviceContext, typename T, size_t D>
-void CropFunction(const framework::ExecutionContext& context) {
+void CropTensorFunction(const framework::ExecutionContext& context) {
   auto* x = context.Input<Tensor>("X");
   auto* out = context.Output<Tensor>("Out");
   auto out_dims = out->dims();
+
+  auto list_new_shape_tensor =
+      context.MultiInput<framework::Tensor>("ShapeTensor");
+  if (list_new_shape_tensor.size() > 0) {
+    // have shape tensor
+    auto new_shape = get_new_shape(list_new_shape_tensor);
+    out_dims = ValidateShape(new_shape, x->dims());
+  } else {
+    auto* shape_tensor = context.HasInput("Shape")
+                             ? context.Input<framework::LoDTensor>("Shape")
+                             : nullptr;
+    if (shape_tensor) {
+      auto* shape_data = shape_tensor->data<int>();
+      framework::Tensor cpu_shape_tensor;
+      if (platform::is_gpu_place(shape_tensor->place())) {
+        TensorCopySync(*shape_tensor, platform::CPUPlace(), &cpu_shape_tensor);
+        shape_data = cpu_shape_tensor.data<int>();
+      }
+      auto shape =
+          std::vector<int>(shape_data, shape_data + shape_tensor->numel());
+      out_dims = ValidateShape(shape, x->dims());
+    }
+  }
   if (out_dims[0] == -1) {
     out_dims[0] = x->dims()[0];
   }
+
   out->mutable_data<T>(out_dims, context.GetPlace());
   auto x_stride = framework::stride(x->dims());
   auto offsets = GetOffsets(context);
@@ -88,38 +164,39 @@ void CropFunction(const framework::ExecutionContext& context) {
 }
 
 template <typename DeviceContext, typename T>
-class CropKernel : public framework::OpKernel<T> {
+class CropTensorKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext& context) const override {
     int rank = context.Input<Tensor>("X")->dims().size();
     switch (rank) {
       case 1:
-        CropFunction<DeviceContext, T, 1>(context);
+        CropTensorFunction<DeviceContext, T, 1>(context);
         break;
       case 2:
-        CropFunction<DeviceContext, T, 2>(context);
+        CropTensorFunction<DeviceContext, T, 2>(context);
         break;
       case 3:
-        CropFunction<DeviceContext, T, 3>(context);
+        CropTensorFunction<DeviceContext, T, 3>(context);
         break;
       case 4:
-        CropFunction<DeviceContext, T, 4>(context);
+        CropTensorFunction<DeviceContext, T, 4>(context);
         break;
       case 5:
-        CropFunction<DeviceContext, T, 5>(context);
+        CropTensorFunction<DeviceContext, T, 5>(context);
         break;
       case 6:
-        CropFunction<DeviceContext, T, 6>(context);
+        CropTensorFunction<DeviceContext, T, 6>(context);
         break;
       default:
         PADDLE_THROW(
-            "CropOp only support tensors with no more than 6 dimensions.");
+            "CropTensorOp only support tensors with no more than 6 "
+            "dimensions.");
     }
   }
 };
 
 template <typename DeviceContext, typename T, size_t D>
-void CropGradFunction(const framework::ExecutionContext& context) {
+void CropTensorGradFunction(const framework::ExecutionContext& context) {
   auto* d_x = context.Output<Tensor>(framework::GradVarName("X"));
   auto* x = context.Input<Tensor>("X");
   if (d_x != nullptr) {
@@ -140,33 +217,34 @@ void CropGradFunction(const framework::ExecutionContext& context) {
 }
 
 template <typename DeviceContext, typename T>
-class CropGradKernel : public framework::OpKernel<T> {
+class CropTensorGradKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext& context) const override {
     size_t rank =
         context.Input<Tensor>(framework::GradVarName("Out"))->dims().size();
     switch (rank) {
       case 1:
-        CropGradFunction<DeviceContext, T, 1>(context);
+        CropTensorGradFunction<DeviceContext, T, 1>(context);
         break;
       case 2:
-        CropGradFunction<DeviceContext, T, 2>(context);
+        CropTensorGradFunction<DeviceContext, T, 2>(context);
         break;
       case 3:
-        CropGradFunction<DeviceContext, T, 3>(context);
+        CropTensorGradFunction<DeviceContext, T, 3>(context);
         break;
       case 4:
-        CropGradFunction<DeviceContext, T, 4>(context);
+        CropTensorGradFunction<DeviceContext, T, 4>(context);
         break;
       case 5:
-        CropGradFunction<DeviceContext, T, 5>(context);
+        CropTensorGradFunction<DeviceContext, T, 5>(context);
         break;
       case 6:
-        CropGradFunction<DeviceContext, T, 6>(context);
+        CropTensorGradFunction<DeviceContext, T, 6>(context);
         break;
       default:
         PADDLE_THROW(
-            "CropOp only support tensors with no more than 6 dimensions.");
+            "CropTensorOp only support tensors with no more than 6 "
+            "dimensions.");
     }
   }
 };
