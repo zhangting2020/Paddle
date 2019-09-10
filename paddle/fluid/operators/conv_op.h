@@ -189,7 +189,7 @@ class GemmConvKernel : public framework::OpKernel<T> {
     int in_step = static_cast<int>(input->dims()[1]) / groups;
     int out_step = static_cast<int>(output->dims()[1]) / groups;
 
-    math::Vol2ColFunctor<DeviceContext, T> vol2col;
+    math::Vol2ColFunctor<math::ColFormat::kCFO, DeviceContext, T> vol2col;
     math::Im2ColFunctor<math::ColFormat::kCFO, DeviceContext, T> im2col;
 
     auto blas = math::GetBlas<DeviceContext, T>(dev_ctx);
@@ -317,7 +317,7 @@ class GemmConvGradKernel : public framework::OpKernel<T> {
       if (is_expand) {
         set_zero(dev_ctx, input_grad, static_cast<T>(0));
       }
-      math::Col2VolFunctor<DeviceContext, T> col2vol;
+      math::Col2VolFunctor<math::ColFormat::kCFO, DeviceContext, T> col2vol;
       math::Col2ImFunctor<math::ColFormat::kCFO, DeviceContext, T> col2im;
 
       for (int i = 0; i < batch_size; i++) {
@@ -358,7 +358,7 @@ class GemmConvGradKernel : public framework::OpKernel<T> {
       filter_grad_.Resize(filter_matrix_shape);
       set_zero(dev_ctx, filter_grad, static_cast<T>(0));
       math::Im2ColFunctor<math::ColFormat::kCFO, DeviceContext, T> im2col;
-      math::Vol2ColFunctor<DeviceContext, T> vol2col;
+      math::Vol2ColFunctor<math::ColFormat::kCFO, DeviceContext, T> vol2col;
       for (int i = 0; i < batch_size; i++) {
         Tensor out_grad_batch =
             output_grad->Slice(i, i + 1).Resize(output_matrix_shape);

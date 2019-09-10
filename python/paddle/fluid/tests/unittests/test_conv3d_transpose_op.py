@@ -22,6 +22,8 @@ from op_test import OpTest
 
 
 def conv3dtranspose_forward_naive(input_, filter_, attrs):
+    if attrs['data_format'] == 'NHWC':
+        input_ = np.transpose(input_, [0, 4, 1, 2, 3])
     in_n, in_c, in_d, in_h, in_w = input_.shape
     f_c, f_out_c, f_d, f_h, f_w = filter_.shape
     groups = attrs['groups']
@@ -64,6 +66,8 @@ def conv3dtranspose_forward_naive(input_, filter_, attrs):
 
     out = out[:, :, pad[0]:out_d - pad[0], pad[1]:out_h - pad[1], pad[2]:out_w -
               pad[2]]
+    if attrs['data_format'] == 'NHWC':
+        out = np.transpose(out, [0, 2, 3, 4, 1])
     return out
 
 
@@ -71,6 +75,7 @@ class TestConv3dTransposeOp(OpTest):
     def setUp(self):
         # init as conv transpose
         self.use_cudnn = False
+        self.data_format = 'NCHW'
         self.init_op_type()
         self.init_test_case()
 
@@ -84,7 +89,8 @@ class TestConv3dTransposeOp(OpTest):
             'dilations': self.dilations,
             'groups': self.groups,
             'use_cudnn': self.use_cudnn,
-            'data_format': 'AnyLayout'  # TODO(dzhwinter) : should be fix latter
+            'data_format':
+            self.data_format  # TODO(dzhwinter) : should be fix latter
         }
 
         output = conv3dtranspose_forward_naive(input_, filter_,
@@ -198,6 +204,66 @@ class TestWithDilation(TestConv3dTransposeOp):
         self.filter_size = [f_c, 6, 3, 3, 3]
 
 
+class Test_NHWC(TestConv3dTransposeOp):
+    def init_test_case(self):
+        self.pad = [0, 0, 0]
+        self.stride = [1, 1, 1]
+        self.dilations = [1, 1, 1]
+        self.groups = 1
+        self.input_size = [2, 5, 5, 5, 3]  # NDHWC
+        f_c = self.input_size[-1]
+        self.filter_size = [f_c, 6, 3, 3, 3]
+        self.data_format = 'NHWC'
+
+
+class TestWithPad_NHWC(TestConv3dTransposeOp):
+    def init_test_case(self):
+        self.pad = [1, 1, 1]
+        self.stride = [1, 1, 1]
+        self.dilations = [1, 1, 1]
+        self.groups = 1
+        self.input_size = [2, 5, 5, 5, 3]  # NDHWC
+        f_c = self.input_size[-1]
+        self.filter_size = [f_c, 6, 3, 3, 3]
+        self.data_format = 'NHWC'
+
+
+class TestWithGroups_NHWC(TestConv3dTransposeOp):
+    def init_test_case(self):
+        self.pad = [1, 1, 1]
+        self.stride = [1, 1, 1]
+        self.dilations = [1, 1, 1]
+        self.groups = 2
+        self.input_size = [2, 5, 5, 5, 4]  # NDHWC
+        f_c = self.input_size[-1]
+        self.filter_size = [f_c, 3, 3, 3, 3]
+        self.data_format = 'NHWC'
+
+
+class TestWithStride_NHWC(TestConv3dTransposeOp):
+    def init_test_case(self):
+        self.pad = [1, 1, 1]
+        self.stride = [2, 2, 2]
+        self.dilations = [1, 1, 1]
+        self.groups = 1
+        self.input_size = [2, 5, 5, 5, 3]  # NCDHW
+        f_c = self.input_size[-1]
+        self.filter_size = [f_c, 6, 3, 3, 3]
+        self.data_format = 'NHWC'
+
+
+class TestWithDilation_NHWC(TestConv3dTransposeOp):
+    def init_test_case(self):
+        self.pad = [1, 1, 1]
+        self.stride = [1, 1, 1]
+        self.dilations = [2, 2, 2]
+        self.groups = 1
+        self.input_size = [2, 5, 5, 5, 3]  # NCDHW
+        f_c = self.input_size[-1]
+        self.filter_size = [f_c, 6, 3, 3, 3]
+        self.data_format = 'NHWC'
+
+
 # ------------ test_cudnn ------------
 @unittest.skipIf(not core.is_compiled_with_cuda(),
                  "core is not compiled with CUDA")
@@ -271,6 +337,79 @@ class TestCUDNNWithGroups(TestWithGroups):
 #
 #     def init_op_type(self):
 #         self.op_type = "conv3d_transpose"
+
+
+@unittest.skipIf(not core.is_compiled_with_cuda(),
+                 "core is not compiled with CUDA")
+class TestCUDNN_NHWC(TestConv3dTransposeOp):
+    def init_test_case(self):
+        self.pad = [0, 0, 0]
+        self.stride = [1, 1, 1]
+        self.dilations = [1, 1, 1]
+        self.groups = 1
+        self.input_size = [2, 5, 5, 5, 3]  # NDHWC
+        f_c = self.input_size[-1]
+        self.filter_size = [f_c, 6, 3, 3, 3]
+        self.data_format = 'NHWC'
+
+    def init_op_type(self):
+        self.use_cudnn = True
+        self.op_type = "conv3d_transpose"
+
+
+@unittest.skipIf(not core.is_compiled_with_cuda(),
+                 "core is not compiled with CUDA")
+class TestCUDNNWithPad_NHWC(TestWithPad):
+    def init_test_case(self):
+        self.pad = [1, 1, 1]
+        self.stride = [1, 1, 1]
+        self.dilations = [1, 1, 1]
+        self.groups = 1
+        self.input_size = [2, 5, 5, 5, 3]  # NDHWC
+        f_c = self.input_size[-1]
+        self.filter_size = [f_c, 6, 3, 3, 3]
+        self.data_format = 'NHWC'
+
+    def init_op_type(self):
+        self.use_cudnn = True
+        self.op_type = "conv3d_transpose"
+
+
+@unittest.skipIf(not core.is_compiled_with_cuda(),
+                 "core is not compiled with CUDA")
+class TestCUDNNWithStride_NHWC(TestWithStride):
+    def init_test_case(self):
+        self.pad = [1, 1, 1]
+        self.stride = [2, 2, 2]
+        self.dilations = [1, 1, 1]
+        self.groups = 1
+        self.input_size = [2, 5, 5, 5, 3]  # NCDHW
+        f_c = self.input_size[-1]
+        self.filter_size = [f_c, 6, 3, 3, 3]
+        self.data_format = 'NHWC'
+
+    def init_op_type(self):
+        self.use_cudnn = True
+        self.op_type = "conv3d_transpose"
+
+
+@unittest.skipIf(not core.is_compiled_with_cuda(),
+                 "core is not compiled with CUDA")
+class TestCUDNNWithGroups_NHWC(TestWithGroups):
+    def init_test_case(self):
+        self.pad = [1, 1, 1]
+        self.stride = [1, 1, 1]
+        self.dilations = [1, 1, 1]
+        self.groups = 2
+        self.input_size = [2, 5, 5, 5, 4]  # NCHW
+        f_c = self.input_size[-1]
+        self.filter_size = [f_c, 3, 3, 3, 3]
+        self.data_format = 'NHWC'
+
+    def init_op_type(self):
+        self.use_cudnn = True
+        self.op_type = "conv3d_transpose"
+
 
 if __name__ == '__main__':
     unittest.main()
