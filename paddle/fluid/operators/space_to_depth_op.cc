@@ -24,6 +24,7 @@ namespace paddle {
 namespace operators {
 
 using Tensor = framework::Tensor;
+using DataLayout = framework::DataLayout;
 
 class SpaceToDepthOp : public framework::OperatorWithKernel {
  public:
@@ -38,44 +39,65 @@ class SpaceToDepthOp : public framework::OperatorWithKernel {
     auto x_dims = ctx->GetInputDim("X");
     PADDLE_ENFORCE_EQ(x_dims.size(), 4, "input should be a 4D tensor");
     auto blocksize = ctx->Attrs().Get<int64_t>("blocksize");
+    const DataLayout data_layout = framework::StringToDataLayout(
+        ctx->Attrs().Get<std::string>("data_format"));
+    const std::string data_layout_str =
+        ctx->Attrs().Get<std::string>("data_format");
+    int64_t C = (data_layout == DataLayout::kNCHW ? x_dims[1] : x_dims[3]);
+    int64_t H = (data_layout == DataLayout::kNCHW ? x_dims[2] : x_dims[1]);
+    int64_t W = (data_layout == DataLayout::kNCHW ? x_dims[3] : x_dims[2]);
 
-    PADDLE_ENFORCE_GT(blocksize, 1, "The blocksize should be Greater than 1");
+    PADDLE_ENFORCE_GT(blocksize, 1, "The blocksize should be Greater than 1.");
     if (ctx->IsRuntime()) {
-      PADDLE_ENFORCE_GT(x_dims[1], 0, "input channel should be Greater than 0");
-      PADDLE_ENFORCE_GT(x_dims[2], 0, "input Height should be Greater than 0");
-      PADDLE_ENFORCE_GT(x_dims[3], 0, "input Width should be Greater than 0");
+      PADDLE_ENFORCE_GT(
+          C, 0,
+          "Input channel of Op(space_to_depth) should be Greater than 0.");
+      PADDLE_ENFORCE_GT(
+          H, 0, "Input Height of Op(space_to_depth) should be Greater than 0.");
+      PADDLE_ENFORCE_GT(
+          W, 0, "Input Width of Op(space_to_depth) should be Greater than 0.");
 
-      PADDLE_ENFORCE_EQ(x_dims[1] % (blocksize * blocksize), 0,
-                        "input channel should be divisible of the square of "
-                        "SpaceToDepthOp blocksize");
-      PADDLE_ENFORCE_EQ(x_dims[2] % (blocksize), 0,
-                        "input Height should be divisible of the square of "
-                        "SpaceToDepthOp blocksize");
-      PADDLE_ENFORCE_EQ(x_dims[3] % (blocksize), 0,
-                        "input Width should be divisible of the square of "
-                        "SpaceToDepthOp blocksize");
+      PADDLE_ENFORCE_EQ(C % (blocksize * blocksize), 0,
+                        "Input channel of Op(space_to_depth) should be "
+                        "divisible of the square of "
+                        "Attr(blocksize).");
+      PADDLE_ENFORCE_EQ(H % (blocksize), 0,
+                        "Input Height of Op(space_to_depth) should be "
+                        "divisible of the square of "
+                        "Attr(blocksize).");
+      PADDLE_ENFORCE_EQ(W % (blocksize), 0,
+                        "Input Width of Op(space_to_depth) should be divisible "
+                        "of the square of "
+                        "Attr(blocksize).");
     } else {
-      if (x_dims[1] != -1) {
-        PADDLE_ENFORCE_GT(x_dims[1], 0,
-                          "input channel should be Greater than 0");
-        PADDLE_ENFORCE_EQ(x_dims[1] % (blocksize * blocksize), 0,
-                          "input channel should be divisible of the square of "
-                          "SpaceToDepthOp blocksize");
+      if (C != -1) {
+        PADDLE_ENFORCE_GT(
+            C, 0,
+            "Input channel of Op(space_to_depth) should be Greater than 0.");
+        PADDLE_ENFORCE_EQ(C % (blocksize * blocksize), 0,
+                          "Input channel of Op(space_to_depth) should be "
+                          "divisible of the square of "
+                          "Attr(blocksize).");
       }
-      if (x_dims[2] != -1) {
-        PADDLE_ENFORCE_GT(x_dims[2], 0,
-                          "input Height should be Greater than 0");
-        PADDLE_ENFORCE_EQ(x_dims[2] % (blocksize), 0,
-                          "input Height should be divisible of the square of "
-                          "SpaceToDepthOp blocksize");
+      if (H != -1) {
+        PADDLE_ENFORCE_GT(
+            H, 0,
+            "Input Height of Op(space_to_depth) should be Greater than 0.");
+        PADDLE_ENFORCE_EQ(H % (blocksize), 0,
+                          "Input Height of Op(space_to_depth) should be "
+                          "divisible of the square of "
+                          "Attr(blocksize).");
       }
 
-      if (x_dims[3] != -1) {
-        PADDLE_ENFORCE_GT(x_dims[3], 0, "input Width should be Greater than 0");
+      if (W != -1) {
+        PADDLE_ENFORCE_GT(
+            W, 0,
+            "Input Width of Op(space_to_depth) should be Greater than 0.");
 
-        PADDLE_ENFORCE_EQ(x_dims[3] % (blocksize), 0,
-                          "input Width should be divisible of the square of "
-                          "SpaceToDepthOp blocksize");
+        PADDLE_ENFORCE_EQ(W % (blocksize), 0,
+                          "Input Width of Op(space_to_depth) should be "
+                          "divisible of the square of "
+                          "Attr(blocksize).");
       }
     }
 
@@ -84,9 +106,14 @@ class SpaceToDepthOp : public framework::OperatorWithKernel {
 
     std::vector<int64_t> output_shape(4, 0);  // [B,C,H,W]
     output_shape[0] = x_dims[0];
-    output_shape[1] = x_dims[1] * blocksize * blocksize;
-    output_shape[2] = x_dims[2] / blocksize;
-    output_shape[3] = x_dims[3] / blocksize;
+    output_shape[1] =
+        (data_layout == DataLayout::kNCHW ? C * blocksize * blocksize
+                                          : H / blocksize);
+    output_shape[2] =
+        (data_layout == DataLayout::kNCHW ? H / blocksize : W / blocksize);
+    output_shape[3] =
+        (data_layout == DataLayout::kNCHW ? W / blocksize
+                                          : C * blocksize * blocksize);
 
     auto out_dims = framework::make_ddim(output_shape);
 
@@ -115,6 +142,9 @@ class SpaceToDepthOpMaker : public framework::OpProtoAndCheckerMaker {
         "(int64_t, default 2) blocksize used to do change Space To Depth.")
         .SetDefault(2)
         .GreaterThan(1);
+    AddAttr<std::string>("data_format",
+                         "An optional string from: \"NHWC\", \"NCHW\". ")
+        .SetDefault("NCHW");
     AddComment(R"DOC(
         reorg operator used in Yolo v2.
         The equation is: C2 = C1/blocksize * blocksize, W2 = W1 * blocksize + offset % blocksize, H2 = H1 * blocksize + offset / blocksize,

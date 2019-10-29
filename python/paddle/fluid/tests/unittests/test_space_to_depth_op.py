@@ -41,15 +41,28 @@ class TestSpaceToDepthOp(OpTest):
                             out_[in_index] = in_[out_index]
 
     def setUp(self):
+        self.data_format = 'NCHW'
         self.init_data()
 
         self.op_type = "space_to_depth"
         self.inputs = {"X": self.x}
-        self.helper(self.x_1d, self.x.shape[3], self.x.shape[2],
-                    self.x.shape[1], self.x.shape[0], self.blocksize,
+        if self.data_format == 'NHWC':
+            x_trans = np.transpose(self.x, (0, 3, 1, 2))
+            self.x_1d = np.reshape(x_trans, self.one_d_len)
+            #print(x_trans, '='*20)
+        else:
+            x_trans = self.x
+        self.helper(self.x_1d, x_trans.shape[3], x_trans.shape[2],
+                    x_trans.shape[1], x_trans.shape[0], self.blocksize,
                     self.forward, self.out_1d)
         self.out = np.reshape(self.out_1d, self.infered_shape)
-        self.attrs = {"blocksize": self.blocksize}
+        #print(self.out, '+'*20)
+        if self.data_format == 'NHWC':
+            self.out = np.transpose(self.out, (0, 2, 3, 1))
+        self.attrs = {
+            "blocksize": self.blocksize,
+            "data_format": self.data_format
+        }
         self.outputs = {"Out": self.out}
 
     def init_data(self):
@@ -75,6 +88,7 @@ class TestSpaceToDepthOp(OpTest):
         self.check_grad_with_place(place, ['X'], 'Out')
 
 
+"""
 class TestSpaceToDepthOpBasic(TestSpaceToDepthOp):
     def init_data(self):
         self.ori_shape = (32, 8, 6, 6)
@@ -129,6 +143,45 @@ class TestSpaceToDepthOpWithNotSquare(TestSpaceToDepthOp):
         self.out = np.zeros(self.infered_shape).astype('float32')
         self.out_1d = np.reshape(self.out, self.one_d_len)
         self.forward = 1
+
+
+class TestSpaceToDepthOpDataformat(TestSpaceToDepthOp):
+    def init_data(self):
+        self.ori_shape = (1, 4, 4, 4) #NHWC
+        self.infered_shape = (1, 16, 2, 2)
+        self.one_d_len = 1 * 16 * 2 * 2
+
+        self.blocksize = 2
+        self.x = np.random.random(self.ori_shape).astype('float32')
+        print(self.x)
+        self.x_1d = np.reshape(self.x, self.one_d_len)
+        self.out = np.zeros(self.infered_shape).astype('float32')
+        self.out_1d = np.reshape(self.out, self.one_d_len)
+        self.forward = 1
+        self.data_format = 'NHWC'
+"""
+
+
+class TestPythonAPI(OpTest):
+    def test_case(self):
+        import paddle.fluid as fluid
+        import numpy as np
+
+        data = fluid.layers.data(
+            name='data',
+            shape=[1, 2, 2, 4],
+            dtype='float32',
+            append_batch_size=False)
+        space_to_depthed = fluid.layers.space_to_depth(
+            x=data, blocksize=2, data_format='NHWC')
+
+        exe = fluid.Executor(fluid.core.CPUPlace())
+        data_np = np.arange(0, 16).reshape((1, 2, 2, 4)).astype('float32')
+        print(data_np)
+        out_main = exe.run(fluid.default_main_program(),
+                           feed={'data': data_np},
+                           fetch_list=[space_to_depthed])
+        print(out_main[0])
 
 
 if __name__ == '__main__':

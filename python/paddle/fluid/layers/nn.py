@@ -15062,16 +15062,17 @@ def maxout(x, groups, name=None):
     return out
 
 
-def space_to_depth(x, blocksize, name=None):
+def space_to_depth(x, blocksize, name=None, data_format='NCHW'):
     """
-    Gives a blocksize to space_to_depth the input LoDtensor with Layout: [batch, channel, height, width]
+    Gives a blocksize to space_to_depth and the input LoDtensor with NCHW or NHWC Layout, where N is batch size,
+    C is the number of channels, H is height and W is width.
 
     This op rearranges blocks of spatial data, into depth. More specifically, this op outputs a copy of \
         theinput LoDtensor where values from the height and width dimensions are moved to the channel \
         dimension.
     The attr blocksize indicates the input block size.
 
-    space_to_depth will reorgnize the elements of input with shape[batch, channel, height, width] \
+    When data format is NCHW, space_to_depth will reorgnize the elements of input with shape[batch, channel, height, width] \
         according to blocksize to construct output with shape \
         [batch, channel * blocksize * blocksize, height/blocksize, width/blocksize]:
 
@@ -15091,6 +15092,7 @@ def space_to_depth(x, blocksize, name=None):
                     [9,  10, 13, 14],
                     [11, 12, 15, 16]]]]
         blocksize = 2
+        data_format = 'NCHW'
 
         then get the output with the shape [1, 4, 2, 2]:
         out.data = [[[[1,   2],  [3,  4]],
@@ -15099,20 +15101,24 @@ def space_to_depth(x, blocksize, name=None):
                      [[13, 14], [15, 16]]]]
 
     Args:
-        x (Variable): The input, which should be 4 dims Tensor or LodTensor, with the shape \
-            [batch, channel, height, width]
+        x (Variable): The input, which should be 4-D Tensor or LodTensor, the data type is float32, 
+            float64 or int64. Its data format is NCHW or NHWC.
         blocksize (int): The blocksize to select the element on each feature map should be > 2
         name(str, optional): For detailed information, please refer \
             to :ref:`api_guide_Name`. Usually name is no need to set and \
             None by default.
+        data_format (str, optional): The data format of the input and output data. An optional string
+            from: `"NCHW"`, `"NHWC"`. When it is `"NCHW"`, the data is stored in the order of:
+            `[batch_size, channels, height, width]`. Default: "NCHW".
 
-    Returns: The output, which should be 4 dims Tensor or LodTensor, with the shape \
-            [batch, channel * blocksize * blocksize, height/blocksize, width/blocksize]
+    Returns: The output, which should be 4-D Tensor or LodTensor, with the same data type and data format 
+        with input Tensor.
 
     Return Type: Variable
 
     Raises:
         TypeError: blocksize type must be int64.
+        ValueError: If `data_format` is neither 'NCHW' nor 'NHWC'.
 
     Examples:
         .. code-block:: python
@@ -15147,6 +15153,10 @@ def space_to_depth(x, blocksize, name=None):
     """
 
     helper = LayerHelper("space_to_depth", **locals())
+    if data_format not in ['NCHW', 'NHWC']:
+        raise ValueError(
+            "Attr(data_format) of Op(space_to_depth) got wrong value: received "
+            + data_format + " but only NCHW or NHWC supported.")
 
     if not (isinstance(blocksize, int)):
         raise ValueError("blocksize must be a python Int")
@@ -15161,7 +15171,8 @@ def space_to_depth(x, blocksize, name=None):
     helper.append_op(
         type="space_to_depth",
         inputs={"X": x},
-        attrs={"blocksize": blocksize},
+        attrs={"blocksize": blocksize,
+               'data_format': data_format},
         outputs={"Out": out})
     return out
 
