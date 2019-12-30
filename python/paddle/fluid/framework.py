@@ -1678,7 +1678,8 @@ class OpProtoHolder(object):
             core.op_proto_and_checker_maker.kOpRoleAttrName(),
             core.op_proto_and_checker_maker.kOpRoleVarAttrName(),
             core.op_proto_and_checker_maker.kOpNameScopeAttrName(),
-            core.op_proto_and_checker_maker.kOpCreationCallstackAttrName()
+            core.op_proto_and_checker_maker.kOpCreationCallstackAttrName(),
+            core.op_proto_and_checker_maker.kOpDeviceAttrName()
         }
 
 
@@ -1785,6 +1786,9 @@ class Operator(object):
 
             namescope_var_name = op_maker.kOpNameScopeAttrName()
             op_attrs[namescope_var_name] = _full_name_scope()
+
+            op_device = op_maker.kOpDeviceAttrName()
+            op_attrs[op_device] = self.block.program._op_device
 
             def find_name(var_list, name):
                 for var_name in var_list:
@@ -2132,9 +2136,6 @@ class Operator(object):
             attr_map[n] = self.attr(n)
 
         return attr_map
-
-    def _set_device(self, device_type):
-        self.desc._set_device(device_type)
 
 
 class Block(object):
@@ -2514,7 +2515,6 @@ class Block(object):
                 outputs=kwargs.get("outputs", None),
                 attrs=kwargs.get("attrs", None))
 
-            self.program._apply_device_type_to_op(op_desc)
             self.ops.append(op)
 
         return op
@@ -3686,6 +3686,13 @@ class Program(object):
         """
         return self.__op_role_var
 
+    @property
+    def _op_device(self):
+        """
+        The device on which operator will be assigned. 
+        """
+        return self._apply_device_type_to_op()
+
     @contextlib.contextmanager
     def _backward_role_guard(self):
         tmp_role = self._current_role
@@ -4518,11 +4525,11 @@ class Program(object):
             for each_var in list(each_block.vars.values()):
                 yield each_var
 
-    def _apply_device_type_to_op(self, op):
+    def _apply_device_type_to_op(self):
         if len(self._device_type_stack) != 0:
             device_type = self._device_type_stack[-1]
             if device_type is not None:
-                op._set_device_type(device_type)
+                return device_type
 
     @signature_safe_contextmanager
     def device_guard(self, device_type):
