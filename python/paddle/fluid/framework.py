@@ -63,6 +63,8 @@ CONTROL_DEP_VAR_PREFIX = core.kControlDepVarName()
 _dygraph_tracer_ = None
 _dygraph_current_expected_place_ = None
 
+_current_device_type = None
+
 
 def require_version(min_version, max_version=None):
     """
@@ -1787,8 +1789,9 @@ class Operator(object):
             namescope_var_name = op_maker.kOpNameScopeAttrName()
             op_attrs[namescope_var_name] = _full_name_scope()
 
-            op_device = op_maker.kOpDeviceAttrName()
-            op_attrs[op_device] = self.block.program._op_device
+            if _current_device_type is not None:
+                op_device = op_maker.kOpDeviceAttrName()
+                op_attrs[op_device] = _current_device_type
 
             def find_name(var_list, name):
                 for var_name in var_list:
@@ -3651,9 +3654,6 @@ class Program(object):
         # appending gradients times
         self._appending_grad_times = 0
 
-        # a stack to store device type
-        self._device_type_stack = []
-
     @property
     def _op_role(self):
         """
@@ -3691,7 +3691,7 @@ class Program(object):
         """
         The device on which operator will be assigned. 
         """
-        return self._apply_device_type_to_op()
+        return _current_device_type
 
     @contextlib.contextmanager
     def _backward_role_guard(self):
@@ -4531,26 +4531,6 @@ class Program(object):
             if device_type is not None:
                 return device_type
 
-    @signature_safe_contextmanager
-    def device_guard(self, device_type):
-        """
-        Returns a context manager that specifies the device type to use.
-
-        Args:
-        device_type(str): Specify the device type to use inside `"with"` statement. 
-            Wnen it is set to "cpu" or "gpu", all operations constructed 
-            inside `"with"` statement will be placed on CPU or CUDAPlace to execute. 
-            ToDO: add more information for usage
-        """
-        self._device_type_stack.append(device_type)
-        old_top_of_stack = self._device_type_stack[-1]
-        yield
-        new_top_of_stack = self._device_type_stack[-1]
-        if old_top_of_stack is not new_top_of_stack:
-            raise Exception(
-                "Exiting device scope without proper scope nesting.")
-        self._device_type_stack.pop()
-
 
 @six.add_metaclass(ParameterMetaClass)
 class Parameter(Variable):
@@ -5004,15 +4984,24 @@ def load_op_library(lib_filename):
     OpProtoHolder.instance().update_op_proto()
 
 
+def switch_device_type(device_type):
+    global _current_device_type
+    pre_device_type = _current_device_type
+    _current_device_type = device_type
+    return pre_device_type
+
+
+@signature_safe_contextmanager
 def device_guard(device_type):
     """
     Returns a context manager that specifies the device type to use.
 
     Args:
-        device_type(str): Specify the device type to use inside `"with"` statement. 
-            Wnen it is set to "cpu" or "gpu", all operations constructed 
-            inside `"with"` statement will be placed on CPU or CUDAPlace to execute. 
-            ToDO: add more information for usage
-        
+    device_type(str): Specify the device type to use inside `"with"` statement.
+        Wnen it is set to "cpu" or "gpu", all operations constructed
+        inside `"with"` statement will be placed on CPU or CUDAPlace to execute.
+        ToDO: add more information for usage
     """
-    return _main_program_.device_guard(device_type)
+    pre_device = switch_device_type(device_type)
+    yield
+    switch_device_type(pre_device)
