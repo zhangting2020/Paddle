@@ -38,6 +38,7 @@ from paddle.fluid.layers import tensor
 from functools import reduce
 from .wrapped_decorator import signature_safe_contextmanager
 from .. import compat as cpt
+from .framework import device_guard
 
 __all__ = [
     'SGD', 'Momentum', 'Adagrad', 'Adam', 'Adamax', 'Dpsgd', 'DecayedAdagrad',
@@ -401,6 +402,18 @@ class Optimizer(object):
                             format(name, param.name))
         return self._accumulators[name][param.name]
 
+    def _get_device_for_optimize_op(self, param, target_block):
+        param_name = param.name
+        ops = target_block.ops
+        op_device = None
+        for op in ops:
+            input_arg_names = op.input_arg_names
+            if param_name in input_arg_names:
+                op_device_attr_name = core.op_proto_and_checker_maker.kOpDeviceAttrName(
+                )
+                op_device = op.attr(op_device_attr_name)
+        return op_device
+
     def _create_optimization_pass(self, parameters_and_grads):
         """Add optimization operators to update gradients to variables.
 
@@ -459,9 +472,12 @@ class Optimizer(object):
                 with param_and_grad[0].block.program._optimized_guard(
                         param_and_grad), name_scope("optimizer"):
                     if param_and_grad[0].trainable is True:
-                        optimize_op = self._append_optimize_op(target_block,
-                                                               param_and_grad)
-                        optimize_ops.append(optimize_op)
+                        op_device = self._get_device_for_optimize_op(
+                            param_and_grad[0], target_block)
+                        with device_guard(op_device):
+                            optimize_op = self._append_optimize_op(
+                                target_block, param_and_grad)
+                            optimize_ops.append(optimize_op)
 
         # Get custom finish ops for subclasses
         # FIXME: Need to fix this once we figure out how to handle dependencies
