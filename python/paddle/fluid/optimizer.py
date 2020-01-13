@@ -409,9 +409,7 @@ class Optimizer(object):
         for op in ops:
             input_arg_names = op.input_arg_names
             if param_name in input_arg_names:
-                op_device_attr_name = core.op_proto_and_checker_maker.kOpDeviceAttrName(
-                )
-                op_device = op.attr(op_device_attr_name)
+                op_device = op.op_device
         return op_device
 
     def _create_optimization_pass(self, parameters_and_grads):
