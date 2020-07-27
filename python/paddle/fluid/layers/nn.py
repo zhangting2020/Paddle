@@ -5110,7 +5110,63 @@ def matmul(x, y, transpose_x=False, transpose_y=False, alpha=1.0, name=None):
             y = fluid.layers.data(name='y', shape=[3, 2], dtype='float32')
             out = fluid.layers.matmul(x, y, True, True)
     """
-    return paddle.matmul(x, y, transpose_x, transpose_y, alpha, name)
+
+    def find_not_multiples_of_8_dims(shape):
+        not_multiples_of_8_dims = []
+        pad_dim1 = False
+        pad_dim2 = False
+        if shape[-2] % 8 != 0:
+            not_multiples_of_8_dims.append(len(shape) - 2)
+            pad_dim1 = True
+        if shape[-1] % 8 != 0:
+            not_multiples_of_8_dims.append(len(shape) - 1)
+            pad_dim2 = True
+        return not_multiples_of_8_dims, pad_dim1, pad_dim2
+
+    def make_paddings(dims, shape):
+        paddings = [0] * 2 * len(shape)
+        for i in range(len(shape)):
+            if i in dims:
+                paddings[2 * i + 1] = 8 - shape[i] % 8
+        return paddings
+
+    x_shape = list(x.shape)
+    y_shape = list(y.shape)
+    x_dims_to_padding, pad_M, pad_xK = find_not_multiples_of_8_dims(x_shape)
+    y_dims_to_padding, pad_yK, pad_N = find_not_multiples_of_8_dims(y_shape)
+    if len(x_dims_to_padding) != 0:
+        x_paddings = make_paddings(x_dims_to_padding, x_shape)
+        x = pad(x, paddings=x_paddings, pad_value=0.0, name=None)
+    if len(y_dims_to_padding) != 0:
+        y_paddings = make_paddings(y_dims_to_padding, y_shape)
+        y = pad(y, paddings=y_paddings, pad_value=0.0, name=None)
+
+    out = paddle.matmul(x, y, transpose_x, transpose_y, alpha, name)
+
+    axe = []
+    start = []
+    end = []
+    if pad_M:
+        if not transpose_x:
+            axe.append(len(x_shape) - 2)
+            start.append(0)
+            end.append(x_shape[-2])
+    if pad_xK and transpose_x:
+        axe.append(len(x_shape) - 2)
+        start.append(0)
+        end.append(x_shape[-1])
+    if pad_N:
+        if not transpose_y:
+            axe.append(len(x_shape) - 1)
+            start.append(0)
+            end.append(x_shape[-1])
+    if pad_yK and transpose_y:
+        axe.append(len(y_shape) - 1)
+        start.append(0)
+        end.append(y_shape[-2])
+    if len(axe) != 0:
+        out = slice(out, axes=axe, starts=start, ends=end)
+    return out
 
 
 def topk(input, k, name=None):
