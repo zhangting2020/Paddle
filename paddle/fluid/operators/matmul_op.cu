@@ -17,7 +17,7 @@
 
 namespace ops = paddle::operators;
 REGISTER_OP_CUDA_KERNEL(
-    matmul, ops::MatMulKernel<paddle::platform::CUDADeviceContext, float>,
+    matmul, ops::MatMulGPUKernel<paddle::platform::CUDADeviceContext, float>,
     ops::MatMulGPUKernel<paddle::platform::CUDADeviceContext, double>,
     ops::MatMulGPUKernel<paddle::platform::CUDADeviceContext,
                          paddle::platform::float16>);

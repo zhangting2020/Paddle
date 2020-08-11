@@ -64,8 +64,8 @@ static framework::DDim ColumnMatrixFromVector(const framework::DDim &y_dim) {
 static void GetPaddingDims(const framework::DDim &tensor_dim, bool *pad_row,
                            bool *pad_col) {
   if (tensor_dim.size() > 1) {
-    if (tensor_dim[tensor_dim.size() - 1] % 8 != 0) *pad_row = true;
-    if (tensor_dim[tensor_dim.size() - 2] % 8 != 0) *pad_col = true;
+    if (tensor_dim[tensor_dim.size() - 1] % 8 != 0) *pad_col = true;
+    if (tensor_dim[tensor_dim.size() - 2] % 8 != 0) *pad_row = true;
   }
 }
 
@@ -163,7 +163,9 @@ class MatMulGPUKernel : public framework::OpKernel<T> {
         framework::make_ddim(framework::vectorize(out->dims()));
     if (pad_x_row || pad_x_col) {
       if (pad_x_row && transpose_x) pad_x_col = false;
+      if (pad_x_row && !transpose_x) pad_x_row = false;
       if (pad_x_col && !transpose_x) pad_x_row = false;
+      if (pad_x_col && transpose_x) pad_x_col = false;
 
       framework::DDim pad_x_dim;
       std::vector<int> paddings(x.dims().size() * 2, 0);
@@ -227,6 +229,7 @@ class MatMulGPUKernel : public framework::OpKernel<T> {
     VLOG(3) << "===========slice output=============";
     // slice output
     if ((pad_y_col && !transpose_y) || (pad_y_row && transpose_y)) {
+      out->mutable_data<T>(context.GetPlace());
       auto &dev_ctx = context.template device_context<DeviceContext>();
       math::Slice<DeviceContext, T> slice;
       slice(dev_ctx, pad_out, out);
