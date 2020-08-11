@@ -31,6 +31,13 @@ template struct SetConstant<platform::CUDADeviceContext, int>;
 template struct SetConstant<platform::CUDADeviceContext, int64_t>;
 template struct SetConstant<platform::CUDADeviceContext, bool>;
 
+template struct Slice<platform::CUDADeviceContext, platform::float16>;
+template struct Slice<platform::CUDADeviceContext, float>;
+template struct Slice<platform::CUDADeviceContext, double>;
+template struct Slice<platform::CUDADeviceContext, int>;
+template struct Slice<platform::CUDADeviceContext, int64_t>;
+template struct Slice<platform::CUDADeviceContext, bool>;
+
 #define DEFINE_GPU_TRANS(RANK)                                           \
   template struct Transpose<platform::CUDADeviceContext, float, RANK>;   \
   template struct Transpose<platform::CUDADeviceContext, double, RANK>;  \
