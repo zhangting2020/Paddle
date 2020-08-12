@@ -41,13 +41,6 @@ template struct SetConstant<platform::CPUDeviceContext, int64_t>;
 template struct SetConstant<platform::CPUDeviceContext, bool>;
 template struct SetConstant<platform::CPUDeviceContext, uint8_t>;
 
-template struct Slice<platform::CPUDeviceContext, float>;
-template struct Slice<platform::CPUDeviceContext, double>;
-template struct Slice<platform::CPUDeviceContext, int>;
-template struct Slice<platform::CPUDeviceContext, int64_t>;
-template struct Slice<platform::CPUDeviceContext, bool>;
-template struct Slice<platform::CPUDeviceContext, uint8_t>;
-
 #define DEFINE_CPU_TRANS(RANK)                                             \
   template struct Transpose<platform::CPUDeviceContext, platform::float16, \
                             RANK>;                                         \

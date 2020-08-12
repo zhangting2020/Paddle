@@ -197,8 +197,8 @@ def inject_test(dim_x, dim_y, trans_x, trans_y):
     })
 
 
-for dim_X in (1, 2, 3):
-    for dim_Y in (1, 2, 3):
+for dim_X in (2, 3):
+    for dim_Y in (2, 3):
         for transose_x in (False, True):
             for transose_y in (False, True):
                 inject_test(dim_X, dim_Y, transose_x, transose_y)
@@ -227,7 +227,7 @@ def generate_compatible_shapes(dim, transpose_X, transpose_Y):
 
 
 # # Test case n-dim
-for dim in [4]:
+for dim in [2, 3, 4]:
     for transpose_X in [False, True]:
         for transpose_Y in [False, True]:
             test_name = (

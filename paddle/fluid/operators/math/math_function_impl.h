@@ -31,18 +31,6 @@ void SetConstant<DeviceContext, T>::operator()(const DeviceContext& context,
   t.device(*context.eigen_device()) = t.constant(static_cast<T>(num));
 }
 
-template <typename DeviceContext, typename T>
-void Slice<DeviceContext, T>::operator()(const DeviceContext& context,
-                                         const framework::Tensor& in,
-                                         framework::Tensor* out) {
-  auto in_t = framework::EigenMatrix<T>::Reshape(in, in.dims().size() - 1);
-  auto out_t = framework::EigenMatrix<T>::Reshape(*out, out->dims().size() - 1);
-  auto offsets = Eigen::array<int64_t, 2>({0, 0});
-  auto extents = Eigen::array<int64_t, 2>({out->dims()[0], out->dims()[1]});
-
-  out_t.device(*context.eigen_device()) = in_t.slice(offsets, extents);
-}
-
 template <typename DeviceContext, typename T, int Rank>
 void Transpose<DeviceContext, T, Rank>::operator()(
     const DeviceContext& context, const framework::Tensor& in,

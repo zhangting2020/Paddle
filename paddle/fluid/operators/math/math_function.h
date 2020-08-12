@@ -33,12 +33,6 @@ struct Transpose {
 };
 
 template <typename DeviceContext, typename T>
-struct Slice {
-  void operator()(const DeviceContext& context, const framework::Tensor& in,
-                  framework::Tensor* out);
-};
-
-template <typename DeviceContext, typename T>
 struct SetConstant {
   void operator()(const DeviceContext& context, framework::Tensor* tensor,
                   T num);

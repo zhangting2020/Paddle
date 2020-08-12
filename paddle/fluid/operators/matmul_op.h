@@ -20,8 +20,8 @@ limitations under the License. */
 #include <vector>
 #include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/operators/math/blas.h"
-#include "paddle/fluid/operators/math/math_function.h"
 #include "paddle/fluid/operators/math/padding.h"
+#include "paddle/fluid/operators/math/slice.h"
 #ifdef PADDLE_WITH_MKLDNN
 #include "paddle/fluid/platform/mkldnn_helper.h"
 #endif
@@ -88,7 +88,7 @@ static void GetPaddingsAndNewDims(const framework::DDim &in_dims, bool pad_row,
 }
 
 template <typename DeviceContext, typename T>
-class MatMulCPUKernel : public framework::OpKernel<T> {
+class MatMulKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext &context) const override {
     auto &x = GET_DATA_SAFELY(context.Input<framework::Tensor>("X"), "Input",
@@ -131,111 +131,6 @@ class MatMulCPUKernel : public framework::OpKernel<T> {
 #else
     blas.MatMul(x, mat_dim_a, y, mat_dim_b, scale, out, T(0));
 #endif
-  }
-};
-
-template <typename DeviceContext, typename T>
-class MatMulGPUKernel : public framework::OpKernel<T> {
- public:
-  void Compute(const framework::ExecutionContext &context) const override {
-    auto &x = GET_DATA_SAFELY(context.Input<framework::Tensor>("X"), "Input",
-                              "X", "MatMul");
-    auto &y = GET_DATA_SAFELY(context.Input<framework::Tensor>("Y"), "Input",
-                              "Y", "MatMul");
-    auto *out = context.Output<framework::Tensor>("Out");
-    // out->mutable_data<T>(context.GetPlace());
-
-    VLOG(3) << "x: " << x.dims();
-    VLOG(3) << "y: " << y.dims();
-    VLOG(3) << "out: " << out->dims();
-    bool pad_x_row = false;
-    bool pad_x_col = false;
-    bool pad_y_row = false;
-    bool pad_y_col = false;
-    GetPaddingDims(x.dims(), &pad_x_row, &pad_x_col);
-    GetPaddingDims(y.dims(), &pad_y_row, &pad_y_col);
-    bool transpose_x = context.Attr<bool>("transpose_X");
-    bool transpose_y = context.Attr<bool>("transpose_Y");
-    framework::Tensor pad_x;
-    framework::Tensor pad_y;
-    framework::Tensor pad_out;
-    framework::DDim pad_out_dim =
-        framework::make_ddim(framework::vectorize(out->dims()));
-    if (pad_x_row || pad_x_col) {
-      if (pad_x_row && transpose_x) pad_x_col = false;
-      if (pad_x_row && !transpose_x) pad_x_row = false;
-      if (pad_x_col && !transpose_x) pad_x_row = false;
-      if (pad_x_col && transpose_x) pad_x_col = false;
-
-      framework::DDim pad_x_dim;
-      std::vector<int> paddings(x.dims().size() * 2, 0);
-      GetPaddingsAndNewDims(x.dims(), pad_x_row, pad_x_col, &paddings,
-                            &pad_x_dim);
-      pad_x.mutable_data<T>(pad_x_dim, context.GetPlace());
-      math::PaddingFunctor<DeviceContext, T>(x.dims().size(), context, paddings,
-                                             static_cast<T>(0.), x, &pad_x);
-      VLOG(3) << "pad_x: " << pad_x.dims();
-    } else {
-      pad_x = x;
-    }
-    if (pad_y_row || pad_y_col) {
-      framework::DDim pad_y_dim;
-      std::vector<int> paddings(y.dims().size() * 2, 0);
-      GetPaddingsAndNewDims(y.dims(), pad_y_row, pad_y_col, &paddings,
-                            &pad_y_dim);
-      pad_y.mutable_data<T>(pad_y_dim, context.GetPlace());
-      math::PaddingFunctor<DeviceContext, T>(y.dims().size(), context, paddings,
-                                             static_cast<T>(0.), y, &pad_y);
-      VLOG(3) << "pad_y: " << pad_y.dims();
-      // if padding dimension is N, the out dims will be changed.
-      if (pad_y_col && !transpose_y) {
-        pad_out_dim[out->dims().size() - 1] =
-            pad_y.dims()[pad_y.dims().size() - 1];
-        VLOG(3) << "pad_out: " << pad_out_dim;
-      } else if (pad_y_row && transpose_y) {
-        VLOG(3) << "===========pad out=============";
-        pad_out_dim[out->dims().size() - 1] =
-            pad_y.dims()[pad_y.dims().size() - 2];
-        VLOG(3) << "pad_out: " << pad_out_dim;
-      } else {
-        pad_out = *out;
-      }
-    } else {
-      pad_y = y;
-      pad_out = *out;
-    }
-    pad_out.mutable_data<T>(pad_out_dim, context.GetPlace());
-
-    auto blas = math::GetBlas<DeviceContext, T>(context);
-    auto mat_dim_a =
-        math::CreateMatrixDescriptor(RowMatrixFromVector(pad_x.dims()), 0,
-                                     context.Attr<bool>("transpose_X"));
-    auto mat_dim_b =
-        math::CreateMatrixDescriptor(ColumnMatrixFromVector(pad_y.dims()), 0,
-                                     context.Attr<bool>("transpose_Y"));
-    auto scale = static_cast<T>(context.Attr<float>("alpha"));
-
-    int head_number = 1;
-    const auto &x_dims = pad_x.dims();
-    const auto &y_dims = pad_y.dims();
-    if (head_number <= 1 && x_dims.size() == 3 && y_dims.size() <= 2) {
-      // the transpose_X must be false, if is true, the transpose cost much time
-      if (!context.Attr<bool>("transpose_X")) {
-        mat_dim_a.height_ *= mat_dim_a.batch_size_;
-        mat_dim_a.batch_size_ = 0;
-      }
-    }
-    blas.MatMul(pad_x, mat_dim_a, pad_y, mat_dim_b, scale, &pad_out, T(0));
-    VLOG(3) << "===========slice output=============";
-    // slice output
-    if ((pad_y_col && !transpose_y) || (pad_y_row && transpose_y)) {
-      out->mutable_data<T>(context.GetPlace());
-      auto &dev_ctx = context.template device_context<DeviceContext>();
-      math::Slice<DeviceContext, T> slice;
-      slice(dev_ctx, pad_out, out);
-    } else {
-      *out = pad_out;
-    }
   }
 };
 
