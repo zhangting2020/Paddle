@@ -134,63 +134,39 @@ class MatMulFP16Kernel : public framework::OpKernel<T> {
     auto& y = GET_DATA_SAFELY(context.Input<framework::Tensor>("Y"), "Input",
                               "Y", "MatMul");
     auto* out = context.Output<framework::Tensor>("Out");
-    // out->mutable_data<T>(context.GetPlace());
 
-    VLOG(3) << "x: " << x.dims();
-    VLOG(3) << "y: " << y.dims();
-    VLOG(3) << "out: " << out->dims();
     bool pad_x_row = false;
     bool pad_x_col = false;
     bool pad_y_row = false;
     bool pad_y_col = false;
-    GetPaddingDims(x.dims(), &pad_x_row, &pad_x_col);
-    GetPaddingDims(y.dims(), &pad_y_row, &pad_y_col);
     bool transpose_x = context.Attr<bool>("transpose_X");
     bool transpose_y = context.Attr<bool>("transpose_Y");
+    IsPaddingDims(x.dims(), &pad_x_row, &pad_x_col, transpose_x, true);
+    IsPaddingDims(y.dims(), &pad_y_row, &pad_y_col, transpose_y, false);
     framework::Tensor pad_x;
     framework::Tensor pad_y;
     framework::Tensor pad_out;
     framework::DDim pad_out_dim =
         framework::make_ddim(framework::vectorize(out->dims()));
     if (pad_x_row || pad_x_col) {
-      if (pad_x_row && transpose_x) pad_x_col = false;
-      if (pad_x_row && !transpose_x) pad_x_row = false;
-      if (pad_x_col && !transpose_x) pad_x_row = false;
-      if (pad_x_col && transpose_x) pad_x_col = false;
-
       framework::DDim pad_x_dim;
-      std::vector<int> paddings(x.dims().size() * 2, 0);
-      GetPaddingsAndNewDims(x.dims(), pad_x_row, pad_x_col, &paddings,
-                            &pad_x_dim);
+      GetNewDims(x.dims(), pad_x_row, pad_x_col, &pad_x_dim);
       pad_x.mutable_data<T>(pad_x_dim, context.GetPlace());
-      /*
-      math::PaddingFunctor<DeviceContext, T>(x.dims().size(), context, paddings,
-                                             static_cast<T>(0.), x, &pad_x);
-      */
       PadFunction<DeviceContext, T>(context, x, &pad_x);
-      VLOG(3) << "pad_x: " << pad_x.dims() << " padding[0]:" << paddings[0];
     } else {
       pad_x = x;
     }
     if (pad_y_row || pad_y_col) {
       framework::DDim pad_y_dim;
-      std::vector<int> paddings(y.dims().size() * 2, 0);
-      GetPaddingsAndNewDims(y.dims(), pad_y_row, pad_y_col, &paddings,
-                            &pad_y_dim);
+      GetNewDims(y.dims(), pad_y_row, pad_y_col, &pad_y_dim);
       pad_y.mutable_data<T>(pad_y_dim, context.GetPlace());
-      /*
-      math::PaddingFunctor<DeviceContext, T>(y.dims().size(), context, paddings,
-                                             static_cast<T>(0.), y, &pad_y);
-      */
       PadFunction<DeviceContext, T>(context, y, &pad_y);
-      VLOG(3) << "pad_y: " << pad_y.dims() << " padding[0]:" << paddings[0];
       // if padding dimension is N, the out dims will be changed.
       if (pad_y_col && !transpose_y) {
         pad_out_dim[out->dims().size() - 1] =
             pad_y.dims()[pad_y.dims().size() - 1];
         VLOG(3) << "pad_out: " << pad_out_dim;
       } else if (pad_y_row && transpose_y) {
-        VLOG(3) << "===========pad out=============";
         pad_out_dim[out->dims().size() - 1] =
             pad_y.dims()[pad_y.dims().size() - 2];
         VLOG(3) << "pad_out: " << pad_out_dim;
@@ -226,15 +202,12 @@ class MatMulFP16Kernel : public framework::OpKernel<T> {
     // slice output
     if ((pad_y_col && !transpose_y) || (pad_y_row && transpose_y)) {
       VLOG(3) << "===========slice output=============";
-
       std::vector<int> offsets(out->dims().size(), 0);
       std::vector<int> extents;
       for (int i = 0; i < out->dims().size(); ++i) {
         extents.push_back(out->dims()[i]);
       }
-
       out->mutable_data<T>(context.GetPlace());
-
       math::SliceFunctor<DeviceContext, T>(out->dims().size(), context, offsets,
                                            extents, pad_out, out);
 

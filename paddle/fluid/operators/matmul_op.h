@@ -61,29 +61,36 @@ static framework::DDim ColumnMatrixFromVector(const framework::DDim &y_dim) {
   return framework::make_ddim({y_dim[0], 1});
 }
 
-static void GetPaddingDims(const framework::DDim &tensor_dim, bool *pad_row,
-                           bool *pad_col) {
+static void IsPaddingDims(const framework::DDim &tensor_dim, bool *pad_row,
+                          bool *pad_col, bool transpose, bool is_x) {
   if (tensor_dim.size() > 1) {
     if (tensor_dim[tensor_dim.size() - 1] % 8 != 0) *pad_col = true;
     if (tensor_dim[tensor_dim.size() - 2] % 8 != 0) *pad_row = true;
+    // TensorCore requires the dim N and K are multiples of 8
+    // For x: [M, K], the dim M does not need to be padded.
+    if (is_x) {
+      if ((*pad_row && transpose) || (*pad_col && transpose)) {
+        *pad_col = false;
+      }
+      if ((*pad_row && !transpose) || (*pad_col && !transpose)) {
+        *pad_row = false;
+      }
+    }
   }
 }
 
-static void GetPaddingsAndNewDims(const framework::DDim &in_dims, bool pad_row,
-                                  bool pad_col, std::vector<int> *paddings,
-                                  framework::DDim *new_dims) {
+static void GetNewDims(const framework::DDim &in_dims, bool pad_row,
+                       bool pad_col, framework::DDim *new_dims) {
   int dim_size = in_dims.size();
   std::vector<int64_t> new_dims_vec = framework::vectorize(in_dims);
   *new_dims = framework::make_ddim(new_dims_vec);
   if (pad_row) {
-    (*paddings)[(dim_size - 2) * 2 + 1] = 8 - in_dims[dim_size - 2] % 8;
     (*new_dims)[dim_size - 2] =
-        in_dims[dim_size - 2] + (*paddings)[(dim_size - 2) * 2 + 1];
+        in_dims[dim_size - 2] + 8 - in_dims[dim_size - 2] % 8;
   }
   if (pad_col) {
-    (*paddings)[(dim_size - 1) * 2 + 1] = 8 - in_dims[dim_size - 1] % 8;
     (*new_dims)[dim_size - 1] =
-        in_dims[dim_size - 1] + (*paddings)[(dim_size - 1) * 2 + 1];
+        in_dims[dim_size - 1] + 8 - in_dims[dim_size - 1] % 8;
   }
 }
 
