@@ -21,6 +21,7 @@ namespace operators {
 
 using platform::PADDLE_CUDA_NUM_THREADS;
 
+/*
 template <typename T>
 __global__ void SetInputData(const int nthreads, const T* in_data,
                              const int in_height, const int in_width,
@@ -32,6 +33,29 @@ __global__ void SetInputData(const int nthreads, const T* in_data,
     const int in_h = nc % in_height;
     nc /= in_height;
     out_data[(nc * out_height + in_h) * out_width + in_w] = in_data[index];
+  }
+}
+*/
+
+__global__ void SetInputData(const int N, const half2* in_data,
+                             const int in_height, const int in_width,
+                             const int out_height, const int out_width,
+                             half2* out_data) {
+  int64_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  for (int i = index; i < N / 2; i += blockDim.x * gridDim.x) {
+    int nc = i / in_width;
+    const int in_w = i % in_width;
+    const int in_h = nc % in_height;
+    nc /= in_height;
+    out_data[(nc * out_height + in_h) * out_width + in_w] = in_data[i];
+  }
+  // in only one thread, process final element (if there is one)
+  if (index == N / 2 && N % 2 == 1) {
+    int nc = N / in_width;
+    const int in_w = N % in_width;
+    const int in_h = nc % in_height;
+    nc /= in_height;
+    out_data[(nc * out_height + in_h) * out_width + in_w] = in_data[N - 1];
   }
 }
 
@@ -81,8 +105,10 @@ void PadFunction(const framework::ExecutionContext& context,
   int block = PADDLE_CUDA_NUM_THREADS;
   const int in_size = in.numel();
   int grid = (in_size + block - 1) / block;
-  SetInputData<T><<<grid, block, 0, stream>>>(
-      in_size, in_data, in_height, in_width, out_height, out_width, out_data);
+  const half2* in_data2 = reinterpret_cast<const half2*>(in_data);
+  half2* out_data2 = reinterpret_cast<half2*>(out_data);
+  SetInputData<<<grid, block, 0, stream>>>(
+      in_size, in_data2, in_height, in_width, out_height, out_width, out_data2);
 }
 
 template <typename DeviceContext, typename T>
