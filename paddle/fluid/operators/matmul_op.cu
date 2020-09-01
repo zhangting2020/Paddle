@@ -21,26 +21,9 @@ namespace operators {
 
 using platform::PADDLE_CUDA_NUM_THREADS;
 
-/*
-template <typename T>
-__global__ void SetInputData(const int nthreads, const T* in_data,
-                             const int in_height, const int in_width,
-                             const int out_height, const int out_width,
-                             T* out_data) {
-  CUDA_KERNEL_LOOP(index, nthreads) {
-    int nc = index / in_width;
-    const int in_w = index % in_width;
-    const int in_h = nc % in_height;
-    nc /= in_height;
-    out_data[(nc * out_height + in_h) * out_width + in_w] = in_data[index];
-  }
-}
-*/
-
-__global__ void SetInputData(const int N, const half2* in_data,
-                             const int in_height, const int in_width,
-                             const int out_height, const int out_width,
-                             half2* out_data) {
+__global__ void FillData(const int N, const half2* in_data, const int in_height,
+                         const int in_width, const int out_height,
+                         const int out_width, half2* out_data) {
   int64_t index = blockIdx.x * blockDim.x + threadIdx.x;
   for (int i = index; i < N / 2; i += blockDim.x * gridDim.x) {
     int nc = i / in_width;
@@ -59,33 +42,24 @@ __global__ void SetInputData(const int N, const half2* in_data,
   }
 }
 
-template <typename T>
-__global__ void Pad2DConstNCHW(const int nthreads, const T* in_data,
-                               const int in_height, const int in_width,
-                               const int out_height, const int out_width,
-                               T value, T* out_data) {
-  CUDA_KERNEL_LOOP(index, nthreads) {
-    int nc = index / out_width;
-    const int out_w = index % out_width;
-    const int out_h = nc % out_height;
-    nc /= out_height;
-    out_data[index] =
-        (out_h >= in_height || out_w >= in_width)
-            ? value
-            : in_data[(nc * in_height + out_h) * in_width + out_w];
-  }
-}
-
-template <typename T>
-__global__ void Slice(const int nthreads, const T* in_data, const int in_height,
+__global__ void Slice(const int N, const half2* in_data, const int in_height,
                       const int in_width, const int out_height,
-                      const int out_width, T* out_data) {
-  CUDA_KERNEL_LOOP(index, nthreads) {
-    int nc = index / out_width;
-    const int out_w = index % out_width;
+                      const int out_width, half2* out_data) {
+  int64_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  for (int i = index; i < N / 2; i += blockDim.x * gridDim.x) {
+    int nc = i / out_width;
+    const int out_w = i % out_width;
     const int out_h = nc % out_height;
     nc /= out_height;
-    out_data[index] = in_data[(nc * in_height + out_h) * in_width + out_w];
+    out_data[i] = in_data[(nc * in_height + out_h) * in_width + out_w];
+  }
+  // in only one thread, process final element (if there is one)
+  if (index == N / 2 && N % 2 == 1) {
+    int nc = N / out_width;
+    const int out_w = N % out_width;
+    const int out_h = nc % out_height;
+    nc /= out_height;
+    out_data[N - 1] = in_data[(nc * in_height + out_h) * in_width + out_w];
   }
 }
 
@@ -107,29 +81,8 @@ void PadFunction(const framework::ExecutionContext& context,
   int grid = (in_size + block - 1) / block;
   const half2* in_data2 = reinterpret_cast<const half2*>(in_data);
   half2* out_data2 = reinterpret_cast<half2*>(out_data);
-  SetInputData<<<grid, block, 0, stream>>>(
-      in_size, in_data2, in_height, in_width, out_height, out_width, out_data2);
-}
-
-template <typename DeviceContext, typename T>
-void PadFunction2(const framework::ExecutionContext& context,
-                  const framework::Tensor& in, framework::Tensor* out) {
-  const int in_dim_size = in.dims().size();
-  const int out_dim_size = out->dims().size();
-  const T* in_data = in.data<T>();
-  T* out_data = out->data<T>();
-  const int in_height = in.dims()[in_dim_size - 2];
-  const int in_width = in.dims()[in_dim_size - 1];
-  const int out_height = out->dims()[out_dim_size - 2];
-  const int out_width = out->dims()[out_dim_size - 1];
-
-  auto stream = context.cuda_device_context().stream();
-  int block = PADDLE_CUDA_NUM_THREADS;
-  const int out_size = out->numel();
-  int grid = (out_size + block - 1) / block;
-  Pad2DConstNCHW<T><<<grid, block, 0, stream>>>(out_size, in_data, in_height,
-                                                in_width, out_height, out_width,
-                                                T(0), out_data);
+  FillData<<<grid, block, 0, stream>>>(in_size, in_data2, in_height, in_width,
+                                       out_height, out_width, out_data2);
 }
 
 template <typename DeviceContext, typename T>
@@ -146,9 +99,11 @@ void SliceFunction(const framework::ExecutionContext& context,
   auto stream = context.cuda_device_context().stream();
   int block = PADDLE_CUDA_NUM_THREADS;
   const int out_size = out->numel();
-  int grid = (out_size + block - 1) / block;
-  Slice<T><<<grid, block, 0, stream>>>(out_size, in_data, in_height, in_width,
-                                       out_height, out_width, out_data);
+  int grid = (out_size / 2 + block - 1) / block;
+  const half2* in_data2 = reinterpret_cast<const half2*>(in_data);
+  half2* out_data2 = reinterpret_cast<half2*>(out_data);
+  Slice<<<grid, block, 0, stream>>>(out_size, in_data2, in_height, in_width,
+                                    out_height, out_width, out_data2);
 }
 
 template <typename DeviceContext, typename T>
@@ -227,17 +182,17 @@ class MatMulFP16Kernel : public framework::OpKernel<T> {
     blas.MatMul(pad_x, mat_dim_a, pad_y, mat_dim_b, scale, &pad_out, T(0));
     // slice output
     if ((pad_y_col && !transpose_y) || (pad_y_row && transpose_y)) {
-      VLOG(3) << "===========slice output=============";
       std::vector<int> offsets(out->dims().size(), 0);
       std::vector<int> extents;
       for (int i = 0; i < out->dims().size(); ++i) {
         extents.push_back(out->dims()[i]);
       }
       out->mutable_data<T>(context.GetPlace());
-      math::SliceFunctor<DeviceContext, T>(out->dims().size(), context, offsets,
-                                           extents, pad_out, out);
+      // math::SliceFunctor<DeviceContext, T>(out->dims().size(), context,
+      // offsets,
+      //                                      extents, pad_out, out);
 
-      // SliceFunction<DeviceContext, T>(context, pad_out, out);
+      SliceFunction<DeviceContext, T>(context, pad_out, out);
     } else {
       *out = pad_out;
     }
