@@ -351,6 +351,8 @@ void Conv2DOpMaker::Make() {
                 "convolution, whether enable exhaustive search "
                 "for cuDNN convolution or not, default is False.")
       .SetDefault(false);
+  AddAttr<int>("filter_algo", "(int, default 0) cuDNN filter grad algo")
+      .SetDefault(-1);
 
   AddComment(R"DOC(
 Convolution Operator.

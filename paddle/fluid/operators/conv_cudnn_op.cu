@@ -604,6 +604,11 @@ class CUDNNConvGradOpKernel : public framework::OpKernel<T> {
       using search2 = SearchAlgorithm<cudnnConvolutionBwdFilterAlgoPerf_t>;
       filter_algo =
           search2::Find<T>(args2, exhaustive_search, deterministic, ctx);
+      int filter_grad_algo = ctx.Attr<int>("filter_algo");
+      if (filter_grad_algo != -1) {
+        filter_algo =
+            static_cast<cudnnConvolutionBwdFilterAlgo_t>(filter_grad_algo);
+      }
       workspace_size = std::max(workspace_size,
                                 search2::GetWorkspaceSize(args2, filter_algo));
     }

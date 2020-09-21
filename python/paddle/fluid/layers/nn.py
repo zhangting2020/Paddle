@@ -1329,7 +1329,8 @@ def conv2d(input,
            use_cudnn=True,
            act=None,
            name=None,
-           data_format="NCHW"):
+           data_format="NCHW",
+           filter_algo=-1):
     """
     :api_attr: Static Graph
 
@@ -1583,6 +1584,7 @@ def conv2d(input,
             'fuse_relu_before_depthwise_conv': False,
             "padding_algorithm": padding_algorithm,
             "data_format": data_format,
+            "filter_algo": filter_algo
         })
 
     if data_format == 'NCHW':
