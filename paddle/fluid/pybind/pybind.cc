@@ -1443,8 +1443,8 @@ All parameter, weight, gradient are variables in Paddle.
     Examples:
         .. code-block:: python
 
-          import paddle.fluid as fluid
-          cpu_place = fluid.CPUPlace()
+          import paddle
+          cpu_place = paddle.CPUPlace()
 
         )DOC")
       .def(py::init<>())
@@ -1468,8 +1468,8 @@ All parameter, weight, gradient are variables in Paddle.
     Examples:
         .. code-block:: python
 
-          import paddle.fluid as fluid
-          place = fluid.CUDAPinnedPlace()
+          import paddle
+          place = paddle.CUDAPinnedPlace()
 
         )DOC")
       .def("__init__",
