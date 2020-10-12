@@ -1797,6 +1797,8 @@ def fused_bn_add_act(x,
         "Z": y,
         "Scale": scale,
         "Bias": bias,
+        "Mean": mean,
+        "Variance": variance
     }
     attrs = {"epsilon": epsilon, 'momentum': momentum}
 

@@ -20,7 +20,7 @@ from op_test import OpTest
 import paddle
 import paddle.fluid as fluid
 from paddle.fluid import core
-
+paddle.enable_static()
 
 @unittest.skipIf(not core.is_compiled_with_cuda(),
                  "Paddle core is not compiled with CUDA")
@@ -88,7 +88,9 @@ class TestFusedBnAddActAPI(unittest.TestCase):
                 conv1_2,
                 bn,
                 param_attr=self.bn_param_attr2,
-                bias_attr=self.bn_bias_attr2)
+                bias_attr=self.bn_bias_attr2,
+                moving_mean_name="fuse_moving_mean",
+                moving_variance_name="fuse_moving_variance")
             prediction = fluid.layers.fc(input=fused_bn_add_act,
                                          size=10,
                                          act='softmax',
@@ -141,7 +143,9 @@ class TestFusedBnAddActAPI(unittest.TestCase):
                 param_attr=self.bn_param_attr2,
                 bias_attr=self.bn_bias_attr2,
                 act=None,
-                data_layout='NHWC')
+                data_layout='NHWC',
+                moving_mean_name="move_mean",
+                moving_variance_name="move_variance")
             out = bn1 + bn2
             out = fluid.layers.relu(out)
             prediction = fluid.layers.fc(input=out,
@@ -173,15 +177,19 @@ class TestFusedBnAddActAPI(unittest.TestCase):
             paddle.dataset.mnist.train(), batch_size=batch_size)
         exe = fluid.Executor(place)
         loss_vals_fused = []
+        move_means_fuse = []
+        move_vars_fuse = []
         scope = fluid.Scope()
         with fluid.scope_guard(scope):
             exe.run(startup_program)
             for _ in range(iters):
                 data = next(train_reader())
-                loss_v = exe.run(main_program,
+                loss_v, mean, var = exe.run(main_program,
                                  feed=feeder.feed(data),
-                                 fetch_list=[loss])
-                loss_vals_fused.append(loss_v[0][0])
+                                 fetch_list=[loss, "fuse_moving_mean", "fuse_moving_variance"])
+                loss_vals_fused.append(loss_v)
+                move_means_fuse.append(mean)
+                move_vars_fuse.append(var)
 
         # build_origin_program
         main_program = fluid.Program()
@@ -192,19 +200,25 @@ class TestFusedBnAddActAPI(unittest.TestCase):
         train_reader = paddle.batch(
             paddle.dataset.mnist.train(), batch_size=batch_size)
         loss_vals = []
+        move_means = []
+        move_vars = []
         scope = fluid.Scope()
         with fluid.scope_guard(scope):
             exe.run(startup_program)
             for _ in range(iters):
                 data = next(train_reader())
-                loss_v = exe.run(main_program,
+                loss_v, mean, var = exe.run(main_program,
                                  feed=feeder.feed(data),
-                                 fetch_list=[loss])
-                loss_vals.append(loss_v[0][0])
+                                 fetch_list=[loss, "moving_mean", "moving_variance"])
+                loss_vals.append(loss_v)
+                move_means.append(mean)
+                move_vars.append(var)
 
         # check loss
         for i in range(iters):
             self.assertAlmostEqual(loss_vals[i], loss_vals_fused[i], delta=1e-5)
+            self.assertTrue(np.allclose(move_means_fuse[i], move_means[i]))
+            self.assertTrue(np.allclose(move_vars_fuse[i], move_vars[i]))
 
     def test_fuse_bn_add_act(self):
         place = fluid.CUDAPlace(0)
