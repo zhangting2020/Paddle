@@ -16,6 +16,7 @@ limitations under the License. */
 
 #include <stdint.h>
 
+#include <vector>
 #include "paddle/fluid/framework/tensor.h"
 #include "unsupported/Eigen/CXX11/Tensor"
 
@@ -35,6 +36,19 @@ struct EigenDim {
                           arity(dims), D));
     Type ret;
     for (int64_t d = 0; d < arity(dims); d++) {
+      ret[d] = dims[d];
+    }
+    return ret;
+  }
+
+  static Type From(const std::vector<int>& dims) {
+    PADDLE_ENFORCE_EQ(dims.size(), D,
+                      platform::errors::InvalidArgument(
+                          "Input dimension size should be equal to %d, but "
+                          "received dimension size is %d.",
+                          dims.size(), D));
+    Type ret;
+    for (size_t d = 0; d < dims.size(); d++) {
       ret[d] = dims[d];
     }
     return ret;

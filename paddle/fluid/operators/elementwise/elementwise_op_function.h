@@ -2917,6 +2917,7 @@ static inline void GetDoubleGradSafeTensor(
 
 static bool UseEigenBroadcast(const framework::DDim &x_dims,
                               const framework::DDim &y_dims) {
+  VLOG(3) << "=============UseEigenBroadcast==========";
   int bcast_dims_remainder = 0;
   for (int i = 0; i < x_dims.size(); ++i) {
     if (x_dims[i] >= y_dims[i]) {
@@ -2925,6 +2926,7 @@ static bool UseEigenBroadcast(const framework::DDim &x_dims,
       bcast_dims_remainder += y_dims[i] % x_dims[i];
     }
   }
+  VLOG(3) << "bcast_dims_remainder: " << bcast_dims_remainder;
   if (bcast_dims_remainder == 0) {
     return true;
   } else {
@@ -2933,7 +2935,7 @@ static bool UseEigenBroadcast(const framework::DDim &x_dims,
 }
 
 template <int Rank>
-static void GetBraodcastDims(const framework::DDim &x_dims,
+static void GetBroadcastDims(const framework::DDim &x_dims,
                              const framework::DDim &y_dims,
                              Eigen::DSizes<int, Rank> *x_bcast_dims,
                              Eigen::DSizes<int, Rank> *y_bcast_dims) {
@@ -2945,6 +2947,200 @@ static void GetBraodcastDims(const framework::DDim &x_dims,
       (*y_bcast_dims)[i] = 1;
       (*x_bcast_dims)[i] = y_dims[i] / x_dims[i];
     }
+  }
+}
+
+template <typename DeviceContext, typename T, int Rank, int D>
+static void ReduceSumImpl(const framework::ExecutionContext &context,
+                          const framework::Tensor *in,
+                          const framework::DDim &in_dims,
+                          const std::vector<int> &reduce_dim_vec,
+                          framework::Tensor *out, const T sign) {
+  auto reduce_dims = framework::EigenDim<D>::From(reduce_dim_vec);
+  auto in_t = framework::EigenTensor<T, Rank>::From(*in);
+  auto out_t = framework::EigenTensor<T, Rank>::From(*out, in_dims);
+  auto &place =
+      *context.template device_context<DeviceContext>().eigen_device();
+  if (Rank == D) {
+    out_t.device(place) = sign * in_t.sum();
+  } else {
+    out_t.device(place) = sign * in_t.sum(reduce_dims);
+  }
+}
+
+template <typename DeviceContext, typename T, int Rank>
+static void ReduceSum2Dims(const framework::ExecutionContext &context,
+                           const framework::Tensor *in,
+                           const framework::DDim &in_dims,
+                           const std::vector<int> &reduce_dim_vec,
+                           framework::Tensor *out, const T sign) {
+  int size = reduce_dim_vec.size();
+  switch (size) {
+    case 1:
+      ReduceSumImpl<DeviceContext, T, Rank, 1>(context, in, in_dims,
+                                               reduce_dim_vec, out, sign);
+      break;
+    case 2:
+      ReduceSumImpl<DeviceContext, T, Rank, 2>(context, in, in_dims,
+                                               reduce_dim_vec, out, sign);
+      break;
+  }
+}
+
+template <typename DeviceContext, typename T, int Rank>
+static void ReduceSum3Dims(const framework::ExecutionContext &context,
+                           const framework::Tensor *in,
+                           const framework::DDim &in_dims,
+                           const std::vector<int> &reduce_dim_vec,
+                           framework::Tensor *out, const T sign) {
+  int size = reduce_dim_vec.size();
+  switch (size) {
+    case 1:
+      ReduceSumImpl<DeviceContext, T, 3, 1>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 2:
+      ReduceSumImpl<DeviceContext, T, 3, 2>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 3:
+      ReduceSumImpl<DeviceContext, T, 3, 3>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+  }
+}
+
+template <typename DeviceContext, typename T, int Rank>
+static void ReduceSum4Dims(const framework::ExecutionContext &context,
+                           const framework::Tensor *in,
+                           const framework::DDim &in_dims,
+                           const std::vector<int> &reduce_dim_vec,
+                           framework::Tensor *out, const T sign) {
+  int size = reduce_dim_vec.size();
+  switch (size) {
+    case 1:
+      ReduceSumImpl<DeviceContext, T, 4, 1>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 2:
+      ReduceSumImpl<DeviceContext, T, 4, 2>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 3:
+      ReduceSumImpl<DeviceContext, T, 4, 3>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 4:
+      ReduceSumImpl<DeviceContext, T, 4, 4>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+  }
+}
+
+template <typename DeviceContext, typename T, int Rank>
+static void ReduceSum5Dims(const framework::ExecutionContext &context,
+                           const framework::Tensor *in,
+                           const framework::DDim &in_dims,
+                           const std::vector<int> &reduce_dim_vec,
+                           const framework::Tensor *out, const T sign) {
+  int size = reduce_dim_vec.size();
+  switch (size) {
+    case 1:
+      ReduceSumImpl<DeviceContext, T, 5, 1>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 2:
+      ReduceSumImpl<DeviceContext, T, 5, 2>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 3:
+      ReduceSumImpl<DeviceContext, T, 5, 3>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 4:
+      ReduceSumImpl<DeviceContext, T, 5, 4>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 5:
+      ReduceSumImpl<DeviceContext, T, 5, 5>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+  }
+}
+
+template <typename DeviceContext, typename T, int Rank>
+static void ReduceSum6Dims(const framework::ExecutionContext &context,
+                           const framework::Tensor *in,
+                           const framework::DDim &in_dims,
+                           const std::vector<int> &reduce_dim_vec,
+                           framework::Tensor *out, const T sign) {
+  int size = reduce_dim_vec.size();
+  switch (size) {
+    case 1:
+      ReduceSumImpl<DeviceContext, T, 6, 1>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 2:
+      ReduceSumImpl<DeviceContext, T, 6, 2>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 3:
+      ReduceSumImpl<DeviceContext, T, 6, 3>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 4:
+      ReduceSumImpl<DeviceContext, T, 6, 4>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 5:
+      ReduceSumImpl<DeviceContext, T, 6, 5>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 6:
+      ReduceSumImpl<DeviceContext, T, 6, 6>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+  }
+}
+
+template <typename DeviceContext, typename T, int Rank>
+static void ReduceSum(const framework::ExecutionContext &context,
+                      const framework::Tensor *in,
+                      const framework::DDim &in_dims,
+                      const Eigen::DSizes<int, Rank> &bcast_dims,
+                      framework::Tensor *out, const T sign) {
+  std::vector<int> reduce_dim_vec;
+  for (size_t i = 0; i < bcast_dims.size(); ++i) {
+    if (bcast_dims[i] != 1) {
+      reduce_dim_vec.push_back(i);
+    }
+  }
+
+  switch (Rank) {
+    case 1:
+      ReduceSumImpl<DeviceContext, T, 1, 1>(context, in, in_dims,
+                                            reduce_dim_vec, out, sign);
+      break;
+    case 2:
+      ReduceSum2Dims<DeviceContext, T, 2>(context, in, in_dims, reduce_dim_vec,
+                                          out, sign);
+      break;
+    case 3:
+      ReduceSum3Dims<DeviceContext, T, 3>(context, in, in_dims, reduce_dim_vec,
+                                          out, sign);
+      break;
+    case 4:
+      ReduceSum4Dims<DeviceContext, T, 4>(context, in, in_dims, reduce_dim_vec,
+                                          out, sign);
+      break;
+    case 5:
+      ReduceSum5Dims<DeviceContext, T, 5>(context, in, in_dims, reduce_dim_vec,
+                                          out, sign);
+      break;
+    case 6:
+      ReduceSum5Dims<DeviceContext, T, 6>(context, in, in_dims, reduce_dim_vec,
+                                          out, sign);
+      break;
   }
 }
 
@@ -2981,25 +3177,10 @@ static void ElementwiseGradFunction(const framework::ExecutionContext &context,
 
   Eigen::DSizes<int, Rank> x_bcast_dims;
   Eigen::DSizes<int, Rank> y_bcast_dims;
-
-  GetBraodcastDims<Rank>(x_new_dims, y_new_dims, &x_bcast_dims, &y_bcast_dims);
+  GetBroadcastDims<Rank>(x_new_dims, y_new_dims, &x_bcast_dims, &y_bcast_dims);
 
   auto &place =
       *context.template device_context<DeviceContext>().eigen_device();
-  Eigen::DSizes<int, Rank * 2> x_reshape_dims;
-  Eigen::DSizes<int, Rank * 2> y_reshape_dims;
-  Eigen::DSizes<int, Rank> reduce_dims;
-  for (int i = 0; i < x_new_dims.size(); ++i) {
-    x_reshape_dims[2 * i] = x_bcast_dims[i];
-    x_reshape_dims[2 * i + 1] = x_new_dims[i];
-    y_reshape_dims[2 * i] = y_bcast_dims[i];
-    y_reshape_dims[2 * i + 1] = y_new_dims[i];
-    reduce_dims[i] = 2 * i;
-  }
-  VLOG(3) << "x_reshape_dims: " << x_reshape_dims;
-  VLOG(3) << "y_reshape_dims: " << y_reshape_dims;
-  VLOG(3) << "reduce_dims: " << reduce_dims;
-
   framework::Tensor dout_back;
   dout_back.Resize(dout->dims());
   dout_back.mutable_data<T>(context.GetPlace());
@@ -3011,21 +3192,18 @@ static void ElementwiseGradFunction(const framework::ExecutionContext &context,
     if (x_dims == out_dims) {
       dx_t.device(place) = dout_t;
     } else {
-      dx_t.device(place) = dout_t.reshape(x_reshape_dims)
-                               .sum(reduce_dims)
-                               .reshape(dx_t.dimensions());
+      ReduceSum<DeviceContext, T, Rank>(context, dout, x_new_dims, x_bcast_dims,
+                                        dx, sign);
     }
   }
   if (dy) {
     dy->mutable_data<T>(context.GetPlace());
     auto dy_t = framework::EigenTensor<T, Rank>::From(*dy, y_new_dims);
     if (y_dims == out_dims) {
-      dy_t.device(place) = sign * dout_back_t;
+      dy_t.device(place) = sign * dout_t;
     } else {
-      dy_t.device(place) = sign *
-                           dout_back_t.reshape(y_reshape_dims)
-                               .sum(reduce_dims)
-                               .reshape(dy_t.dimensions());
+      ReduceSum<DeviceContext, T, Rank>(context, dout, y_new_dims, y_bcast_dims,
+                                        dy, sign);
     }
   }
 }
