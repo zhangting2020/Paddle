@@ -85,7 +85,6 @@ class TestElementwiseAddOp(OpTest):
         self.axis = -1
 
 
-"""
 @unittest.skipIf(not core.is_compiled_with_cuda(),
                  "core is not compiled with CUDA")
 class TestFP16ElementwiseAddOp(TestElementwiseAddOp):
@@ -264,7 +263,6 @@ class TestElementwiseAddOp_broadcast_6(TestElementwiseAddOp):
         self.x = np.random.rand(2, 12, 3, 5).astype(self.dtype)
         self.y = np.random.rand(2, 12, 1, 5).astype(self.dtype)
         self.out = self.x + self.y
-"""
 
 
 class TestElementwiseAddOp_broadcast_7(TestElementwiseAddOp):
@@ -274,7 +272,6 @@ class TestElementwiseAddOp_broadcast_7(TestElementwiseAddOp):
         self.out = self.x + self.y
 
 
-"""
 class TestFP16ElementwiseAddOp_broadcast_6(TestFP16ElementwiseAddOp):
     def init_input_output(self):
         self.x = np.random.rand(2, 12, 3, 5).astype(self.dtype)
@@ -431,7 +428,7 @@ class TestAddOp(unittest.TestCase):
             np_z = z.numpy()
             z_expected = np.array([3., 8., 6.])
             self.assertEqual((np_z == z_expected).all(), True)
-"""
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1675,12 +1675,7 @@ void CommonElementwiseBroadcastBackward(
                          y_dims_array.data(), out_dims_array.data(), max_dim,
                          axis);
 
-  // for inplace strategy. memset will make dx and dout clear and get wrong
-  // result.
-  if (dx && dx->IsSharedBufferWith(dout)) {
-    dx->clear();
-    dx->mutable_data<T>(x_dims, ctx.GetPlace());
-  }
+  dx->mutable_data<T>(x_dims, ctx.GetPlace());
 
   VLOG(3) << "CommonElementwiseBroadcastBackward xdims:"
           << framework::make_ddim(x_dims_array)
@@ -2915,6 +2910,14 @@ static inline void GetDoubleGradSafeTensor(
   }
 }
 
+template <int NDIMS>
+bool DimsAllOne(const Eigen::DSizes<int, NDIMS> &dims) {
+  for (size_t i = 0; i < dims.size(); ++i) {
+    if (dims[i] != 1) return false;
+  }
+  return true;
+}
+
 static bool UseEigenBroadcast(const framework::DDim &x_dims,
                               const framework::DDim &y_dims) {
   VLOG(3) << "=============UseEigenBroadcast==========";
@@ -2932,6 +2935,52 @@ static bool UseEigenBroadcast(const framework::DDim &x_dims,
   } else {
     return false;
   }
+}
+
+static framework::DDim GetNewDims(const framework::DDim &in_dims, int rank) {
+  std::vector<int64_t> new_dims_vec(rank);
+  if (in_dims.size() < rank) {
+    for (int i = 0; i < rank - in_dims.size(); ++i) {
+      new_dims_vec[i] = 1;
+    }
+    for (int i = 0; i < in_dims.size(); ++i) {
+      new_dims_vec[i + rank - in_dims.size()] = in_dims[i];
+    }
+  } else {
+    new_dims_vec = vectorize(in_dims);
+  }
+  return framework::make_ddim(new_dims_vec);
+}
+
+static void SqueezeInputDims(const framework::DDim &x_dims,
+                             const framework::DDim &y_dims,
+                             framework::DDim *out_x_dims,
+                             framework::DDim *out_y_dims) {
+  int x = x_dims[0];
+  int y = y_dims[0];
+  std::vector<int> vx;
+  std::vector<int> vy;
+
+  for (int i = 1; i < x_dims.size(); ++i) {
+    if ((x_dims[i] != 1 && y_dims[i] != 1) ||
+        (x_dims[i] == 1 && x_dims[i - 1] != 1 && y_dims[i - 1] == 1) ||
+        (y_dims[i] == 1 && y_dims[i - 1] != 1 && x_dims[i - 1] == 1) ||
+        (x_dims[i - 1] != 1 && y_dims[i - 1] != 1)) {
+      vx.push_back(x);
+      vy.push_back(y);
+      x = x_dims[i];
+      y = y_dims[i];
+    } else {
+      x = x * x_dims[i];
+      y = y * y_dims[i];
+    }
+  }
+  vx.push_back(x);
+  vy.push_back(y);
+  *out_x_dims = framework::make_ddim(vx);
+  *out_y_dims = framework::make_ddim(vy);
+  VLOG(3) << "x_squeezed: " << *out_x_dims;
+  VLOG(3) << "y_squeezed: " << *out_y_dims;
 }
 
 template <int Rank>
@@ -2953,12 +3002,12 @@ static void GetBroadcastDims(const framework::DDim &x_dims,
 template <typename DeviceContext, typename T, int Rank, int D>
 static void ReduceSumImpl(const framework::ExecutionContext &context,
                           const framework::Tensor *in,
-                          const framework::DDim &in_dims,
+                          const framework::DDim &out_dims,
                           const std::vector<int> &reduce_dim_vec,
                           framework::Tensor *out, const T sign) {
   auto reduce_dims = framework::EigenDim<D>::From(reduce_dim_vec);
   auto in_t = framework::EigenTensor<T, Rank>::From(*in);
-  auto out_t = framework::EigenTensor<T, Rank>::From(*out, in_dims);
+  auto out_t = framework::EigenTensor<T, Rank>::From(*out, out_dims);
   auto &place =
       *context.template device_context<DeviceContext>().eigen_device();
   if (Rank == D) {
@@ -3042,7 +3091,7 @@ static void ReduceSum5Dims(const framework::ExecutionContext &context,
                            const framework::Tensor *in,
                            const framework::DDim &in_dims,
                            const std::vector<int> &reduce_dim_vec,
-                           const framework::Tensor *out, const T sign) {
+                           framework::Tensor *out, const T sign) {
   int size = reduce_dim_vec.size();
   switch (size) {
     case 1:
@@ -3144,21 +3193,6 @@ static void ReduceSum(const framework::ExecutionContext &context,
   }
 }
 
-static framework::DDim GetNewDims(const framework::DDim &in_dims, int rank) {
-  std::vector<int64_t> new_dims_vec(rank);
-  if (in_dims.size() < rank) {
-    for (int i = 0; i < rank - in_dims.size(); ++i) {
-      new_dims_vec[i] = 1;
-    }
-    for (int i = 0; i < in_dims.size(); ++i) {
-      new_dims_vec[i + rank - in_dims.size()] = in_dims[i];
-    }
-  } else {
-    new_dims_vec = vectorize(in_dims);
-  }
-  return framework::make_ddim(new_dims_vec);
-}
-
 template <typename DeviceContext, typename T, int Rank>
 static void ElementwiseGradFunction(const framework::ExecutionContext &context,
                                     T sign) {
@@ -3181,13 +3215,10 @@ static void ElementwiseGradFunction(const framework::ExecutionContext &context,
 
   auto &place =
       *context.template device_context<DeviceContext>().eigen_device();
-  framework::Tensor dout_back;
-  dout_back.Resize(dout->dims());
-  dout_back.mutable_data<T>(context.GetPlace());
-  auto dout_back_t = framework::EigenTensor<T, Rank>::From(dout_back);
-  dout_back_t.device(place) = dout_t;
+
   if (dx) {
-    dx->mutable_data<T>(context.GetPlace());
+    VLOG(3) << "dx->mutable_data";
+    dx->mutable_data<T>(x_dims, context.GetPlace());
     auto dx_t = framework::EigenTensor<T, Rank>::From(*dx, x_new_dims);
     if (x_dims == out_dims) {
       dx_t.device(place) = dout_t;
@@ -3197,6 +3228,7 @@ static void ElementwiseGradFunction(const framework::ExecutionContext &context,
     }
   }
   if (dy) {
+    VLOG(3) << "dy->mutable_data";
     dy->mutable_data<T>(context.GetPlace());
     auto dy_t = framework::EigenTensor<T, Rank>::From(*dy, y_new_dims);
     if (y_dims == out_dims) {
@@ -3233,6 +3265,79 @@ void ElementwiseGradEigenFunction(const framework::ExecutionContext &context,
       break;
     case 6:
       ElementwiseGradFunction<DeviceContext, T, 6>(context, sign);
+      break;
+  }
+}
+
+using framework::To32BitIndex;
+
+template <typename DeviceContext, typename T, int Rank>
+static void ElementwiseAddImpl(const framework::ExecutionContext &context,
+                               const framework::Tensor *x,
+                               const framework::Tensor *y,
+                               const framework::DDim &x_dims,
+                               const framework::DDim &y_dims,
+                               const framework::DDim &out_dims,
+                               framework::Tensor *out) {
+  Eigen::DSizes<int, Rank> x_bcast_dims;
+  Eigen::DSizes<int, Rank> y_bcast_dims;
+  GetBroadcastDims<Rank>(x_dims, y_dims, &x_bcast_dims, &y_bcast_dims);
+  auto x_t = framework::EigenTensor<T, Rank>::From(*x, x_dims);
+  auto y_t = framework::EigenTensor<T, Rank>::From(*y, y_dims);
+  auto out_t = framework::EigenTensor<T, Rank>::From(*out, out_dims);
+
+  auto &place =
+      *context.template device_context<DeviceContext>().eigen_device();
+  // To32BitIndex(out_t).device(place) =
+  // To32BitIndex(x_t).broadcast(x_bcast_dims) +
+  // To32BitIndex(y_t).broadcast(y_bcast_dims);
+  out_t.device(place) = x_t + y_t.broadcast(y_bcast_dims);
+}
+
+template <typename DeviceContext, typename T>
+void ElementwiseEigenFunction(const framework::ExecutionContext &context,
+                              int rank) {
+  auto *x = context.Input<framework::Tensor>("X");
+  auto *y = context.Input<framework::Tensor>("Y");
+  auto *out = context.Output<framework::Tensor>("Out");
+  out->mutable_data<T>(context.GetPlace());
+
+  framework::DDim x_new_dims = GetNewDims(x->dims(), rank);
+  framework::DDim y_new_dims = GetNewDims(y->dims(), rank);
+  framework::DDim x_dims_squeezed;
+  framework::DDim y_dims_squeezed;
+  SqueezeInputDims(x_new_dims, y_new_dims, &x_dims_squeezed, &y_dims_squeezed);
+  std::vector<int> out_dims_vec;
+  for (int i = 0; i < x_dims_squeezed.size(); ++i) {
+    out_dims_vec.push_back(std::max(x_dims_squeezed[i], y_dims_squeezed[i]));
+  }
+  framework::DDim out_dims = framework::make_ddim(out_dims_vec);
+
+  int compute_rank = x_dims_squeezed.size();
+  switch (compute_rank) {
+    case 1:
+      ElementwiseAddImpl<DeviceContext, T, 1>(context, x, y, x_dims_squeezed,
+                                              y_dims_squeezed, out_dims, out);
+      break;
+    case 2:
+      ElementwiseAddImpl<DeviceContext, T, 2>(context, x, y, x_dims_squeezed,
+                                              y_dims_squeezed, out_dims, out);
+      break;
+    case 3:
+      ElementwiseAddImpl<DeviceContext, T, 3>(context, x, y, x_dims_squeezed,
+                                              y_dims_squeezed, out_dims, out);
+      break;
+    case 4:
+      ElementwiseAddImpl<DeviceContext, T, 4>(context, x, y, x_dims_squeezed,
+                                              y_dims_squeezed, out_dims, out);
+      break;
+    case 5:
+      ElementwiseAddImpl<DeviceContext, T, 5>(context, x, y, x_dims_squeezed,
+                                              y_dims_squeezed, out_dims, out);
+      break;
+    case 6:
+      ElementwiseAddImpl<DeviceContext, T, 6>(context, x, y, x_dims_squeezed,
+                                              y_dims_squeezed, out_dims, out);
       break;
   }
 }

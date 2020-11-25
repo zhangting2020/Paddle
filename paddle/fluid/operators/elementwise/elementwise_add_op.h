@@ -58,6 +58,20 @@ class ElementwiseAddKernel : public framework::OpKernel<T> {
       SameDimsElemwiseAdd<DeviceContext, T> same_dims_add;
       same_dims_add(ctx, x, y, z);
     } else {
+      int axis = ctx.Attr<int>("axis");
+      auto x_dims = x->dims();
+      auto y_dims = y->dims();
+      auto rank = std::max(x_dims.size(), y_dims.size());
+      framework::DDim x_new_dims = GetNewDims(x_dims, rank);
+      framework::DDim y_new_dims = GetNewDims(y_dims, rank);
+      bool use_eigen = false;
+      if (axis == -1) {
+        use_eigen = UseEigenBroadcast(x_new_dims, y_new_dims);
+      }
+      if (use_eigen) {
+        ElementwiseEigenFunction<DeviceContext, T>(ctx, rank);
+        return;
+      }
       default_elementwise_add<DeviceContext, T>(ctx, x, y, z);
     }
   }
@@ -146,6 +160,15 @@ class ElementwiseAddGradKernel : public ElemwiseGradKernel<T> {
 
     auto x_dims = x->dims();
     auto y_dims = y->dims();
+
+    // for inplace strategy. memset will make dx and dout clear and get wrong
+    // result.
+    if (dx != nullptr && dx->dims() != dout->dims() &&
+        dx->IsSharedBufferWith(*dout)) {
+      VLOG(3) << "======== dx->clear() =======";
+      dx->clear();
+    }
+
     auto rank = std::max(x_dims.size(), y_dims.size());
     framework::DDim x_new_dims = GetNewDims(x_dims, rank);
     framework::DDim y_new_dims = GetNewDims(y_dims, rank);
