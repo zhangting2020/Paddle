@@ -124,7 +124,7 @@ class ElementwiseSubGradKernel : public ElemwiseGradKernel<T> {
     }
     if (use_eigen) {
       VLOG(3) << "====ues eigen grad function====";
-      ElementwiseGradEigenFunction<DeviceContext, T>(ctx, T(-1));
+      ElementwiseGradEigenFunction<DeviceContext, T>(ctx, rank, T(-1));
       return;
     }
     // skip out
