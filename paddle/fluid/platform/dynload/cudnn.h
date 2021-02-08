@@ -97,6 +97,7 @@ extern void EnforceCUDNNLoaded(const char* fn_name);
   __macro(cudnnFindConvolutionBackwardFilterAlgorithmEx); \
   __macro(cudnnFindConvolutionBackwardFilterAlgorithm);   \
   __macro(cudnnFindConvolutionBackwardDataAlgorithmEx);   \
+  __macro(cudnnFindConvolutionBackwardDataAlgorithm);     \
   __macro(cudnnGetErrorString);                           \
   __macro(cudnnCreateDropoutDescriptor);                  \
   __macro(cudnnDropoutGetStatesSize);                     \
@@ -179,7 +180,8 @@ CUDNN_DNN_ROUTINE_EACH_R6(DECLARE_DYNAMIC_LOAD_CUDNN_WRAP)
   __macro(cudnnGetConvolutionBackwardDataAlgorithm_v7);   \
   __macro(cudnnGetConvolutionBackwardFilterAlgorithm_v7); \
   __macro(cudnnGetConvolutionForwardAlgorithm_v7);        \
-  __macro(cudnnGetConvolutionBackwardFilterAlgorithmMaxCount);
+  __macro(cudnnGetConvolutionBackwardFilterAlgorithmMaxCount); \
+  __macro(cudnnGetConvolutionBackwardDataAlgorithmMaxCount);
 CUDNN_DNN_ROUTINE_EACH_R7(DECLARE_DYNAMIC_LOAD_CUDNN_WRAP)
 #endif
 

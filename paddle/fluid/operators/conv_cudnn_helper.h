@@ -102,6 +102,16 @@ inline int MaxBwdFilterAlgos(cudnnHandle_t cudnn_handle) {
   return max_algos;
 }
 
+inline int MaxBwdDataAlgos(cudnnHandle_t cudnn_handle) {
+  int max_algos = 0;
+#if CUDNN_VERSION_MIN(7, 0, 1)
+  PADDLE_ENFORCE_CUDA_SUCCESS(
+      platform::dynload::cudnnGetConvolutionBackwardDataAlgorithmMaxCount(
+          cudnn_handle, &max_algos));
+#endif
+  return max_algos;
+}
+
 template <typename PerfType, typename AlgoType>
 void ChooseAlgoByWorkspace(PerfType* perf_results, size_t perf_num,
                            size_t workspace_byte, AlgoType* algo) {
@@ -337,7 +347,7 @@ struct SearchAlgorithm<cudnnConvolutionBwdDataAlgoPerf_t> {
                      bool deterministic,
                      const framework::ExecutionContext& ctx) {
     auto dtype = platform::CudnnDataType<T>::type;
-    bool exhaustive = (exhaustive_search) & (dtype != CUDNN_DATA_HALF);
+    bool exhaustive = exhaustive_search;
     size_t workspace_size_limit = FLAGS_conv_workspace_size_limit * 1024 * 1024;
     size_t workspace_size = 0;
     bool has_got_workspace_size = true;
@@ -432,8 +442,9 @@ struct SearchAlgorithm<cudnnConvolutionBwdDataAlgoPerf_t> {
       VLOG(10) << "cudnnConvolutionFwdAlgoPerf_t"
                << ", x_dims:" << x_dims << ", w_dims:" << w_dims << ", args.s"
                << args.s << ", args.p" << args.p << ", args.d" << args.d;
-
-      algo = algo_cache.GetAlgorithm(
+      
+      if (dtype != CUDNN_DATA_HALF) {
+              algo = algo_cache.GetAlgorithm(
           x_dims, w_dims, args.s, args.p, args.d, 0,
           static_cast<int64_t>(args.cudnn_dtype), [&]() {
             int returned_algo_count;
@@ -462,6 +473,27 @@ struct SearchAlgorithm<cudnnConvolutionBwdDataAlgoPerf_t> {
 
             return perf_stat[0].algo;
           });
+      } else {
+        auto max_algos = MaxBwdDataAlgos(args.handle);
+        algo = algo_cache.GetAlgorithm(
+            x_dims, w_dims, args.s, args.p, args.d, 0,
+            static_cast<int64_t>(args.cudnn_dtype), [&]() {
+              algo_t chosen_algo;
+              std::vector<perf_t> perf_results(max_algos);
+              int actual_algos = 0;
+              PADDLE_ENFORCE_CUDA_SUCCESS(
+                  platform::dynload::
+                      cudnnFindConvolutionBackwardDataAlgorithm(
+                          args.handle, args.wdesc.desc(), args.odesc.desc(),
+                          args.cdesc.desc(), args.idesc.desc(),
+                          perf_results.size(), &actual_algos,
+                          perf_results.data()));
+              perf_results.resize(actual_algos);
+              ChooseAlgo<perf_t, algo_t>(perf_results, workspace_size_limit,
+                                         &chosen_algo);
+              return chosen_algo;
+            });
+      }
     }
     VLOG(3) << "choose algo " << algo;
     return algo;

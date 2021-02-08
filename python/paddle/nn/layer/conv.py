@@ -142,11 +142,13 @@ class _ConvNd(layers.Layer):
                                    cudnn_version is not None) else False
 
         self._op_type = "conv" + str(dims) + 'd'
+        """
         if self._op_type == 'conv2d' and (in_channels == groups and
                                           in_channels != 1 and
                                           out_channels % in_channels == 0):
             self._op_type = 'depthwise_conv2d'
             self._use_cudnn = False
+        """
 
     def extra_repr(self):
         main_str = '{_in_channels}, {_out_channels}, kernel_size={_kernel_size}'
