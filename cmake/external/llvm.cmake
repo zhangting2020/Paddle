@@ -43,7 +43,55 @@ ExternalProject_Add(
 set(LLVM_INCLUDE_DIRS ${LLVM_SOURCE_DIR}/include)
 set(LLVM_LIBRARY_DIRS ${LLVM_SOURCE_DIR}/lib)
 set(LLVM_DEFINITIONS "-D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS")
-set(LLVM_LIBS "-lLLVMWindowsManifest -lLLVMXRay -lLLVMLibDriver -lLLVMDlltoolDriver -lLLVMCoverage -lLLVMLineEditor -lLLVMXCoreDisassembler -lLLVMXCoreCodeGen -lLLVMXCoreDesc -lLLVMXCoreInfo -lLLVMX86Disassembler -lLLVMX86AsmParser -lLLVMX86CodeGen -lLLVMX86Desc -lLLVMX86Info -lLLVMWebAssemblyDisassembler -lLLVMWebAssemblyAsmParser -lLLVMWebAssemblyCodeGen -lLLVMWebAssemblyDesc -lLLVMWebAssemblyInfo -lLLVMSystemZDisassembler -lLLVMSystemZAsmParser -lLLVMSystemZCodeGen -lLLVMSystemZDesc -lLLVMSystemZInfo -lLLVMSparcDisassembler -lLLVMSparcAsmParser -lLLVMSparcCodeGen -lLLVMSparcDesc -lLLVMSparcInfo -lLLVMRISCVDisassembler -lLLVMRISCVAsmParser -lLLVMRISCVCodeGen -lLLVMRISCVDesc -lLLVMRISCVInfo -lLLVMPowerPCDisassembler -lLLVMPowerPCAsmParser -lLLVMPowerPCCodeGen -lLLVMPowerPCDesc -lLLVMPowerPCInfo -lLLVMNVPTXCodeGen -lLLVMNVPTXDesc -lLLVMNVPTXInfo -lLLVMMSP430Disassembler -lLLVMMSP430AsmParser -lLLVMMSP430CodeGen -lLLVMMSP430Desc -lLLVMMSP430Info -lLLVMMipsDisassembler -lLLVMMipsAsmParser -lLLVMMipsCodeGen -lLLVMMipsDesc -lLLVMMipsInfo -lLLVMLanaiDisassembler -lLLVMLanaiCodeGen -lLLVMLanaiAsmParser -lLLVMLanaiDesc -lLLVMLanaiInfo -lLLVMHexagonDisassembler -lLLVMHexagonCodeGen -lLLVMHexagonAsmParser -lLLVMHexagonDesc -lLLVMHexagonInfo -lLLVMBPFDisassembler -lLLVMBPFAsmParser -lLLVMBPFCodeGen -lLLVMBPFDesc -lLLVMBPFInfo -lLLVMAVRDisassembler -lLLVMAVRAsmParser -lLLVMAVRCodeGen -lLLVMAVRDesc -lLLVMAVRInfo -lLLVMARMDisassembler -lLLVMARMAsmParser -lLLVMARMCodeGen -lLLVMARMDesc -lLLVMARMUtils -lLLVMARMInfo -lLLVMAMDGPUDisassembler -lLLVMAMDGPUAsmParser -lLLVMAMDGPUCodeGen -lLLVMAMDGPUDesc -lLLVMAMDGPUUtils -lLLVMAMDGPUInfo -lLLVMAArch64Disassembler -lLLVMAArch64AsmParser -lLLVMAArch64CodeGen -lLLVMAArch64Desc -lLLVMAArch64Utils -lLLVMAArch64Info -lLLVMOrcJIT -lLLVMMCJIT -lLLVMJITLink -lLLVMOrcTargetProcess -lLLVMOrcShared -lLLVMInterpreter -lLLVMExecutionEngine -lLLVMRuntimeDyld -lLLVMSymbolize -lLLVMDebugInfoPDB -lLLVMDebugInfoGSYM -lLLVMOption -lLLVMObjectYAML -lLLVMMCA -lLLVMMCDisassembler -lLLVMLTO -lLLVMCFGuard -lLLVMFrontendOpenACC -lLLVMExtensions -lPolly -lPollyISL -lLLVMPasses -lLLVMObjCARCOpts -lLLVMHelloNew -lLLVMCoroutines -lLLVMipo -lLLVMInstrumentation -lLLVMVectorize -lLLVMLinker -lLLVMFrontendOpenMP -lLLVMDWARFLinker -lLLVMGlobalISel -lLLVMMIRParser -lLLVMAsmPrinter -lLLVMDebugInfoDWARF -lLLVMSelectionDAG -lLLVMCodeGen -lLLVMIRReader -lLLVMAsmParser -lLLVMInterfaceStub -lLLVMFileCheck -lLLVMFuzzMutate -lLLVMTarget -lLLVMScalarOpts -lLLVMInstCombine -lLLVMAggressiveInstCombine -lLLVMTransformUtils -lLLVMBitWriter -lLLVMAnalysis -lLLVMProfileData -lLLVMObject -lLLVMTextAPI -lLLVMMCParser -lLLVMMC -lLLVMDebugInfoCodeView -lLLVMDebugInfoMSF -lLLVMBitReader -lLLVMCore -lLLVMRemarks -lLLVMBitstreamReader -lLLVMBinaryFormat -lLLVMTableGen -lLLVMSupport -lLLVMDemangle -lrt -ldl -lpthread -lm -lz -ltinfo -lxml2")
-include_directories(${LLVM_INCLUDE_DIRS})
+string(CONCAT LLVM_LIBS "-lLLVMWindowsManifest -lLLVMXRay -lLLVMLibDriver "
+                        "-lLLVMDlltoolDriver -lLLVMCoverage -lLLVMLineEditor "
+                        "-lLLVMXCoreDisassembler -lLLVMXCoreCodeGen -lLLVMXCoreDesc "
+                        "-lLLVMXCoreInfo -lLLVMX86Disassembler -lLLVMX86AsmParser "
+                        "-lLLVMX86CodeGen -lLLVMX86Desc -lLLVMX86Info "
+                        "-lLLVMWebAssemblyDisassembler -lLLVMWebAssemblyAsmParser "
+                        "-lLLVMWebAssemblyCodeGen -lLLVMWebAssemblyDesc -lLLVMWebAssemblyInfo "
+                        "-lLLVMSystemZDisassembler -lLLVMSystemZAsmParser -lLLVMSystemZCodeGen "
+                        "-lLLVMSystemZDesc -lLLVMSystemZInfo -lLLVMSparcDisassembler "
+                        "-lLLVMSparcAsmParser -lLLVMSparcCodeGen -lLLVMSparcDesc "
+                        "-lLLVMSparcInfo -lLLVMRISCVDisassembler -lLLVMRISCVAsmParser "
+                        "-lLLVMRISCVCodeGen -lLLVMRISCVDesc -lLLVMRISCVInfo "
+                        "-lLLVMPowerPCDisassembler -lLLVMPowerPCAsmParser -lLLVMPowerPCCodeGen "
+                        "-lLLVMPowerPCDesc -lLLVMPowerPCInfo -lLLVMNVPTXCodeGen -lLLVMNVPTXDesc "
+                        "-lLLVMNVPTXInfo -lLLVMMSP430Disassembler -lLLVMMSP430AsmParser "
+                        "-lLLVMMSP430CodeGen -lLLVMMSP430Desc -lLLVMMSP430Info "
+                        "-lLLVMMipsDisassembler -lLLVMMipsAsmParser -lLLVMMipsCodeGen "
+                        "-lLLVMMipsDesc -lLLVMMipsInfo -lLLVMLanaiDisassembler -lLLVMLanaiCodeGen "
+                        "-lLLVMLanaiAsmParser -lLLVMLanaiDesc -lLLVMLanaiInfo "
+                        "-lLLVMHexagonDisassembler -lLLVMHexagonCodeGen -lLLVMHexagonAsmParser "
+                        "-lLLVMHexagonDesc -lLLVMHexagonInfo -lLLVMBPFDisassembler "
+                        "-lLLVMBPFAsmParser -lLLVMBPFCodeGen -lLLVMBPFDesc -lLLVMBPFInfo "
+                        "-lLLVMAVRDisassembler -lLLVMAVRAsmParser -lLLVMAVRCodeGen -lLLVMAVRDesc "
+                        "-lLLVMAVRInfo -lLLVMARMDisassembler -lLLVMARMAsmParser -lLLVMARMCodeGen "
+                        "-lLLVMARMDesc -lLLVMARMUtils -lLLVMARMInfo -lLLVMAMDGPUDisassembler "
+                        "-lLLVMAMDGPUAsmParser -lLLVMAMDGPUCodeGen -lLLVMAMDGPUDesc "
+                        "-lLLVMAMDGPUUtils -lLLVMAMDGPUInfo -lLLVMAArch64Disassembler "
+                        "-lLLVMAArch64AsmParser -lLLVMAArch64CodeGen -lLLVMAArch64Desc "
+                        "-lLLVMAArch64Utils -lLLVMAArch64Info -lLLVMOrcJIT -lLLVMMCJIT "
+                        "-lLLVMJITLink -lLLVMOrcTargetProcess -lLLVMOrcShared -lLLVMInterpreter "
+                        "-lLLVMExecutionEngine -lLLVMRuntimeDyld -lLLVMSymbolize "
+                        "-lLLVMDebugInfoPDB -lLLVMDebugInfoGSYM -lLLVMOption -lLLVMObjectYAML "
+                        "-lLLVMMCA -lLLVMMCDisassembler -lLLVMLTO -lLLVMCFGuard "
+                        "-lLLVMFrontendOpenACC -lLLVMExtensions -lPolly -lPollyISL "
+                        "-lLLVMPasses -lLLVMObjCARCOpts -lLLVMHelloNew -lLLVMCoroutines "
+                        "-lLLVMipo -lLLVMInstrumentation -lLLVMVectorize -lLLVMLinker "
+                        "-lLLVMFrontendOpenMP -lLLVMDWARFLinker -lLLVMGlobalISel -lLLVMMIRParser "
+                        "-lLLVMAsmPrinter -lLLVMDebugInfoDWARF -lLLVMSelectionDAG -lLLVMCodeGen "
+                        "-lLLVMIRReader -lLLVMAsmParser -lLLVMInterfaceStub -lLLVMFileCheck "
+                        "-lLLVMFuzzMutate -lLLVMTarget -lLLVMScalarOpts -lLLVMInstCombine "
+                        "-lLLVMAggressiveInstCombine -lLLVMTransformUtils -lLLVMBitWriter "
+                        "-lLLVMAnalysis -lLLVMProfileData -lLLVMObject -lLLVMTextAPI "
+                        "-lLLVMMCParser -lLLVMMC -lLLVMDebugInfoCodeView -lLLVMDebugInfoMSF "
+                        "-lLLVMBitReader -lLLVMCore -lLLVMRemarks -lLLVMBitstreamReader "
+                        "-lLLVMBinaryFormat -lLLVMTableGen -lLLVMSupport -lLLVMDemangle "
+                        "-lrt -ldl -lpthread -lm -lz -ltinfo -lxml2")
+include_directories(BEFORE SYSTEM ${LLVM_INCLUDE_DIRS})
 link_directories(${LLVM_LIBRARY_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
+add_library(llvm INTERFACE)
+add_dependencies(llvm extern_llvm)
+

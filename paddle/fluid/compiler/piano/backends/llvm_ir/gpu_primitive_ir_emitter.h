@@ -31,6 +31,9 @@ class GpuPrimitiveIrEmitter : public PrimitiveIrEmitter {
   void VisitElementwiseUnary(const note::Instruction*) override;
   void VisitElementwiseBinary(const note::Instruction*) override;
 
+  // Scalar op
+  void VisitConstant(const note::Instruction*) override;
+
   // Unary
   void VisitBroadcast(const note::Instruction*) override;
   void VisitCopy(const note::Instruction*) override;

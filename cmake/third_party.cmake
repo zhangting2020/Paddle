@@ -210,10 +210,9 @@ include(external/threadpool)# download threadpool
 include(external/dlpack)    # download dlpack
 include(external/xxhash)    # download, build, install xxhash
 include(external/warpctc)   # download, build, install warpctc
-include(external/llvm)      # download llvm
 
 list(APPEND third_party_deps extern_eigen3 extern_gflags extern_glog extern_boost extern_xxhash)
-list(APPEND third_party_deps extern_zlib extern_dlpack extern_warpctc extern_threadpool extern_llvm)
+list(APPEND third_party_deps extern_zlib extern_dlpack extern_warpctc extern_threadpool)
 
 include(cblas)              	# find first, then download, build, install openblas
 
@@ -224,6 +223,10 @@ elseif(${CBLAS_PROVIDER} STREQUAL EXTERN_OPENBLAS)
     list(APPEND third_party_deps extern_openblas)
 endif()
 
+if(WITH_COMPILER)
+    include(external/llvm)    # download llvm
+    list(APPEND third_party_deps extern_llvm)
+endif()
 
 if(WITH_MKLDNN)
     include(external/mkldnn)    # download, build, install mkldnn

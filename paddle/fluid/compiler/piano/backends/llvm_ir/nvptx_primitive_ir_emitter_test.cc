@@ -22,12 +22,12 @@ namespace backends {
 
 TEST(NvptxPrimitiveIrEmitter, GetBinaryOp) {
   NvptxPrimitiveIrEmitter nvptx_primitive_ir_emitter;
-  auto op = nvptx_primitive_ir_emitter.GetUnaryOp(nullptr);
+  auto op = nvptx_primitive_ir_emitter.GetBinaryOp(nullptr);
 }
 
 TEST(NvptxPrimitiveIrEmitter, GetUnaryOp) {
   NvptxPrimitiveIrEmitter nvptx_primitive_ir_emitter;
-  auto op = nvptx_primitive_ir_emitter.GetBinaryOp(nullptr);
+  auto op = nvptx_primitive_ir_emitter.GetUnaryOp(nullptr);
 }
 
 TEST(NvptxPrimitiveIrEmitter, DeviceBaseOp) {
@@ -41,7 +41,7 @@ TEST(NvptxPrimitiveIrEmitter, DeviceBaseOp) {
   ASSERT_EQ(nvptx_primitive_ir_emitter.BlockIdx(nullptr), nullptr);
   ASSERT_EQ(nvptx_primitive_ir_emitter.BlockIdy(nullptr), nullptr);
   ASSERT_EQ(nvptx_primitive_ir_emitter.BlockIdz(nullptr), nullptr);
-  ASSERT_EQ(nvptx_primitive_ir_emitter.Alloca(nullptr), nullptr);
+  ASSERT_EQ(nvptx_primitive_ir_emitter.Alloca(nullptr, 8), nullptr);
 }
 
 }  // namespace backends
