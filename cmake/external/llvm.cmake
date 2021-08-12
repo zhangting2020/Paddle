@@ -14,8 +14,10 @@
 
 include(ExternalProject)
 
+# released on 04/15/2021
+# TODO(zhangting2020): download the corresponding package according to the environment
 set(LLVM_VER   "12.0.0")
-set(LLVM_URL   "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VER}/clang+llvm-${LLVM_VER}-x86_64-linux-gnu-ubuntu-16.04.tar.xz" CACHE STRING "" FORCE)
+set(LLVM_URL "${GIT_URL}/llvm/llvm-project/releases/download/llvmorg-${LLVM_VER}/clang+llvm-${LLVM_VER}-x86_64-linux-gnu-ubuntu-16.04.tar.xz" CACHE STRING "" FORCE)
 
 MESSAGE(STATUS "LLVM_VERSION: ${LLVM_VER}, LLVM_URL: ${LLVM_URL}")
 
@@ -42,6 +44,9 @@ ExternalProject_Add(
 
 set(LLVM_INCLUDE_DIRS ${LLVM_SOURCE_DIR}/include)
 set(LLVM_LIBRARY_DIRS ${LLVM_SOURCE_DIR}/lib)
+# "llvm-config --cxxflags" get the LLVM_DEFINITIONS
+# "llvm-config --libs" get the LLVM_LIBS. We temporarily use a fixed string
+# because llvm has not been downloaded yet in the this stage
 set(LLVM_DEFINITIONS "-D_GNU_SOURCE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS")
 string(CONCAT LLVM_LIBS "-lLLVMWindowsManifest -lLLVMXRay -lLLVMLibDriver "
                         "-lLLVMDlltoolDriver -lLLVMCoverage -lLLVMLineEditor "
@@ -88,7 +93,7 @@ string(CONCAT LLVM_LIBS "-lLLVMWindowsManifest -lLLVMXRay -lLLVMLibDriver "
                         "-lLLVMMCParser -lLLVMMC -lLLVMDebugInfoCodeView -lLLVMDebugInfoMSF "
                         "-lLLVMBitReader -lLLVMCore -lLLVMRemarks -lLLVMBitstreamReader "
                         "-lLLVMBinaryFormat -lLLVMTableGen -lLLVMSupport -lLLVMDemangle "
-                        "-lrt -ldl -lpthread -lm -lz -ltinfo -lxml2")
+                        "-lrt -ldl -lpthread -lm -lz -ltinfo")
 include_directories(BEFORE SYSTEM ${LLVM_INCLUDE_DIRS})
 link_directories(${LLVM_LIBRARY_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
