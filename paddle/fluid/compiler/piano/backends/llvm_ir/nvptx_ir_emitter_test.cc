@@ -19,68 +19,102 @@ limitations under the License. */
 #include "paddle/fluid/compiler/piano/backends/note_visitor_base.h"
 #include "paddle/fluid/compiler/piano/note/function.h"
 #include "paddle/fluid/compiler/piano/note/instruction.h"
+#include "paddle/fluid/compiler/piano/note/module.h"
 #include "paddle/fluid/compiler/piano/note/note.pb.h"
 #include "paddle/fluid/compiler/piano/note/opcode.h"
 #include "paddle/fluid/compiler/piano/shape.h"
+#include "paddle/fluid/compiler/piano/symbolization/note_builder.h"
 #include "paddle/fluid/platform/enforce.h"
 
 namespace paddle {
 namespace piano {
 namespace backends {
 
-void CreadInstructionProto(const Shape& shape, const std::string& name,
-                           const std::string& op_code, uint64_t id,
-                           uint64_t params_index,
-                           note::InstructionProto* instr_proto) {
-  instr_proto->set_name(name);
-  instr_proto->set_opcode(op_code);
-  instr_proto->set_id(id);
-  instr_proto->set_parameter_index(params_index);
-  *instr_proto->mutable_shape() = shape.ToProto();
+class BinaryOpTest {
+ public:
+  void SetInstructionProto(const std::vector<int64_t>& arg1_shape_vec,
+                           const std::vector<int64_t>& arg2_shape_vec,
+                           const std::vector<int64_t>& result_shape_vec,
+                           note::ElementTypeProto type, note::OpCode op_code) {
+    const Shape arg1_shape(type, arg1_shape_vec);
+    const Shape arg2_shape(type, arg2_shape_vec);
+    const Shape result_shape(type, result_shape_vec);
+    op_code_ = op_code;
+
+    SetProto(arg1_shape, "arg1.1", "parameter", 0, &arg1_proto_);
+    SetProto(arg2_shape, "arg2.2", "parameter", 1, &arg2_proto_);
+    SetProto(result_shape, note::GetOpName(op_code), note::GetOpName(op_code),
+             2, &instr_proto_);
+  }
+
+  void SetProto(const Shape& shape, const std::string& name,
+                const std::string& op_code, uint64_t params_index,
+                note::InstructionProto* instr_proto) {
+    instr_proto->set_name(name);
+    instr_proto->set_opcode(op_code);
+    instr_proto->set_parameter_index(params_index);
+    *instr_proto->mutable_shape() = shape.ToProto();
+  }
+
+  void GenLLVMIR() {
+    // build note module
+    symbolization::NoteBuilder note_builder("test_note_builder");
+    std::vector<symbolization::Operand> ops;
+    ops.push_back(note_builder.AppendInstruction(std::move(arg1_proto_),
+                                                 note::OpCode::kParameter, {}));
+    ops.push_back(note_builder.AppendInstruction(std::move(arg2_proto_),
+                                                 note::OpCode::kParameter, {}));
+    note_builder.AppendInstruction(std::move(instr_proto_), op_code_, ops);
+
+    auto note_proto = note_builder.Build();
+    note::Module note_module(note_proto);
+
+    auto& entry_function = note_module.entry_function();
+    auto instr = entry_function.instruction(2);
+
+    llvm::LLVMContext llvm_context;
+    llvm::Module llvm_module("", llvm_context);
+    KernelExecutableMap kernel_executable_map;
+
+    NvptxIrEmitter nvptx_ir_emitter(&llvm_module, &kernel_executable_map);
+    nvptx_ir_emitter.VisitElementwiseBinary(*instr);
+
+    // Printing may be disabled with the increase of test cases.
+    llvm_module.print(llvm::errs(), nullptr);
+
+    std::string errors;
+    llvm::raw_string_ostream llvm_errors(errors);
+    PADDLE_ENFORCE_NE(llvm::verifyModule(llvm_module, &llvm_errors), true,
+                      llvm_errors.str());
+  }
+
+ private:
+  note::InstructionProto arg1_proto_;
+  note::InstructionProto arg2_proto_;
+  note::InstructionProto instr_proto_;
+  note::OpCode op_code_;
+};
+
+TEST(NvptxIrEmitter, FP32OpTest) {
+  std::vector<note::OpCode> op_codes = {note::OpCode::kAdd,
+                                        note::OpCode::kMaximum};
+  BinaryOpTest fp32_test;
+  for (auto op_code : op_codes) {
+    fp32_test.SetInstructionProto({3, 6}, {3, 6}, {3, 6},
+                                  note::ElementTypeProto::F32, op_code);
+    fp32_test.GenLLVMIR();
+  }
 }
 
-TEST(NvptxIrEmitter, AddOp) {
-  const Shape arg1_shape(note::ElementTypeProto::F32, {3, 6});
-  const Shape arg2_shape(note::ElementTypeProto::F32, {3, 6});
-  const Shape result_shape(note::F32, {3, 6});
-
-  // set arg1_proto
-  note::InstructionProto arg1_proto;
-  CreadInstructionProto(arg1_shape, "arg1.1", "parameter", 1, 0, &arg1_proto);
-  std::unordered_map<std::int64_t, note::Instruction*> instr1_index;
-  std::unordered_map<std::int64_t, note::Function*> func_index;
-  note::Instruction arg1_instr(arg1_proto, instr1_index, func_index);
-
-  // set arg2_proto
-  note::InstructionProto arg2_proto;
-  CreadInstructionProto(arg2_shape, "arg2.2", "parameter", 2, 1, &arg2_proto);
-  std::unordered_map<std::int64_t, note::Instruction*> instr2_index;
-  note::Instruction arg2_instr(arg2_proto, instr2_index, func_index);
-
-  // set add_proto
-  note::InstructionProto add_proto;
-  CreadInstructionProto(result_shape, "add", "add", 3, 2, &add_proto);
-  add_proto.add_operand_ids(1);
-  add_proto.add_operand_ids(2);
-  std::unordered_map<std::int64_t, note::Instruction*> instr3_index;
-  instr3_index.insert(
-      std::pair<std::int64_t, note::Instruction*>(1, &arg1_instr));
-  instr3_index.insert(
-      std::pair<std::int64_t, note::Instruction*>(2, &arg2_instr));
-  note::Instruction instr(add_proto, instr3_index, func_index);
-
-  llvm::LLVMContext llvm_context;
-  llvm::Module llvm_module("add", llvm_context);
-  KernelExecutableMap kernel_executable_map;
-
-  NvptxIrEmitter nvptx_ir_emitter(&llvm_module, &kernel_executable_map);
-  nvptx_ir_emitter.VisitAdd(instr);
-  llvm_module.print(llvm::errs(), nullptr);
-
-  std::string errors;
-  llvm::raw_string_ostream llvm_errors(errors);
-  PADDLE_ENFORCE_NE(llvm::verifyModule(llvm_module, &llvm_errors), true,
-                    llvm_errors.str());
+TEST(NvptxIrEmitter, Int32OpTest) {
+  std::vector<note::OpCode> op_codes = {note::OpCode::kAdd,
+                                        note::OpCode::kMaximum};
+  BinaryOpTest int32_test;
+  for (auto op_code : op_codes) {
+    int32_test.SetInstructionProto({3, 6}, {3, 6}, {3, 6},
+                                   note::ElementTypeProto::S32, op_code);
+    int32_test.GenLLVMIR();
+  }
 }
 
 }  // namespace backends

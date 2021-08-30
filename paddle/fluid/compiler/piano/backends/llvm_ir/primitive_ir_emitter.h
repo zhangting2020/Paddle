@@ -87,6 +87,8 @@ class PrimitiveIrEmitter : public NoteVisitorBase<const note::Instruction&> {
                    llvm::IRBuilder<>* ir_builder);
   llvm::Value* Multiply(llvm::Value* lhs, llvm::Value* rhs,
                         llvm::IRBuilder<>* ir_builder);
+  llvm::Value* Maximum(llvm::Value* lhs, llvm::Value* rhs, bool is_signed,
+                       llvm::IRBuilder<>* ir_builder);
 
   llvm::Value* Load(llvm::Value* input, llvm::Value* index,
                     llvm::IRBuilder<>* ir_builder);

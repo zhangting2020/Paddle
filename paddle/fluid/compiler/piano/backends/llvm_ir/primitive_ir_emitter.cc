@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #include "paddle/fluid/compiler/piano/backends/llvm_ir/primitive_ir_emitter.h"
-#include "paddle/fluid/platform/enforce.h"
 
 namespace paddle {
 namespace piano {
@@ -89,31 +88,35 @@ void PrimitiveIrEmitter::VisitXor(const note::Instruction& instr) {
 
 llvm::Value* PrimitiveIrEmitter::Add(llvm::Value* lhs, llvm::Value* rhs,
                                      llvm::IRBuilder<>* ir_builder) {
-  if (lhs->getType()->isIntegerTy() && rhs->getType()->isIntegerTy()) {
+  if (lhs->getType()->isIntegerTy()) {
     return ir_builder->CreateAdd(lhs, rhs);
-  } else if (lhs->getType()->isFloatingPointTy() &&
-             rhs->getType()->isFloatingPointTy()) {
-    return ir_builder->CreateFAdd(lhs, rhs);
   } else {
-    PADDLE_THROW(platform::errors::InvalidArgument(
-        "The inputs of Add Op should have the same data type, "
-        "but received the types of inputs are %s and %s.",
-        lhs->getType(), rhs->getType()));
+    return ir_builder->CreateFAdd(lhs, rhs);
   }
 }
 
 llvm::Value* PrimitiveIrEmitter::Multiply(llvm::Value* lhs, llvm::Value* rhs,
                                           llvm::IRBuilder<>* ir_builder) {
-  if (lhs->getType()->isIntegerTy() && rhs->getType()->isIntegerTy()) {
+  if (lhs->getType()->isIntegerTy()) {
     return ir_builder->CreateMul(lhs, rhs);
-  } else if (lhs->getType()->isFloatingPointTy() &&
-             rhs->getType()->isFloatingPointTy()) {
-    return ir_builder->CreateFMul(lhs, rhs);
   } else {
-    PADDLE_THROW(platform::errors::InvalidArgument(
-        "The inputs of Multiply Op should have the same data type, "
-        "but received the types of inputs are %s and %s.",
-        lhs->getType(), rhs->getType()));
+    return ir_builder->CreateFMul(lhs, rhs);
+  }
+}
+
+llvm::Value* PrimitiveIrEmitter::Maximum(llvm::Value* lhs, llvm::Value* rhs,
+                                         bool is_signed,
+                                         llvm::IRBuilder<>* ir_builder) {
+  if (lhs->getType()->isIntegerTy()) {
+    llvm::CmpInst::Predicate predicate =
+        is_signed ? llvm::ICmpInst::ICMP_SGE : llvm::ICmpInst::ICMP_UGE;
+    return ir_builder->CreateSelect(ir_builder->CreateICmp(predicate, lhs, rhs),
+                                    lhs, rhs);
+  } else {
+    // Implements IEEE 754-2018 maximum semantics. If one of the
+    // elements being compared is a NaN, then that element is returned.
+    // https://llvm.org/docs/LangRef.html#llvm-maximum-intrinsic
+    return ir_builder->CreateMaximum(lhs, rhs);
   }
 }
 

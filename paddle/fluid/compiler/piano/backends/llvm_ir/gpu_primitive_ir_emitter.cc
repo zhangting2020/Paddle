@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "paddle/fluid/compiler/piano/backends/llvm_ir/gpu_primitive_ir_emitter.h"
+#include "paddle/fluid/compiler/piano/backends/llvm_ir/llvm_utils.h"
 #include "paddle/fluid/compiler/piano/backends/llvm_ir/primitive_ir_emitter.h"
 #include "paddle/fluid/compiler/piano/note/instruction.h"
 #include "paddle/fluid/compiler/piano/note/opcode.h"
@@ -23,13 +24,17 @@ namespace backends {
 
 BinaryFunction GpuPrimitiveIrEmitter::GetBinaryComputation(
     const note::Instruction& instr) {
-  return [&instr, this](llvm::Value* lhs, llvm::Value* rhs,
-                        llvm::IRBuilder<>* builder) -> llvm::Value* {
+  auto lhs_type = instr.operand(0).shape().element_type();
+  bool is_signed = IsSignedInt(lhs_type);
+  return [&instr, is_signed, this](llvm::Value* lhs, llvm::Value* rhs,
+                                   llvm::IRBuilder<>* builder) -> llvm::Value* {
     switch (instr.opcode()) {
       case note::OpCode::kAdd:
         return this->Add(lhs, rhs, builder);
       case note::OpCode::kMultiply:
         return this->Multiply(lhs, rhs, builder);
+      case note::OpCode::kMaximum:
+        return this->Maximum(lhs, rhs, is_signed, builder);
       default:
         PADDLE_THROW(platform::errors::InvalidArgument("Invalid OpCode."));
     }

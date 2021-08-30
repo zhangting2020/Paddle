@@ -14,7 +14,7 @@ cc_library(gpu_ir_emitter SRCS gpu_ir_emitter.cc DEPS ir_emitter llvm_utils llvm
 cc_library(nvptx_ir_emitter SRCS nvptx_ir_emitter.cc DEPS gpu_ir_emitter nvptx_primitive_ir_emitter llvm)
 
 cc_test(nvptx_ir_emitter_test SRCS nvptx_ir_emitter_test.cc
-        DEPS nvptx_ir_emitter note_ir note_proto)
+        DEPS nvptx_ir_emitter note_ir note_proto piano_symbolization_builder)
 target_link_libraries(nvptx_ir_emitter_test ${LLVM_LIBS})
 
 cc_library(llvm_compiler SRCS llvm_compiler.cc DEPS nvptx_ir_emitter nvptx_primitive_ir_emitter note_ir llvm)

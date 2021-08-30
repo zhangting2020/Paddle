@@ -16,6 +16,7 @@
 #include "paddle/fluid/compiler/piano/backends/llvm_ir/llvm_utils.h"
 #include "paddle/fluid/compiler/piano/backends/llvm_ir/nvptx_primitive_ir_emitter.h"
 #include "paddle/fluid/compiler/piano/note/instruction.h"
+#include "paddle/fluid/platform/enforce.h"
 
 namespace paddle {
 namespace piano {
@@ -29,6 +30,12 @@ void GpuIrEmitter::VisitElementwiseBinary(const note::Instruction& instr) {
   auto lhs_type = instr.operand(0).shape().element_type();
   auto rhs_type = instr.operand(1).shape().element_type();
   auto out_type = instr.shape().element_type();
+  PADDLE_ENFORCE_EQ(
+      lhs_type, rhs_type,
+      platform::errors::InvalidArgument(
+          "The inputs of Binary Op should have the same data type, "
+          "but received the types of inputs are %s and %s.",
+          lhs_type, rhs_type));
 
   auto func = CreateLLVMFunction(instr.name(), {lhs_type, rhs_type, out_type},
                                  llvm_module_);
