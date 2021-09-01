@@ -77,7 +77,7 @@ class BinaryOpTest {
     KernelExecutableMap kernel_executable_map;
 
     NvptxIrEmitter nvptx_ir_emitter(&llvm_module, &kernel_executable_map);
-    nvptx_ir_emitter.VisitElementwiseBinary(*instr);
+    instr->Accept(&nvptx_ir_emitter);
 
     // Printing may be disabled with the increase of test cases.
     llvm_module.print(llvm::errs(), nullptr);

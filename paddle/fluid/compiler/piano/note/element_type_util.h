@@ -114,6 +114,8 @@ struct ElementTypeProtoToNativeT<F64> {
   using type = double;
 };
 
+bool IsSignedInt(ElementTypeProto type);
+
 }  // namespace note
 }  // namespace piano
 }  // namespace paddle

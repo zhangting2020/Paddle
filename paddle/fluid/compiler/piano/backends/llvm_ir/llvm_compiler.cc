@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "paddle/fluid/compiler/piano/backends/llvm_ir/llvm_compiler.h"
+#include "llvm/IR/Verifier.h"
 #include "paddle/fluid/compiler/piano/backends/llvm_ir/nvptx_ir_emitter.h"
 
 namespace paddle {
@@ -32,6 +33,12 @@ KernelExecutableMap LlvmCompiler::Apply(note::Module* note_module) {
 
   // conver operator to llvm ir
   ConvertToIr(*note_module, &llvm_module, &kernel_executable_map);
+
+  // verify llvm module
+  std::string errors;
+  llvm::raw_string_ostream llvm_errors(errors);
+  PADDLE_ENFORCE_NE(llvm::verifyModule(llvm_module, &llvm_errors), true,
+                    llvm_errors.str());
 
   // compiler llvm ir to lowring ir
   Compile(*note_module, &llvm_module);

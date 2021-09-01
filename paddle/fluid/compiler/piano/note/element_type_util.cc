@@ -78,6 +78,11 @@ ElementTypeProto NativeToElementTypeProto<double>() {
   return F64;
 }
 
+bool IsSignedInt(ElementTypeProto type) {
+  return type == ElementTypeProto::S8 || type == ElementTypeProto::S16 ||
+         type == ElementTypeProto::S32 || type == ElementTypeProto::S64;
+}
+
 }  // namespace note
 }  // namespace piano
 }  // namespace paddle

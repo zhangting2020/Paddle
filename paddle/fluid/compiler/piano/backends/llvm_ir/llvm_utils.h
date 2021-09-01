@@ -34,8 +34,6 @@ llvm::Function* CreateLLVMFunction(
     const std::string& func_name,
     const std::vector<note::ElementTypeProto>& types, llvm::Module* module);
 
-bool IsSignedInt(note::ElementTypeProto type);
-
 }  // namespace backends
 }  // namespace piano
 }  // namespace paddle

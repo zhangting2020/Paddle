@@ -13,8 +13,8 @@
 // limitations under the License.
 
 #include "paddle/fluid/compiler/piano/backends/llvm_ir/gpu_primitive_ir_emitter.h"
-#include "paddle/fluid/compiler/piano/backends/llvm_ir/llvm_utils.h"
 #include "paddle/fluid/compiler/piano/backends/llvm_ir/primitive_ir_emitter.h"
+#include "paddle/fluid/compiler/piano/note/element_type_util.h"
 #include "paddle/fluid/compiler/piano/note/instruction.h"
 #include "paddle/fluid/compiler/piano/note/opcode.h"
 
@@ -25,7 +25,7 @@ namespace backends {
 BinaryFunction GpuPrimitiveIrEmitter::GetBinaryComputation(
     const note::Instruction& instr) {
   auto lhs_type = instr.operand(0).shape().element_type();
-  bool is_signed = IsSignedInt(lhs_type);
+  bool is_signed = note::IsSignedInt(lhs_type);
   return [&instr, is_signed, this](llvm::Value* lhs, llvm::Value* rhs,
                                    llvm::IRBuilder<>* builder) -> llvm::Value* {
     switch (instr.opcode()) {

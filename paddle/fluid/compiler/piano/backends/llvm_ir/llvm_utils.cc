@@ -75,13 +75,6 @@ llvm::Function* CreateLLVMFunction(
   return func;
 }
 
-bool IsSignedInt(note::ElementTypeProto type) {
-  return type == note::ElementTypeProto::S8 ||
-         type == note::ElementTypeProto::S16 ||
-         type == note::ElementTypeProto::S32 ||
-         type == note::ElementTypeProto::S64;
-}
-
 }  // namespace backends
 }  // namespace piano
 }  // namespace paddle

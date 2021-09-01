@@ -1,7 +1,7 @@
 cc_library(llvm_utils SRCS llvm_utils.cc DEPS llvm)
 
 cc_library(primitive_ir_emitter SRCS primitive_ir_emitter.cc DEPS llvm)
-cc_library(gpu_primitive_ir_emitter SRCS gpu_primitive_ir_emitter.cc DEPS primitive_ir_emitter llvm)
+cc_library(gpu_primitive_ir_emitter SRCS gpu_primitive_ir_emitter.cc DEPS primitive_ir_emitter llvm note_template_util)
 cc_library(nvptx_primitive_ir_emitter SRCS nvptx_primitive_ir_emitter.cc
     DEPS gpu_primitive_ir_emitter llvm_utils llvm)
 
