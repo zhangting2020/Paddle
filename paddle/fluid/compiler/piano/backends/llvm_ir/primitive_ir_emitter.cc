@@ -115,8 +115,10 @@ llvm::Value* PrimitiveIrEmitter::Maximum(llvm::Value* lhs, llvm::Value* rhs,
   } else {
     // Implements IEEE 754-2018 maximum semantics. If one of the
     // elements being compared is a NaN, then that element is returned.
-    // https://llvm.org/docs/LangRef.html#llvm-maximum-intrinsic
-    return ir_builder->CreateMaximum(lhs, rhs);
+    // So we use unordered comparisons because it always return true
+    // when one of the operands is NaN.
+    auto cmp = ir_builder->CreateFCmpUGE(lhs, rhs);
+    return ir_builder->CreateSelect(cmp, lhs, rhs);
   }
 }
 
