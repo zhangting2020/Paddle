@@ -52,58 +52,6 @@ class TestFusedBnAddActAPI(unittest.TestCase):
             name='fc.weight',
             initializer=fluid.initializer.Xavier(uniform=False))
 
-    def build_fused_program(self,
-                            main_program,
-                            startup_program,
-                            use_cuda,
-                            seed=1):
-        with fluid.program_guard(main_program, startup_program):
-            x = fluid.layers.data(name='x', shape=[1, 28, 28], dtype='float32')
-            y = fluid.layers.data(name="y", shape=[1], dtype='int64')
-            conv1_1 = fluid.layers.conv2d(
-                input=x,
-                filter_size=3,
-                num_filters=32,
-                stride=1,
-                padding=1,
-                act=None,
-                param_attr=self.conv_param_attr1,
-                bias_attr=False,
-                data_format='NHWC')
-            conv1_2 = fluid.layers.conv2d(
-                input=x,
-                filter_size=3,
-                num_filters=32,
-                stride=1,
-                padding=1,
-                act=None,
-                param_attr=self.conv_param_attr2,
-                bias_attr=False,
-                data_format='NHWC')
-            bn = fluid.layers.batch_norm(
-                input=conv1_1,
-                param_attr=self.bn_param_attr1,
-                bias_attr=self.bn_bias_attr1,
-                act=None,
-                data_layout='NHWC')
-            fused_bn_add_act = fluid.contrib.layers.fused_bn_add_act(
-                conv1_2,
-                bn,
-                param_attr=self.bn_param_attr2,
-                bias_attr=self.bn_bias_attr2)
-            prediction = fluid.layers.fc(input=fused_bn_add_act,
-                                         size=10,
-                                         act='softmax',
-                                         param_attr=self.fc_param_attr)
-            loss = fluid.layers.cross_entropy(input=prediction, label=y)
-            loss = fluid.layers.mean(loss)
-            sgd = fluid.optimizer.SGD(learning_rate=0.001)
-            sgd = fluid.contrib.mixed_precision.decorate(
-                sgd, use_dynamic_loss_scaling=True, init_loss_scaling=128.0)
-            sgd.minimize(loss)
-
-        return x, y, loss
-
     def build_origin_program(self,
                              main_program,
                              startup_program,
@@ -214,25 +162,6 @@ class TestFusedBnAddActAPI(unittest.TestCase):
     def test_fuse_bn_add_act(self):
         place = fluid.CUDAPlace(0)
         self.check(place, use_cuda=True)
-
-    def test_fuse_bn_add_act_API(self):
-        # build_fused_program: use fused_bn_add_act python API
-        main_program = fluid.Program()
-        startup_program = fluid.Program()
-        place = fluid.CUDAPlace(0)
-        x, y, loss = self.build_fused_program(
-            main_program, startup_program, use_cuda=True)
-        exe = fluid.Executor(place)
-        scope = fluid.Scope()
-        with fluid.scope_guard(scope):
-            exe.run(startup_program)
-            for _ in range(5):
-                x = np.random.random((4, 1, 28, 28)).astype("float32")
-                y = np.random.random((4, 1)).astype("int64")
-                loss_v = exe.run(main_program,
-                                 feed={"x": x,
-                                       "y": y},
-                                 fetch_list=[loss])
 
 
 if __name__ == '__main__':
