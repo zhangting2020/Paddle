@@ -38,6 +38,9 @@
 #include "paddle/phi/common/bfloat16.h"
 #include "paddle/phi/common/float16.h"
 
+#include "paddle/fluid/platform/profiler/event_tracing.h"
+#include "paddle/fluid/platform/profiler/profiler.h"
+
 namespace phi {
 
 template <typename T, typename Context>
@@ -54,6 +57,19 @@ void ConvCudnnKernel(const Context& ctx,
                      int workspace_size_MB,
                      bool exhaustive_search_t,
                      DenseTensor* output) {
+  using paddle::platform::ProfilerOptions;
+  using paddle::platform::Profiler;
+  using paddle::platform::RecordInstantEvent;
+  using paddle::platform::TracerEventType;
+  using paddle::platform::ProfilerResult;
+  ProfilerOptions options;
+  options.trace_level = 1;
+  options.trace_switch = 3;
+  auto profiler = Profiler::Create(options);
+
+  profiler->Prepare();
+  profiler->Start();
+
   output->mutable_data<T>(ctx.GetPlace());
   std::vector<int> paddings = paddings_t;
   std::vector<int> dilations = dilations_t;
@@ -387,6 +403,8 @@ void ConvCudnnKernel(const Context& ctx,
   if (channel_last && compute_format == paddle::platform::DataLayout::kNCHW) {
     TransToChannelLast<Context, T>(ctx, &transformed_output, output);
   }
+
+  auto profiler_result = profiler->Stop();
 }
 
 template <typename T, typename Context>
