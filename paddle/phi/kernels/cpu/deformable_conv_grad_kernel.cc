@@ -104,7 +104,7 @@ inline void ModulatedDeformableCol2imCPUKernel(
   }
 }
 
-template <typename T, typename MT, typename Context>
+template <typename T, typename Context>
 void ModulatedDeformableCol2im(const Context& dev_ctx,
                                const T* data_col,
                                const T* data_offset,
@@ -116,7 +116,7 @@ void ModulatedDeformableCol2im(const Context& dev_ctx,
                                const std::vector<int>& stride,
                                const std::vector<int>& dilation,
                                const int deformable_group,
-                               MT* grad_im) {
+                               T* grad_im) {
   int channel_per_deformable_group = im_shape[0] / deformable_group;
   int num_kernels = col_shape[0] * col_shape[1] * col_shape[2] * col_shape[3];
 

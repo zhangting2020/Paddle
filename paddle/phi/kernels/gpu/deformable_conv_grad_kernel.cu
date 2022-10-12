@@ -29,7 +29,7 @@ static inline int NumBlocks(const int N) {
                   kNumMaximumNumBlocks);
 }
 
-template <typename T, typename MT>
+template <typename T>
 __global__ void ModulatedDeformableCol2imGpuKernel(
     const int nthreads,
     const T* data_col,
@@ -51,7 +51,7 @@ __global__ void ModulatedDeformableCol2imGpuKernel(
     const int deformable_group,
     const int height_col,
     const int width_col,
-    MT* grad_im) {
+    T* grad_im) {
   int index = blockIdx.x * blockDim.x + threadIdx.x;
   int offset = blockDim.x * gridDim.x;
   for (size_t thread = index; thread < nthreads; thread += offset) {
@@ -114,7 +114,7 @@ __global__ void ModulatedDeformableCol2imGpuKernel(
   }
 }
 
-template <typename T, typename MT, typename Context>
+template <typename T, typename Context>
 void ModulatedDeformableCol2im(const Context& dev_ctx,
                                const T* data_col,
                                const T* data_offset,
@@ -126,7 +126,7 @@ void ModulatedDeformableCol2im(const Context& dev_ctx,
                                const std::vector<int>& stride,
                                const std::vector<int>& dilation,
                                const int deformable_group,
-                               MT* grad_im) {
+                               T* grad_im) {
   int channel_per_deformable_group = im_shape[0] / deformable_group;
   int num_kernels = col_shape[0] * col_shape[1] * col_shape[2] * col_shape[3];
   int blocks = NumBlocks(num_kernels);

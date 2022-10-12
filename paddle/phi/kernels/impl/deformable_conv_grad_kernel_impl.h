@@ -145,7 +145,7 @@ void ModulatedDeformableCol2imCoord(const Context& dev_ctx,
                                     T* grad_offset,
                                     T* grad_mask);
 
-template <typename T, typename MT, typename Context>
+template <typename T, typename Context>
 void ModulatedDeformableCol2im(const Context& dev_ctx,
                                const T* data_col,
                                const T* data_offset,
@@ -157,7 +157,7 @@ void ModulatedDeformableCol2im(const Context& dev_ctx,
                                const std::vector<int>& stride,
                                const std::vector<int>& dilation,
                                const int deformable_group,
-                               MT* grad_im);
+                               T* grad_im);
 
 template <typename T, typename Context>
 void FilterGradAddup(const Context& dev_ctx,
