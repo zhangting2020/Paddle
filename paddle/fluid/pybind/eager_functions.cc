@@ -1265,9 +1265,8 @@ static PyObject* eager_api_set_master_grads(PyObject* self,
                           "Detected NULL grad"
                           "Please check if you have manually cleared"
                           "the grad inside autograd_meta"));
-    auto dtype = (*grad).dtype();
-    if ((*grad).initialized() &&
-        (dtype == phi::DataType::FLOAT16 || dtype == phi::DataType::BFLOAT16)) {
+    if ((*grad).initialized() && ((*grad).dtype() == phi::DataType::FLOAT16 ||
+                                  (*grad).dtype() == phi::DataType::BFLOAT16)) {
       auto master_grad =
           paddle::experimental::cast(*grad, phi::DataType::FLOAT32);
       grad->set_impl(master_grad.impl());
