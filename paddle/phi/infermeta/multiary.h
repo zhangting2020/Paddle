@@ -908,6 +908,15 @@ void FusedRopeInferMeta(const MetaTensor& q,
                         MetaTensor* out_k,
                         MetaTensor* out_v);
 
+void FusedRopeInferMeta3D(const MetaTensor& q,
+                          const MetaTensor& k,
+                          const MetaTensor& v,
+                          const MetaTensor& sin,
+                          const MetaTensor& cos,
+                          MetaTensor* out_q,
+                          MetaTensor* out_k,
+                          MetaTensor* out_v);
+
 void FusedTokenPruneInferMeta(const MetaTensor& attn,
                               const MetaTensor& x,
                               const MetaTensor& mask,
