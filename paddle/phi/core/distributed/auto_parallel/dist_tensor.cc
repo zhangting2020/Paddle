@@ -43,7 +43,7 @@ TensorDistAttr ToTensorDistAttr(const ProcessMesh& process_mesh,
   dist_attr.set_process_mesh(process_mesh);
 
   // Step2: set dim_mapping
-  int64_t ndim = dims.size();
+  int64_t ndim = dims == phi::make_ddim({}) ? 0 : dims.size();
   std::vector<int64_t> dim_map(ndim, -1);
   for (size_t i = 0; i < placements.size(); i++) {
     auto& placement = placements[i];
@@ -172,7 +172,7 @@ DistTensor::DistTensor(const std::shared_ptr<phi::DenseTensor>& local_value,
   } else {
     value_ = std::make_shared<DenseTensor>(
         std::make_shared<phi::Allocation>(nullptr, 0, local_value->place()),
-        phi::DenseTensorMeta(local_value->dtype(), global_dims_));
+        phi::DenseTensorMeta(local_value->dtype(), phi::make_ddim({0})));
   }
 }
 
@@ -197,6 +197,10 @@ DistTensor::DistTensor(const std::shared_ptr<phi::DenseTensor>& global_value,
     : global_dims_(global_value->dims()) {
   process_mesh_ = process_mesh;
   placements_ = placements;
+  if (global_dims_ == DDim()) {
+    VLOG(4) << "=================  global_dims_.size() == -1 and global_dims_ == phi::make_ddim({0}) ===========";
+    global_dims_ = phi::make_ddim({});
+  }
   dist_attr_ = ToTensorDistAttr(process_mesh_, placements_, global_dims_);
 
   // If the current rank doesn't in process_mesh, we should create an

@@ -87,12 +87,14 @@ class _NdMeshAlltoAll(PyLayer):
         ctx.out_mesh = copy.deepcopy(mesh)
         ctx.out_placements = copy.deepcopy(placements)
 
-        out = dist.auto_parallel.api.dtensor_from_local(
-            dist_tensor._local_value(), sub_mesh, [dist_tensor.placements[dim]]
+        local_shape = _cal_local_shape(dist_tensor.shape, mesh, dist_tensor.placements)
+        out = dist.auto_parallel.api.moe_dtensor_from_local(
+            dist_tensor._local_value(), local_shape, sub_mesh, [dist_tensor.placements[dim]]
         )
         out = dist.reshard(out, sub_mesh, [placements[dim]])
-        out = dist.auto_parallel.api.dtensor_from_local(
-            out._local_value(), mesh, placements
+        local_shape = _cal_local_shape(out.shape, mesh, out.placements)
+        out = dist.auto_parallel.api.moe_dtensor_from_local(
+            out._local_value(), local_shape, mesh, placements
         )
         out.stop_gradient = dist_tensor.stop_gradient
         return out
@@ -148,7 +150,10 @@ class _local_reshape(PyLayer):
         place = paddle.framework._current_expected_place()
         place = paddle.framework._get_paddle_place(place)
 
-        local_tensor = dist_tensor._local_value().clone()
+        if dist_tensor._local_value()._is_initialized():
+            local_tensor = dist_tensor._local_value().clone()
+        else:
+            local_tensor = dist_tensor._local_value()
         ctx.x_global_shape = copy.deepcopy(dist_tensor.shape)
         ctx.x_local_shape = copy.deepcopy(local_tensor.shape)
         ctx.x_mesh = copy.deepcopy(dist_tensor.process_mesh)
@@ -170,8 +175,15 @@ class _local_reshape(PyLayer):
         place = paddle.framework._current_expected_place()
         place = paddle.framework._get_paddle_place(place)
 
-        local_grad = out_grad._local_value().clone()
-        local_grad = local_grad.reshape(ctx.x_local_shape)
+        print("=========  _local_reshape backward: ", out_grad.shape, out_grad._local_shape, out_grad.placements, ctx.x_local_shape)
+        if out_grad._local_value()._is_initialized():
+            print("================= out_grad._local_value()._is_initialized()")
+            local_grad = out_grad._local_value().clone()
+            x_local_shape = ctx.x_local_shape
+        else:
+            local_grad = out_grad._local_value()
+            x_local_shape = [0]
+        local_grad = local_grad.reshape(x_local_shape)
         ret = paddle.Tensor(
             local_grad,
             dims=ctx.x_global_shape,
@@ -195,6 +207,8 @@ def _dist_reshape(
     tgt_global_shape = infer_positive_shape(dist_tensor.shape, global_shape)
     tgt_local_shape = _cal_local_shape(tgt_global_shape, mesh, placements)
     src_local_shape = dist_tensor._local_value().shape
+    if not dist_tensor._local_value()._is_initialized():
+        tgt_local_shape = dist_tensor._local_value().shape
     assert np.prod(tgt_local_shape) == np.prod(
         src_local_shape
     ), f"The local shapes {src_local_shape} and {tgt_local_shape} are mismatched."

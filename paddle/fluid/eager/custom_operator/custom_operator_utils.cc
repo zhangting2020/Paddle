@@ -438,14 +438,17 @@ static std::vector<std::vector<phi::DataType>> RunInferDtypeFunc(
 paddle::Tensor BuildEmptyDistPaddleTensor(
     const phi::distributed::ProcessMesh& process_mesh,
     const phi::DDim& dims,
-    phi::DataType dtype) {
+    phi::DataType dtype,
+    std::vector<int64_t> dims_mapping) {
   paddle::Tensor empty_tensor;
   phi::DenseTensorMeta meta;
+  // meta.dims = phi::make_ddim({0});
   meta.dims = dims;
   meta.dtype = dtype;
 
   auto dist_attr = phi::distributed::TensorDistAttr(common::vectorize(dims));
   dist_attr.set_process_mesh(process_mesh);
+  dist_attr.set_dims_mapping(dims_mapping);
 
   auto dist_t = std::make_shared<phi::distributed::DistTensor>(
       std::make_shared<phi::DenseTensor>(
@@ -700,14 +703,14 @@ std::
         output_dims.emplace_back(out_dim[0]);
         if (!rank_is_in_current_mesh) {
           *(ctx.MutableOutputAt(pair.first)) = BuildEmptyDistPaddleTensor(
-              current_process_mesh, out_dim[0], out_dtype[0]);
+              current_process_mesh, out_dim[0], out_dtype[0], paddle::get<0>(spmd_info.second[i]).dims_mapping());
         }
       } else {
         for (size_t j = pair.first; j < pair.second; j++) {
           output_dims.emplace_back(out_dim[j]);
           if (!rank_is_in_current_mesh) {
             *(ctx.MutableOutputAt(j)) = BuildEmptyDistPaddleTensor(
-                current_process_mesh, out_dim[j], out_dtype[j]);
+                current_process_mesh, out_dim[j], out_dtype[j], paddle::get<0>(spmd_info.second[i]).dims_mapping());
           }
         }
       }
