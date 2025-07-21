@@ -1488,6 +1488,11 @@ void OverlapAddGradInferMeta(const MetaTensor& x,
   }
 }
 
+inline int64_t HandleDynamicDim(int64_t maybe_dynamic_dim,
+                                int64_t static_result) {
+  return maybe_dynamic_dim == -1 ? -1 : static_result;
+}
+
 void PixelUnshuffleGradInferMeta(const MetaTensor& out_grad,
                                  int downscale_factor,
                                  const std::string& data_format,
@@ -1506,13 +1511,15 @@ void PixelUnshuffleGradInferMeta(const MetaTensor& out_grad,
   dx_dims[0] = do_dims[0];
 
   if (!channel_last) {
-    dx_dims[1] = do_dims[1] / (downscale_factor * downscale_factor);
-    dx_dims[2] = do_dims[2] * downscale_factor;
-    dx_dims[3] = do_dims[3] * downscale_factor;
+    dx_dims[1] = HandleDynamicDim(
+        do_dims[1], do_dims[1] / (downscale_factor * downscale_factor));
+    dx_dims[2] = HandleDynamicDim(do_dims[2], do_dims[2] * downscale_factor);
+    dx_dims[3] = HandleDynamicDim(do_dims[3], do_dims[3] * downscale_factor);
   } else {
-    dx_dims[1] = do_dims[1] * downscale_factor;
-    dx_dims[2] = do_dims[2] * downscale_factor;
-    dx_dims[3] = do_dims[3] / (downscale_factor * downscale_factor);
+    dx_dims[1] = HandleDynamicDim(do_dims[1], do_dims[1] * downscale_factor);
+    dx_dims[2] = HandleDynamicDim(do_dims[2], do_dims[2] * downscale_factor);
+    dx_dims[3] = HandleDynamicDim(
+        do_dims[3], do_dims[3] / (downscale_factor * downscale_factor));
   }
   x_grad->set_dims(dx_dims);
   x_grad->set_dtype(out_grad.dtype());
@@ -1743,7 +1750,7 @@ void StackGradInferMeta(const MetaTensor& out_grad,
           x_grad.size(),
           static_cast<size_t>(dy_dim[axis])));
 
-  auto vec = common::vectorize<int>(dy_dim);
+  auto vec = common::vectorize<int64_t>(dy_dim);
   vec.erase(vec.begin() + axis);
 
   for (auto& grad : x_grad) {
@@ -1941,12 +1948,28 @@ void IndexPutGradInferMeta(const MetaTensor& x,
 void IndexElementwisePutGradInferMeta(
     const MetaTensor& x,
     const std::vector<const MetaTensor*>& index,
+    const MetaTensor& out_grad,
+    const std::vector<int64_t>& input_dims,
+    const std::vector<int64_t>& input_strides,
+    const std::vector<int64_t>& index_dims,
+    const std::vector<int64_t>& index_strides,
+    const int64_t slice_offset,
+    MetaTensor* x_grad) {
+  if (x_grad) {
+    x_grad->share_meta(x);
+  }
+}
+
+void IndexElementwisePutWithTensorGradInferMeta(
+    const MetaTensor& x,
+    const std::vector<const MetaTensor*>& index,
     const MetaTensor& value,
     const MetaTensor& out_grad,
     const std::vector<int64_t>& input_dims,
     const std::vector<int64_t>& input_strides,
     const std::vector<int64_t>& index_dims,
     const std::vector<int64_t>& index_strides,
+    const int64_t slice_offset,
     MetaTensor* x_grad,
     MetaTensor* value_grad) {
   if (x_grad) {
@@ -1992,7 +2015,7 @@ void FusedRopeGradInferMeta(const MetaTensor& sin,
 }
 
 void SetValueGradInferMeta(const MetaTensor& out_grad,
-                           const MetaTensor& values,
+                           const MetaTensor& value,
                            MetaTensor* x_grad,
                            MetaTensor* value_grad) {
   if (x_grad) {
@@ -2001,9 +2024,9 @@ void SetValueGradInferMeta(const MetaTensor& out_grad,
     x_grad->share_lod(out_grad);
   }
   if (value_grad) {
-    value_grad->set_dims(values.dims());
-    value_grad->set_dtype(values.dtype());
-    value_grad->share_lod(values);
+    value_grad->set_dims(value.dims());
+    value_grad->set_dtype(value.dtype());
+    value_grad->share_lod(value);
   }
 }
 
@@ -2086,10 +2109,24 @@ void FusedRMSNormGradInferMeta(const MetaTensor& x,
                                float epsilon,
                                MetaTensor* x_grad,
                                MetaTensor* scale_grad) {
-  x_grad->set_dims(x.dims());
-  x_grad->set_dtype(x.dtype());
-  scale_grad->set_dims(scale.dims());
-  scale_grad->set_dtype(scale.dtype());
+  PADDLE_ENFORCE_EQ(
+      x.dtype() == DataType::FLOAT32 || x.dtype() == DataType::BFLOAT16,
+      true,
+      common::errors::InvalidArgument(
+          "The dtype of x must be FLOAT32 or BFLOAT16, but got [%s]",
+          x.dtype()));
+  PADDLE_ENFORCE_EQ(
+      scale.dtype() == DataType::FLOAT32 || scale.dtype() == DataType::BFLOAT16,
+      true,
+      common::errors::InvalidArgument(
+          "The dtype of scale must be FLOAT32 or BFLOAT16, but got [%s]",
+          scale.dtype()));
+  if (x_grad && x) {
+    x_grad->share_meta(x);
+  }
+  if (scale_grad && scale) {
+    scale_grad->share_meta(scale);
+  }
 }
 
 void IndexElementwiseGetGradInferMeta(
@@ -2100,6 +2137,8 @@ void IndexElementwiseGetGradInferMeta(
     const std::vector<int64_t>& input_strides,
     const std::vector<int64_t>& index_dims,
     const std::vector<int64_t>& index_strides,
+    const int64_t slice_offset,
+    const bool accumulate,
     MetaTensor* x_grad) {
   if (x_grad) {
     x_grad->share_meta(x);

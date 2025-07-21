@@ -55,10 +55,19 @@ if(WITH_DISTRIBUTE)
     py_test_modules(test_cummax_rule MODULES test_cummax_rule)
     py_test_modules(test_cummin_rule MODULES test_cummin_rule)
     py_test_modules(test_argsort_rule MODULES test_argsort_rule)
+    py_test_modules(test_label_smooth_rule MODULES test_label_smooth_rule)
     py_test_modules(test_index_select_rule MODULES test_index_select_rule)
     py_test_modules(test_put_along_axis_rule MODULES test_put_along_axis_rule)
     py_test_modules(test_fused_gemm_epilogue_rule MODULES
                     test_fused_gemm_epilogue_rule)
+    py_test_modules(test_gelu_rule MODULES test_gelu_rule)
+    py_test_modules(test_take_along_axis_rule MODULES test_take_along_axis_rule)
+    py_test_modules(test_conv3d_rule MODULES test_conv3d_rule)
+    py_test_modules(test_depthwise_conv2d_rule MODULES
+                    test_depthwise_conv2d_rule)
+    py_test_modules(test_conv2d_transpose_rule MODULES
+                    test_conv2d_transpose_rule)
+    py_test_modules(test_einsum_rule MODULES test_einsum_rule)
   endif()
   # End of unittests WITH single card WITHOUT timeout
 
