@@ -662,6 +662,38 @@ PHI_DEFINE_EXPORTED_uint64(
     "The real chunk size is max(request_size, "
     "FLAGS_auto_growth_chunk_size_in_mb).");
 
+/**
+ * Memory related FLAG
+ * Name: FLAGS_alignment_size
+ * Since Version: 3.1.0
+ * Value Range: uint64, default=256 (Byte)
+ * Example:
+ * Note: The alignment size of GPU memory block in auto_growth allocator.
+ *       The request size will be rounded up to a multiple of the aligned size.
+ */
+// PHI_DEFINE_EXPORTED_uint64(
+//     alignment_size,
+//     256ul,
+//     "The alignment size of GPU memory in auto_growth allocator.  "
+//     "The request size will be rounded up to a multiple of the aligned
+//     size.");
+//
+///**
+// * Memory related FLAG
+// * Name: FLAGS_alignment_size
+// * Since Version: 3.1.0
+// * Value Range: uint64, default=256 (Byte)
+// * Example:
+// * Note: The alignment size of GPU memory block in auto_growth allocator.
+// *       The request size will be rounded up to a multiple of the aligned
+// size.
+// */
+// PHI_DEFINE_EXPORTED_uint64(
+//    small_pool_size_in_mb,
+//    1ul,
+//    "The alignment size of GPU memory in auto_growth allocator.  "
+//    "The request size will be rounded up to a multiple of the aligned size.");
+
 #endif
 
 /**

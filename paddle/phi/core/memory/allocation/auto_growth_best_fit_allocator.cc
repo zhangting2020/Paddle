@@ -44,6 +44,9 @@ PHI_DEFINE_EXPORTED_READONLY_bool(print_allocator_trace_info,
                                   "print trace memory info");
 
 PHI_DEFINE_EXPORTED_READONLY_bool(dump_chunk_info, false, "dump chunk info");
+PHI_DEFINE_EXPORTED_uint64(alignment_size, 256, "dump chunk info");
+PHI_DEFINE_EXPORTED_uint64(small_pool_size_in_mb, 1, "dump chunk info");
+
 namespace paddle::memory::allocation {
 
 AutoGrowthBestFitAllocator::AutoGrowthBestFitAllocator(
@@ -85,6 +88,16 @@ void AutoGrowthBestFitAllocator::DumpInfo() const {
               << std::endl;
   }
 }
+
+bool AutoGrowthBestFitAllocator::is_small_free_block(size_t size) {
+  auto small_pool_size = FLAGS_small_pool_size_in_mb << 20;
+  if (size <= small_pool_size) {
+    return true;
+  } else {
+    return false;
+  }
+}
+
 phi::Allocation *AutoGrowthBestFitAllocator::AllocateImpl(
     size_t unaligned_size) {
   phi::RecordEvent record("AutoGrowthBestFitAllocator::Allocate",
@@ -97,26 +110,31 @@ phi::Allocation *AutoGrowthBestFitAllocator::AllocateImpl(
            << ", extra size " << extra_padding_size_;
 
   std::lock_guard<SpinLock> guard(spinlock_);
-  auto iter = free_blocks_.lower_bound(std::make_pair(size, nullptr));
+  bool is_small = is_small_free_block(size);
+  auto &free_blocks = is_small ? small_free_blocks_ : large_free_blocks_;
+  auto iter = free_blocks.lower_bound(std::make_pair(size, nullptr));
   BlockIt block_it;
-  if (iter != free_blocks_.end()) {
+  if (iter != free_blocks.end()) {
     block_it = iter->second;
-    free_blocks_.erase(iter);
+    free_blocks.erase(iter);
     auto *chunk = block_it->chunk_;
     size_t remaining_size = block_it->size_ - size;
     VLOG(10) << "Allocate " << size << " bytes from chunk size "
              << block_it->size_ << ", remaining " << remaining_size;
     if (remaining_size == 0) {
       block_it->is_free_ = false;
+      block_it->is_small_ = is_small;
     } else {
       auto remaining_free_block = chunk->blocks_.insert(
-          block_it, Block(block_it->ptr_, remaining_size, true, chunk));
-      free_blocks_.emplace(std::make_pair(remaining_size, block_it->ptr_),
-                           remaining_free_block);
+          block_it,
+          Block(block_it->ptr_, remaining_size, true, is_small, chunk));
+      free_blocks.emplace(std::make_pair(remaining_size, block_it->ptr_),
+                          remaining_free_block);
       block_it->ptr_ =
           reinterpret_cast<uint8_t *>(block_it->ptr_) + remaining_size;
       block_it->size_ = size;
       block_it->is_free_ = false;
+      block_it->is_small_ = is_small;
     }
   } else {
     if (FLAGS_dump_chunk_info) {
@@ -151,10 +169,10 @@ phi::Allocation *AutoGrowthBestFitAllocator::AllocateImpl(
 
     size_t remaining_size = realloc_size - size;
     if (remaining_size > 0) {
-      blocks.emplace_back(p, remaining_size, true, chunk);
-      free_blocks_.emplace(std::make_pair(remaining_size, p), --(blocks.end()));
+      blocks.emplace_back(p, remaining_size, true, is_small, chunk);
+      free_blocks.emplace(std::make_pair(remaining_size, p), --(blocks.end()));
     }
-    blocks.emplace_back(p + remaining_size, size, false, chunk);
+    blocks.emplace_back(p + remaining_size, size, false, is_small, chunk);
     block_it = --(blocks.end());
     VLOG(2) << "Not found and reallocate " << realloc_size << "("
             << static_cast<void *>(p) << "), and remaining " << remaining_size;
@@ -179,6 +197,8 @@ void AutoGrowthBestFitAllocator::FreeImpl(phi::Allocation *allocation) {
   std::lock_guard<SpinLock> guard(spinlock_);
   auto block_it = static_cast<BlockAllocation *>(allocation)->block_it_;
   auto &blocks = block_it->chunk_->blocks_;
+  bool is_small = block_it->is_small_;
+  auto &free_blocks = is_small ? small_free_blocks_ : large_free_blocks_;
 
   total_free_times_ += 1;
   total_free_size_ += block_it->size_;
@@ -190,7 +210,7 @@ void AutoGrowthBestFitAllocator::FreeImpl(phi::Allocation *allocation) {
     --prev_it;
 
     if (prev_it->is_free_) {
-      free_blocks_.erase(std::make_pair(prev_it->size_, prev_it->ptr_));
+      free_blocks.erase(std::make_pair(prev_it->size_, prev_it->ptr_));
       prev_it->size_ += block_it->size_;
       blocks.erase(block_it);
       block_it = prev_it;
@@ -202,13 +222,13 @@ void AutoGrowthBestFitAllocator::FreeImpl(phi::Allocation *allocation) {
 
   // It's weird that using `next_it == blocks.end()` will cause a judgment fail.
   if (block_it != (--blocks.end()) && next_it->is_free_) {
-    free_blocks_.erase(std::make_pair(next_it->size_, next_it->ptr_));
+    free_blocks.erase(std::make_pair(next_it->size_, next_it->ptr_));
     block_it->size_ += next_it->size_;
     blocks.erase(next_it);
   }
 
-  free_blocks_.emplace(std::make_pair(block_it->size_, block_it->ptr_),
-                       block_it);
+  free_blocks.emplace(std::make_pair(block_it->size_, block_it->ptr_),
+                      block_it);
 
   delete allocation;
 
@@ -229,13 +249,15 @@ uint64_t AutoGrowthBestFitAllocator::FreeIdleChunks() {
     auto &blocks = chunk_it->blocks_;
     if (blocks.size() == 1 && blocks.begin()->is_free_) {
       auto &block = *blocks.begin();
+      bool is_small = block.is_small_;
+      auto &free_blocks = is_small ? small_free_blocks_ : large_free_blocks_;
       VLOG(2) << "Free chunk with size " << block.size_;
       if (FLAGS_dump_chunk_info) {
         std::cout << "FreeIdleChunks chunk is " << block.size_ << ", "
                   << block.ptr_ << std::endl;
       }
       bytes += block.size_;
-      free_blocks_.erase(std::make_pair(block.size_, block.ptr_));
+      free_blocks.erase(std::make_pair(block.size_, block.ptr_));
       chunk_it = chunks_.erase(chunk_it);
     } else {
       ++chunk_it;
@@ -249,10 +271,15 @@ uint64_t AutoGrowthBestFitAllocator::FreeIdleChunks() {
 }
 
 void AutoGrowthBestFitAllocator::Trace() const {
-  size_t cur_idle_bytes = 0;
-  auto it = free_blocks_.begin();
-  for (; it != free_blocks_.end(); ++it) {
-    cur_idle_bytes += it->second->size_;
+  size_t small_cur_idle_bytes = 0;
+  auto small_it = small_free_blocks_.begin();
+  for (; small_it != small_free_blocks_.end(); ++small_it) {
+    small_cur_idle_bytes += small_it->second->size_;
+  }
+  size_t large_cur_idle_bytes = 0;
+  auto large_it = large_free_blocks_.begin();
+  for (; large_it != large_free_blocks_.end(); ++large_it) {
+    large_cur_idle_bytes += large_it->second->size_;
   }
 
   VLOG(1) << "alloc:"
@@ -262,11 +289,14 @@ void AutoGrowthBestFitAllocator::Trace() const {
           << "m busy:"
           << (total_alloc_size_ - total_free_size_) /  // NOLINT
                  static_cast<double>(1024 * 1024)
-          << "m idle:"
-          << cur_idle_bytes / static_cast<double>(1024 * 1024)  // NOLINT
+          << "m small idle:"
+          << small_cur_idle_bytes / static_cast<double>(1024 * 1024)  // NOLINT
+          << "m large idle:"
+          << large_cur_idle_bytes / static_cast<double>(1024 * 1024)  // NOLINT
           << "m alloc_times:" << total_alloc_times_
           << " free_times:" << total_free_times_
-          << " free_blocks_num:" << free_blocks_.size()
+          << " small free_blocks_num:" << small_free_blocks_.size()
+          << " large free_blocks_num:" << large_free_blocks_.size()
           << " curr_chunks_num:" << chunks_.size();
 }
 

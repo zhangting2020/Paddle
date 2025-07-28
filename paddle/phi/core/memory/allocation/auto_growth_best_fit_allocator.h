@@ -46,6 +46,8 @@ class AutoGrowthBestFitAllocator : public Allocator {
 
   void FreeImpl(phi::Allocation *allocation) override;
 
+  bool is_small_free_block(size_t size);
+
   // Release the memory block which is not used in pool.
   uint64_t ReleaseImpl(const phi::Place &place) override {
     // TODO(vivienfanghuagood): the next line may cause the process to deadlock.
@@ -66,12 +68,17 @@ class AutoGrowthBestFitAllocator : public Allocator {
   struct Chunk;
 
   struct Block {
-    Block(void *ptr, size_t size, bool is_free, Chunk *chunk)
-        : ptr_(ptr), size_(size), is_free_(is_free), chunk_(chunk) {}
+    Block(void *ptr, size_t size, bool is_free, bool is_small, Chunk *chunk)
+        : ptr_(ptr),
+          size_(size),
+          is_free_(is_free),
+          is_small_(is_small),
+          chunk_(chunk) {}
 
     void *ptr_;
     size_t size_;
     bool is_free_;
+    bool is_small_;
     Chunk *chunk_;  // which chunk it is from
   };
 
@@ -97,7 +104,8 @@ class AutoGrowthBestFitAllocator : public Allocator {
   using BlockIt = List<Block>::iterator;
 
   std::shared_ptr<Allocator> underlying_allocator_;
-  std::map<std::pair<size_t, void *>, BlockIt> free_blocks_;
+  std::map<std::pair<size_t, void *>, BlockIt> small_free_blocks_;
+  std::map<std::pair<size_t, void *>, BlockIt> large_free_blocks_;
   std::list<Chunk> chunks_;
   size_t alignment_;
   size_t chunk_size_;
