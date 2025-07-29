@@ -47,6 +47,7 @@ class AutoGrowthBestFitAllocator : public Allocator {
   void FreeImpl(phi::Allocation *allocation) override;
 
   bool is_small_free_block(size_t size);
+  size_t auto_growth_size(bool is_small, size_t chunk_size);
 
   // Release the memory block which is not used in pool.
   uint64_t ReleaseImpl(const phi::Place &place) override {

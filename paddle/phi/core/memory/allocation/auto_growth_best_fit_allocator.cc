@@ -46,6 +46,12 @@ PHI_DEFINE_EXPORTED_READONLY_bool(print_allocator_trace_info,
 PHI_DEFINE_EXPORTED_READONLY_bool(dump_chunk_info, false, "dump chunk info");
 PHI_DEFINE_EXPORTED_uint64(alignment_size, 256, "dump chunk info");
 PHI_DEFINE_EXPORTED_uint64(small_pool_size_in_mb, 1, "dump chunk info");
+PHI_DEFINE_EXPORTED_uint64(small_pool_auto_growth_chunk_size_in_mb,
+                           0,
+                           "dump chunk info");
+PHI_DEFINE_EXPORTED_uint64(large_pool_auto_growth_chunk_size_in_mb,
+                           0,
+                           "dump chunk info");
 
 namespace paddle::memory::allocation {
 
@@ -98,6 +104,28 @@ bool AutoGrowthBestFitAllocator::is_small_free_block(size_t size) {
   }
 }
 
+size_t AutoGrowthBestFitAllocator::auto_growth_size(bool is_small,
+                                                    size_t chunk_size) {
+  size_t auto_growth_chunk_size = 0;
+  if (chunk_size > 0) {
+    auto_growth_chunk_size = chunk_size;
+  }
+
+  if (is_small) {
+    auto_growth_chunk_size = FLAGS_small_pool_auto_growth_chunk_size_in_mb
+                             << 20;
+  } else {
+    auto_growth_chunk_size = FLAGS_large_pool_auto_growth_chunk_size_in_mb
+                             << 20;
+  }
+
+  if (FLAGS_dump_chunk_info) {
+    std::cout << "is_small = " << is_small
+              << "auto_growth_size = " << auto_growth_chunk_size << std::endl;
+  }
+  return auto_growth_chunk_size;
+}
+
 phi::Allocation *AutoGrowthBestFitAllocator::AllocateImpl(
     size_t unaligned_size) {
   phi::RecordEvent record("AutoGrowthBestFitAllocator::Allocate",
@@ -146,7 +174,8 @@ phi::Allocation *AutoGrowthBestFitAllocator::AllocateImpl(
     if (FLAGS_free_when_no_cache_hit) {
       FreeIdleChunks();
     }
-    size_t realloc_size = std::max(size, chunk_size_);
+    size_t realloc_size =
+        std::max(size, auto_growth_size(is_small, chunk_size_));
 
     try {
       chunks_.emplace_back(static_unique_ptr_cast<Allocation>(
