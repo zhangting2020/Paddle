@@ -52,6 +52,13 @@ PHI_DEFINE_EXPORTED_uint64(small_pool_auto_growth_chunk_size_in_mb,
 PHI_DEFINE_EXPORTED_uint64(large_pool_auto_growth_chunk_size_in_mb,
                            0,
                            "dump chunk info");
+PHI_DEFINE_EXPORTED_uint64(large_pool_pre_alloc_in_mb,
+                           0,
+                           "dump chunk info");
+PHI_DEFINE_EXPORTED_uint64(samll_pool_pre_alloc_in_mb,
+                           0,
+                           "dump chunk info");                           
+
 
 namespace paddle::memory::allocation {
 
@@ -71,6 +78,28 @@ AutoGrowthBestFitAllocator::AutoGrowthBestFitAllocator(
   total_free_times_ = 0;
   total_free_size_ = 0;
   VLOG(4) << "chunk_size_:" << chunk_size_;
+
+  auto small_pool_pre_alloc_in_mb = FLAGS_samll_pool_pre_alloc_in_mb << 20;
+  auto large_pool_pre_alloc_in_mb = FLAGS_large_pool_pre_alloc_in_mb << 20;
+  if (small_pool_pre_alloc_in_mb > 0){
+    chunks_.emplace_back(static_unique_ptr_cast<Allocation>(
+            underlying_allocator_->Allocate(small_pool_pre_alloc_in_mb)));
+    auto *chunk = &(*chunks_.rbegin());
+    uint8_t *p = reinterpret_cast<uint8_t *>(chunk->allocation_->ptr());
+    auto &blocks = chunk->blocks_;
+    blocks.emplace_back(p, small_pool_pre_alloc_in_mb, true, true, chunk);
+    small_free_blocks_.emplace(std::make_pair(small_pool_pre_alloc_in_mb, p), --(blocks.end()));
+  }
+
+  if (large_pool_pre_alloc_in_mb > 0){
+    chunks_.emplace_back(static_unique_ptr_cast<Allocation>(
+            underlying_allocator_->Allocate(large_pool_pre_alloc_in_mb)));
+    auto *chunk = &(*chunks_.rbegin());
+    uint8_t *p = reinterpret_cast<uint8_t *>(chunk->allocation_->ptr());
+    auto &blocks = chunk->blocks_;
+    blocks.emplace_back(p, large_pool_pre_alloc_in_mb, true, true, chunk);
+    large_free_blocks_.emplace(std::make_pair(large_pool_pre_alloc_in_mb, p), --(blocks.end()));
+  }
 }
 
 void AutoGrowthBestFitAllocator::DumpInfo() const {
@@ -131,8 +160,7 @@ phi::Allocation *AutoGrowthBestFitAllocator::AllocateImpl(
   phi::RecordEvent record("AutoGrowthBestFitAllocator::Allocate",
                           phi::TracerEventType::UserDefined,
                           9 /*level*/);
-   
-
+  
 
   size_t size = AlignedSize(unaligned_size + extra_padding_size_, alignment_);
 
@@ -220,6 +248,7 @@ phi::Allocation *AutoGrowthBestFitAllocator::AllocateImpl(
   if (FLAGS_dump_chunk_info) {
      DumpInfo();
   }
+  Trace();
   return block_t;
 }
 
