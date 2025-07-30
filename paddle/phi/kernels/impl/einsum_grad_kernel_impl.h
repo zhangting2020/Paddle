@@ -122,9 +122,9 @@ void EinsumGradKernel(const Context& dev_ctx,
     if (i != nullptr) {
       if (i->numel() == 0) {
         has_zero_size_tensor = true;
-        phi::Full<T, Context>(
-            dev_ctx, phi::IntArray(common::vectorize(i->dims())), 0, i);
       }
+      phi::Full<T, Context>(
+          dev_ctx, phi::IntArray(common::vectorize(i->dims())), 0, i);
     }
   }
   if (has_zero_size_tensor) return;
@@ -215,6 +215,7 @@ void EinsumGradKernel(const Context& dev_ctx,
     }
     EinsumKernelImpl<T, Context>(dev_ctx,
                                  all_labels,
+                                 labelshape,
                                  operands_for_A,
                                  equation_for_A,
                                  &dA,
@@ -223,6 +224,7 @@ void EinsumGradKernel(const Context& dev_ctx,
 
     EinsumKernelImpl<T, Context>(dev_ctx,
                                  all_labels,
+                                 labelshape,
                                  operands_for_B,
                                  equation_for_B,
                                  &dB,

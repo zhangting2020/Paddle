@@ -629,7 +629,7 @@ def transpose(
         return out
 
 
-def unstack(x: Tensor, axis: int = 0, num: int | None = None) -> Tensor:
+def unstack(x: Tensor, axis: int = 0, num: int | None = None) -> list[Tensor]:
     """
     This layer unstacks input Tensor :code:`x` into several Tensors along :code:`axis`.
 
@@ -4489,7 +4489,7 @@ def chunk(
     if chunks <= 0 or (
         isinstance(axis, int)
         and axis >= 0
-        and chunks > x.shape[axis]
+        and (x.shape[axis] != 0 and chunks > x.shape[axis])
         and x.shape[axis] != -1
     ):
         raise ValueError(
@@ -5029,6 +5029,7 @@ def reshape(x: Tensor, shape: ShapeLike, name: str | None = None) -> Tensor:
             x,
             'x',
             [
+                'float8_e4m3fn',
                 'float16',
                 'float32',
                 'float64',
