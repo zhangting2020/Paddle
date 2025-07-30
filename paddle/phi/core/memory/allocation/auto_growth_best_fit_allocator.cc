@@ -131,6 +131,8 @@ phi::Allocation *AutoGrowthBestFitAllocator::AllocateImpl(
   phi::RecordEvent record("AutoGrowthBestFitAllocator::Allocate",
                           phi::TracerEventType::UserDefined,
                           9 /*level*/);
+   
+
 
   size_t size = AlignedSize(unaligned_size + extra_padding_size_, alignment_);
 
@@ -214,7 +216,11 @@ phi::Allocation *AutoGrowthBestFitAllocator::AllocateImpl(
   ++total_alloc_times_;
   total_alloc_size_ += size;
   VLOG(10) << "Alloc " << block_it->size_ << " bytes, ptr = " << block_it->ptr_;
-  return new BlockAllocation(block_it);
+  auto block_t = new BlockAllocation(block_it);
+  if (FLAGS_dump_chunk_info) {
+     DumpInfo();
+  }
+  return block_t;
 }
 
 void AutoGrowthBestFitAllocator::FreeImpl(phi::Allocation *allocation) {
@@ -263,6 +269,9 @@ void AutoGrowthBestFitAllocator::FreeImpl(phi::Allocation *allocation) {
 
   if (FLAGS_free_idle_chunk) {
     FreeIdleChunks();
+  }
+  if (FLAGS_dump_chunk_info) {
+     DumpInfo();
   }
 }
 

@@ -38,6 +38,8 @@
 
 namespace deep_ep {
 
+std::once_flag pre_alloc_once_flag;
+
 namespace detail {
 void SetAllocatorStreamForGPUContext(cudaStream_t stream,
                                      phi::GPUContext* ctx) {
@@ -46,6 +48,28 @@ void SetAllocatorStreamForGPUContext(cudaStream_t stream,
                         .get());
 }
 }  // namespace detail
+
+void PreAlloc(paddle::Tensor tensor, cudaStream_t stream) { 
+  int64_t numel = tensor.numel();
+
+  std::cerr << "alloc once  here " << numel * 8 * 4 << std::endl;
+  std::cerr << tensor.place() << "\t" << stream << std::endl;
+  // auto res = paddle::experimental::empty( {numel * 8 * 4}, tensor.dtype(), tensor.place() );
+
+  // cudaStreamAttrValue stream_attribute;                                       // Stream level attributes data structure
+  // stream_attribute.accessPolicyWindow.num_bytes = 0;            // Number of bytes for persistence access
+  //  stream_attribute.accessPolicyWindow.hitRatio = 0;  
+  //  stream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyStreaming;
+  // stream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming; 
+
+
+  // cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &stream_attribute);
+
+
+  auto alloc_size = numel * 8 * 4 * sizeof( tensor.dtype() );
+  paddle::memory::allocation::AllocatorFacade::Instance()
+                        .GetAllocator( tensor.place(), stream)->Allocate(alloc_size);
+}
 
 Buffer::Buffer(int rank,
                int num_ranks,
@@ -537,6 +561,7 @@ Buffer::intranode_dispatch(
   if (allocate_on_comm_stream) {
     EP_HOST_ASSERT(previous_event.has_value() && async);
     deep_ep::detail::SetAllocatorStreamForGPUContext(comm_stream, calc_ctx);
+    std::call_once( pre_alloc_once_flag, PreAlloc, x.raw_tensor(), comm_stream);
   }
 
   // Wait previous tasks to be finished
@@ -1101,6 +1126,7 @@ Buffer::internode_dispatch(
   if (allocate_on_comm_stream) {
     EP_HOST_ASSERT(previous_event.has_value() && async);
     deep_ep::detail::SetAllocatorStreamForGPUContext(comm_stream, calc_ctx);
+    std::call_once( pre_alloc_once_flag, PreAlloc, x.raw_tensor(), comm_stream);
   }
 
   // Wait previous tasks to be finished
