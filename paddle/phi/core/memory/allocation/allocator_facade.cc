@@ -1188,6 +1188,7 @@ class AllocatorFacadePrivate {
   }
 
   void WrapStreamSafeCUDAAllocatorForDefault() {
+    const auto current_device_id = phi::backends::gpu::GetCurrentDeviceId();
     for (auto& pair : allocators_) {
       auto& place = pair.first;
       if (phi::is_gpu_place(place)) {
@@ -1197,6 +1198,10 @@ class AllocatorFacadePrivate {
                 place,
                 /* default_stream = */ nullptr,
                 /* in_cuda_graph_capturing = */ !allow_free_idle_chunk_);
+        if (place.GetDeviceId() == current_device_id) {
+          VLOG(8) << "PreAlloc for current_device_id=" << current_device_id;
+          allocator->PreAlloc();
+        }
         pair.second = allocator;
 
         // NOTE(Ruibiao): A tricky implement to give StreamSafeCUDAAllocator an
