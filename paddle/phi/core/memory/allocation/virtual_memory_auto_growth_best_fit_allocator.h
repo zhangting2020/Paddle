@@ -26,12 +26,13 @@ namespace memory {
 namespace allocation {
 
 struct Block {
-  Block(void *ptr, size_t size, bool is_free)
-      : ptr_(ptr), size_(size), is_free_(is_free) {}
+  Block(void *ptr, size_t size, bool is_free, std::vector<BlockPart> parts)
+      : ptr_(ptr), size_(size), is_free_(is_free), parts_(std::move(parts)) {}
 
   void *ptr_;
   size_t size_;
   bool is_free_;
+  std::vector<BlockPart> parts_;
 };
 
 struct BlockAllocation : public Allocation {
@@ -40,6 +41,9 @@ struct BlockAllocation : public Allocation {
       : Allocation(it->ptr_, it->size_, place), block_it_(it) {}
 
   std::list<Block>::iterator block_it_;
+  const std::vector<BlockPart> *parts() const override {
+    return &(block_it_->parts_);
+  }
 };
 
 /**

@@ -24,6 +24,9 @@
 
 #include "paddle/phi/common/place.h"
 #include "paddle/phi/core/memory/allocation/allocator.h"
+#ifdef PADDLE_WITH_CUDA
+#include "paddle/phi/backends/dynload/cuda_driver.h"
+#endif
 
 #if CUDA_VERSION >= 10020
 
@@ -40,17 +43,69 @@ struct VmmShareInfo {
   int device{-1};    // exporter device
 };
 
+struct ImportedVmmMulti {
+  CUdeviceptr base{0};
+  size_t total{0};
+  std::vector<CUmemGenericAllocationHandle> hs;
+  ~ImportedVmmMulti() {
+    if (base && total) {
+      phi::dynload::cuMemUnmap(base, total);
+    }
+    for (auto h : hs) {
+      if (h) phi::dynload::cuMemRelease(h);
+    }
+    if (base && total) {
+      phi::dynload::cuMemAddressFree(base, total);
+    }
+  }
+};
+
+class VmmImportedAllocation : public phi::Allocation {
+ public:
+  VmmImportedAllocation(void* p,
+                        size_t n,
+                        phi::Place plc,
+                        std::shared_ptr<ImportedVmmMulti> keep)
+      : Allocation(p, n, plc), keep_(std::move(keep)) {}
+
+ private:
+  std::shared_ptr<ImportedVmmMulti> keep_;
+};
+
+#pragma pack(push, 1)
+struct VmmIpcHeader {
+  uint8_t version;       // 固定 1
+  uint8_t type;          // 固定 2: vmm-ipc
+  uint16_t flags;        // bit0: 使用 pidfd 路线
+  uint32_t pid;          // 导出进程 pid
+  uint32_t num_entries;  // N（=1 即单句柄）
+  uint64_t total_size;   // VA 总长度（= Block.size_）
+};
+
+struct VmmIpcEntry {
+  uint8_t handle_type;  // 1: POSIX_FD（cuMemExportToShareableHandle FD）
+  uint8_t reserved[7];
+  uint64_t rel_offset;  // 相对“块起点”的偏移（累加）
+  uint64_t seg_len;     // 该条长度
+  // 紧随 payload:
+  //   if handle_type==1: int32_t remote_fd （导出侧的 fd 值）
+};
+#pragma pack(pop)
+
+// 可选：编译期校验，防止意外改动
+static_assert(sizeof(VmmIpcHeader) == 20, "VmmIpcHeader size changed");
+static_assert(sizeof(VmmIpcEntry) == 24, "VmmIpcEntry size changed");
+
 class CUDAVirtualMemAllocator : public Allocator {
  public:
   explicit CUDAVirtualMemAllocator(const phi::GPUPlace& place);
-  ~CUDAVirtualMemAllocator() override;
   bool IsAllocThreadSafe() const override;
-  static bool TryExportShareHandle(int device,
-                                   void* base_ptr,
-                                   VmmShareInfo* out);
-
-  static void Register(int device, CUDAVirtualMemAllocator* a);
-  static void Unregister(int device, CUDAVirtualMemAllocator* a);
+  static bool ExportShareHandleFromVA(CUdeviceptr va,
+                                      CUdeviceptr base_ptr,
+                                      CUmemGenericAllocationHandle handle,
+                                      size_t size,
+                                      int device_id,
+                                      VmmShareInfo* out);
 
  protected:
   void FreeImpl(phi::Allocation* allocation) override;
@@ -72,9 +127,6 @@ class CUDAVirtualMemAllocator : public Allocator {
 
   std::map<CUdeviceptr, std::pair<CUmemGenericAllocationHandle, size_t>>
       virtual_2_physical_map_;
-
-  inline static std::mutex s_reg_mu_;
-  inline static std::map<int, std::vector<CUDAVirtualMemAllocator*>> s_regs_;
 };
 
 }  // namespace allocation

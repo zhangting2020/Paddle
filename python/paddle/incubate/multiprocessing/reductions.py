@@ -110,6 +110,12 @@ def _rebuild_vmm_tensor(
     return lodtensor
 
 
+def _rebuild_vmm_tensor(
+    cls, blob: bytes, dtype_idx: int, dims: list[int], lod, device: int
+):
+    cls._new_shared_vmm((blob, dtype_idx, dims, lod, int))
+
+
 def _reduce_tensor(tensor):
     lodtensor = tensor.get_tensor()
 
@@ -286,6 +292,9 @@ def _reduce_lodtensor(lodtensor):
             if paddle.get_flags('FLAGS_use_virtual_memory_auto_growth')[
                 'FLAGS_use_virtual_memory_auto_growth'
             ]:
+                metadata = lodtensor._share_vmm()
+                rebuild = _rebuild_vmm_tensor
+                """
                 fd, offset, size, type_idx, dims, lod, device = (
                     lodtensor._share_vmm()
                 )
@@ -293,6 +302,7 @@ def _reduce_lodtensor(lodtensor):
                     fd = multiprocessing.reduction.DupFd(fd)
                 metadata = (fd, offset, size, type_idx, dims, lod, device)
                 rebuild = _rebuild_vmm_tensor
+            """
             else:
                 metadata = lodtensor._share_cuda()
                 rebuild = _rebuild_cuda_tensor

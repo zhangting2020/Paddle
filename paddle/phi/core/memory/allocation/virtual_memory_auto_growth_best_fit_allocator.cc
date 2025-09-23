@@ -26,6 +26,81 @@ bool NeedSplit(size_t block_size, size_t alignment, size_t alloc_size) {
   return block_size > (alloc_size * 2) || (block_size - alloc_size) > alignment;
 }
 
+// 折叠相邻且同段的两个 part（a 与 b 紧邻且同 seg，则把 b 并入 a）
+static inline bool TryConcatAdjacent(BlockPart *a, const BlockPart &b) {
+  if (!a) return false;
+  if (a->chunk.get() != b.chunk.get()) return false;
+  if (a->chunk_rel_off + a->len != b.chunk_rel_off) return false;
+  a->len += b.len;
+  return true;
+}
+
+// 从 parts 中切出 [pick_off, pick_off+pick_len) 对应的子片段序列
+static std::vector<BlockPart> SlicePartsForRange(
+    const std::vector<BlockPart> &parts, size_t pick_off, size_t pick_len) {
+  std::vector<BlockPart> out;
+  size_t cursor = 0, need = pick_len;
+  for (const auto &p : parts) {
+    if (!need) break;
+    size_t L = cursor;
+    size_t R = cursor + p.len;
+    cursor = R;
+    size_t l = std::max(L, pick_off);
+    size_t r = std::min(R, pick_off + pick_len);
+    if (l >= r) continue;
+    BlockPart cut{p.chunk, p.chunk_rel_off + (l - L), r - l};
+    // 与上一条尝试折叠
+    if (!out.empty() && TryConcatAdjacent(&out.back(), cut)) {
+      // 已并入
+    } else {
+      out.push_back(std::move(cut));
+    }
+    need -= (r - l);
+  }
+  return out;
+}
+
+// 把 src 的 parts 追加到 dst 的尾端；在边界尝试折叠（同段且相邻）
+static inline void AppendPartsTail(std::vector<BlockPart> *dst,
+                                   const std::vector<BlockPart> &src) {
+  if (src.empty()) return;
+  if (!dst->empty() && TryConcatAdjacent(&dst->back(), src.front())) {
+    // 头尾已折叠，余下的直接追加
+    dst->insert(dst->end(), std::next(src.begin()), src.end());
+  } else {
+    dst->insert(dst->end(), src.begin(), src.end());
+  }
+}
+
+// 把 src 的 parts 追加到 dst 的头部；在边界尝试折叠（同段且相邻）
+static inline void AppendPartsHead(std::vector<BlockPart> *dst,
+                                   const std::vector<BlockPart> &src) {
+  if (src.empty()) return;
+  if (!dst->empty() && !src.empty()) {
+    // 尝试折叠 src.tail + dst->head
+    if (src.back().chunk.get() == dst->front().chunk.get() &&
+        src.back().chunk_rel_off + src.back().len ==
+            dst->front().chunk_rel_off) {
+      // 合成一条：更新 dst->head
+      BlockPart head = dst->front();
+      head.chunk_rel_off = src.back().chunk_rel_off;
+      head.len += src.back().len;
+      // 组装：src 前面部分 + head + dst 余下部分
+      std::vector<BlockPart> tmp;
+      tmp.reserve(src.size() - 1 + 1 + (dst->size() - 1));
+      tmp.insert(tmp.end(), src.begin(), std::prev(src.end()));
+      tmp.push_back(std::move(head));
+      tmp.insert(tmp.end(), std::next(dst->begin()), dst->end());
+      dst->swap(tmp);
+      return;
+    }
+  }
+  // 无法折叠，直接头插
+  std::vector<BlockPart> tmp = src;
+  tmp.insert(tmp.end(), dst->begin(), dst->end());
+  dst->swap(tmp);
+}
+
 VirtualMemoryAutoGrowthBestFitAllocator::
     VirtualMemoryAutoGrowthBestFitAllocator(
         const std::shared_ptr<Allocator> &underlying_allocator,
@@ -68,6 +143,7 @@ void VirtualMemoryAutoGrowthBestFitAllocator::TryMergeBlock2Blocks(
     auto next = std::next(block);
     if (next->is_free_ &&
         reinterpret_cast<uint8_t *>(block->ptr_) + block->size_ == next->ptr_) {
+      AppendPartsTail(&block->parts_, next->parts_);
       // merge with next
       block->size_ += next->size_;
       block->is_free_ = true;
@@ -84,6 +160,7 @@ void VirtualMemoryAutoGrowthBestFitAllocator::TryMergeBlock2Blocks(
         reinterpret_cast<uint8_t *>(pre->ptr_) + pre->size_ == block->ptr_) {
       // merge with pre
       free_blocks_.erase(std::make_pair(pre->size_, pre->ptr_));
+      AppendPartsTail(&pre->parts_, block->parts_);
       pre->size_ += block->size_;
       all_blocks_.erase(block);
       free_blocks_.emplace(std::make_pair(pre->size_, pre->ptr_), pre);
@@ -101,6 +178,7 @@ void VirtualMemoryAutoGrowthBestFitAllocator::TryMergeBlock2Blocks(
               next->ptr_)) {
       // merge with pre
       free_blocks_.erase(std::make_pair(pre->size_, pre->ptr_));
+      AppendPartsTail(&pre->parts_, block->parts_);
       pre->size_ += block->size_;
       all_blocks_.erase(block);
       free_blocks_.emplace(std::make_pair(pre->size_, pre->ptr_), pre);
@@ -113,6 +191,7 @@ void VirtualMemoryAutoGrowthBestFitAllocator::TryMergeBlock2Blocks(
       // merge with next
       block->size_ += next->size_;
       block->is_free_ = true;
+      AppendPartsTail(&block->parts_, next->parts_);
       free_blocks_.erase(std::make_pair(next->size_, next->ptr_));
       all_blocks_.erase(next);
       free_blocks_.emplace(std::make_pair(block->size_, block->ptr_), block);
@@ -125,6 +204,8 @@ void VirtualMemoryAutoGrowthBestFitAllocator::TryMergeBlock2Blocks(
       // merge with pre and next
       free_blocks_.erase(std::make_pair(pre->size_, pre->ptr_));
       free_blocks_.erase(std::make_pair(next->size_, next->ptr_));
+      AppendPartsTail(&pre->parts_, block->parts_);
+      AppendPartsTail(&pre->parts_, next->parts_);
       pre->size_ += (block->size_ + next->size_);
       all_blocks_.erase(block);
       all_blocks_.erase(next);
@@ -144,84 +225,48 @@ void VirtualMemoryAutoGrowthBestFitAllocator::ExtendAndMerge(size_t size) {
   size = allocateptr->size();
   allocations_.push_back(std::move(allocateptr));  // hold allocation
 
+  // 从底层 allocation 提取 VMM 段信息
+  auto *raw = allocations_.back().get();
+  auto *base_alloc = dynamic_cast<Allocation *>(raw);
+  PADDLE_ENFORCE_NOT_NULL(base_alloc, "Underlying allocation null");
+  auto handle = base_alloc->handle();
+  PADDLE_ENFORCE_NE(handle, 0, "Underlying allocation is not VMM (handle=0)");
+
+  auto chunk = std::make_shared<VmmChunkMeta>();
+  chunk->base = reinterpret_cast<CUdeviceptr>(ptr);
+  chunk->size = size;
+  chunk->handle = handle;
+  chunk->device = place_.device;
+
+  // 新 free 块的 parts：整段一条
+  std::vector<BlockPart> new_parts(1,
+                                   BlockPart{chunk, /*chunk_rel_off=*/0, size});
+
   if (all_blocks_.empty()) {
-    all_blocks_.emplace_back(ptr, size, true);
+    all_blocks_.emplace_back(ptr, size, true, std::move(new_parts));
     free_blocks_.emplace(std::make_pair(size, ptr), all_blocks_.begin());
     return;
-  }
-  for (auto block_it = all_blocks_.begin(); block_it != all_blocks_.end();
-       ++block_it) {
-    if (block_it->ptr_ > ptr) {
-      if (block_it == all_blocks_.begin()) {
-        // insert to front
-        if (block_it->is_free_ &&
-            reinterpret_cast<uint8_t *>(ptr) + size == block_it->ptr_) {
-          // merge with next
-          free_blocks_.erase(std::make_pair(block_it->size_, block_it->ptr_));
-          block_it->ptr_ = ptr;
-          block_it->size_ += size;
-          free_blocks_.emplace(std::make_pair(block_it->size_, block_it->ptr_),
-                               block_it);
-        } else {
-          // do not merge
-          all_blocks_.emplace_back(ptr, size, true);
-          free_blocks_.emplace(std::make_pair(size, ptr), all_blocks_.begin());
-        }
-      } else {
-        // insert to middle
-        auto next = block_it;
-        auto pre = std::prev(block_it);
-        if (pre->is_free_ &&
-            reinterpret_cast<uint8_t *>(pre->ptr_) + pre->size_ == ptr &&
-            !(next->is_free_ &&
-              reinterpret_cast<uint8_t *>(ptr) + size == next->ptr_)) {
-          // merge with pre
-          free_blocks_.erase(std::make_pair(pre->size_, pre->ptr_));
-          pre->size_ += size;
-          free_blocks_.emplace(std::make_pair(pre->size_, pre->ptr_), pre);
-        } else if (next->is_free_ &&
-                   reinterpret_cast<uint8_t *>(ptr) + size == next->ptr_ &&
-                   !(pre->is_free_ &&
-                     reinterpret_cast<uint8_t *>(pre->ptr_) + pre->size_ ==
-                         ptr)) {
-          // merge with next
-          free_blocks_.erase(std::make_pair(next->size_, next->ptr_));
-          next->ptr_ = ptr;
-          next->size_ += size;
-          free_blocks_.emplace(std::make_pair(next->size_, next->ptr_), next);
-        } else if (pre->is_free_ &&
-                   reinterpret_cast<uint8_t *>(pre->ptr_) + pre->size_ == ptr &&
-                   next->is_free_ &&
-                   reinterpret_cast<uint8_t *>(ptr) + size == next->ptr_) {
-          // merge with pre and next
-          free_blocks_.erase(std::make_pair(pre->size_, pre->ptr_));
-          free_blocks_.erase(std::make_pair(next->size_, next->ptr_));
-          pre->size_ += (size + next->size_);
-          free_blocks_.emplace(std::make_pair(pre->size_, pre->ptr_), pre);
-          all_blocks_.erase(next);
-        } else {
-          // do not merge
-          auto iter = all_blocks_.insert(next, Block(ptr, size, true));
-          free_blocks_.emplace(std::make_pair(size, ptr), iter);
-        }
-      }
-      return;
-    }
   }
 
   // insert to back
   auto block_it = all_blocks_.end();
   block_it--;
+  PADDLE_ENFORCE_LE(
+      reinterpret_cast<uint8_t *>(block_it->ptr_),
+      reinterpret_cast<uint8_t *>(ptr),
+      "ExtendAndMerge expects monotonically increasing addresses from "
+      "underlying_allocator_. Got new ptr before last block.");
   if (block_it->is_free_ &&
       reinterpret_cast<uint8_t *>(block_it->ptr_) + block_it->size_ == ptr) {
     // merge with pre
     free_blocks_.erase(std::make_pair(block_it->size_, block_it->ptr_));
     block_it->size_ += size;
+    AppendPartsTail(&block_it->parts_, new_parts);
     free_blocks_.emplace(std::make_pair(block_it->size_, block_it->ptr_),
                          block_it);
   } else {
     // do not merge
-    all_blocks_.emplace_back(ptr, size, true);
+    all_blocks_.emplace_back(ptr, size, true, std::move(new_parts));
     auto block_it = all_blocks_.end();
     block_it--;
     free_blocks_.emplace(std::make_pair(size, ptr), block_it);
@@ -236,13 +281,25 @@ phi::Allocation *VirtualMemoryAutoGrowthBestFitAllocator::AllocFromFreeBlocks(
     free_blocks_.erase(iter);
     if (NeedSplit(block_it->size_, alignment_, size)) {
       size_t remaining_size = block_it->size_ - size;
-      auto remaining_free_block = all_blocks_.insert(
-          block_it, Block(block_it->ptr_, remaining_size, true));
+      // 剩余 free 的 parts：取原 parts 的前 remaining_size
+      std::vector<BlockPart> remaining_parts =
+          SlicePartsForRange(block_it->parts_, /*pick_off=*/0, remaining_size);
+      // 分配块的 parts：取原 parts 的后 size
+      std::vector<BlockPart> alloc_parts = SlicePartsForRange(
+          block_it->parts_, /*pick_off=*/remaining_size, /*pick_len=*/size);
+      auto remaining_free_block =
+          all_blocks_.insert(block_it,
+                             Block(block_it->ptr_,
+                                   remaining_size,
+                                   true,
+                                   std::move(remaining_parts)));
       free_blocks_.emplace(std::make_pair(remaining_size, block_it->ptr_),
                            remaining_free_block);
       block_it->ptr_ =
           reinterpret_cast<uint8_t *>(block_it->ptr_) + remaining_size;
       block_it->size_ = size;
+      // 把后半段赋给已分配块
+      block_it->parts_.swap(alloc_parts);
     }
 
     block_it->is_free_ = false;

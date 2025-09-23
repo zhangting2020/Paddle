@@ -371,8 +371,9 @@ def build_reduce_scatter_buffer(
             'FLAGS_use_virtual_memory_auto_growth'
         ]:
             # vmm_meta: (fd, offset, size, dtype, dims, lod, device)
-            vmm_meta = param_buffer.value().get_tensor()._share_vmm()
-            ipc_meta = ("vmm_ipc", vmm_meta)
+            # vmm_meta: (blob: bytes, dtype_idx: int, dims: List[int], lod, device: int)
+            print("=============== build_reduce_scatter_buffer ==========")
+            ipc_meta = param_buffer.value().get_tensor()._share_vmm()
         else:
             ipc_meta = (
                 "cuda_ipc",

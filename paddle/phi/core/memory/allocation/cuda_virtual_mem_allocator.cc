@@ -24,7 +24,6 @@
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator.h"
 
 #ifdef PADDLE_WITH_CUDA
-#include "paddle/phi/backends/dynload/cuda_driver.h"
 #include "paddle/phi/core/platform/cuda_device_guard.h"
 #include "paddle/phi/core/platform/device/gpu/gpu_info.h"
 #endif
@@ -97,29 +96,6 @@ CUDAVirtualMemAllocator::CUDAVirtualMemAllocator(const phi::GPUPlace& place)
       &virtual_mem_base_, virtual_mem_size_, 0, 0, 0));
 
   virtual_mem_alloced_offset_ = 0;
-  Register(place.device, this);
-}
-
-CUDAVirtualMemAllocator::~CUDAVirtualMemAllocator() {
-  Unregister(place_.device, this);
-
-  if (!virtual_2_physical_map_.empty()) {
-    VLOG(2) << "CUDAVirtualMemAllocator destroyed with "
-            << virtual_2_physical_map_.size()
-            << " mapped regions still tracked.";
-  }
-
-#if CUDA_VERSION >= 10020
-  if (virtual_mem_base_ && virtual_mem_size_) {
-    auto r =
-        phi::dynload::cuMemAddressFree(virtual_mem_base_, virtual_mem_size_);
-    VLOG(6) << "cuMemAddressFree(" << reinterpret_cast<void*>(virtual_mem_base_)
-            << ", " << virtual_mem_size_ << ") -> " << r;
-    (void)r;
-    virtual_mem_base_ = 0;
-    virtual_mem_size_ = 0;
-  }
-#endif
 }
 
 bool CUDAVirtualMemAllocator::IsAllocThreadSafe() const { return false; }
@@ -246,62 +222,40 @@ phi::Allocation* CUDAVirtualMemAllocator::AllocateImpl(size_t size) {
 
   virtual_mem_alloced_offset_ += size;
 
-  return new Allocation(
-      reinterpret_cast<void*>(ptr), size, phi::Place(place_));  // NOLINT
+  return new Allocation(reinterpret_cast<void*>(ptr),
+                        size,
+                        phi::Place(place_),
+                        handle);  // NOLINT
 }
 
-bool CUDAVirtualMemAllocator::ExportShareHandleFromVA(CUdeviceptr va,
-                                                      VmmShareInfo* out) {
-  if (virtual_2_physical_map_.empty()) return false;
-  auto it = virtual_2_physical_map_.upper_bound(va);  // first key > va
-  if (it == virtual_2_physical_map_.begin()) return false;
-  --it;  // now it->first <= va
-  CUdeviceptr region_base = it->first;
-  size_t region_size = it->second.second;
-  if (va < region_base || va >= region_base + region_size) return false;
-
+bool CUDAVirtualMemAllocator::ExportShareHandleFromVA(
+    CUdeviceptr va,
+    CUdeviceptr base_ptr,
+    CUmemGenericAllocationHandle handle,
+    size_t size,
+    int device_id,
+    VmmShareInfo* out) {
   int fd = -1;
   auto r = phi::dynload::cuMemExportToShareableHandle(
-      &fd, it->second.first, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0);
+      &fd, handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0);
   if (r != CUDA_SUCCESS) {
-    VLOG(10) << "cuMemExportToShareableHandle failed r=" << r
-             << " base=" << reinterpret_cast<void*>(region_base)
-             << " size=" << region_size;
+    const char* err_name = nullptr;
+    const char* err_str = nullptr;
+    phi::dynload::cuGetErrorName(r, &err_name);
+    phi::dynload::cuGetErrorString(r, &err_str);
+    VLOG(0) << "cuMemExportToShareableHandle failed r=" << r << " ("
+            << (err_name ? err_name : "") << ") " << (err_str ? err_str : "")
+            << " dev=" << device_id
+            << " handle=" << reinterpret_cast<void*>(handle)
+            << " base=" << reinterpret_cast<void*>(base_ptr)
+            << " size=" << size;
     return false;
   }
-  out->device = place_.device;
+  out->device = device_id;
   out->os_fd = fd;
-  out->offset = static_cast<size_t>(va - region_base);
-  out->size = region_size;
+  out->offset = static_cast<size_t>(va - base_ptr);
+  out->size = size;
   return true;
-}
-
-void CUDAVirtualMemAllocator::Register(int device, CUDAVirtualMemAllocator* a) {
-  std::lock_guard<std::mutex> g(s_reg_mu_);
-  s_regs_[device].push_back(a);
-}
-
-void CUDAVirtualMemAllocator::Unregister(int device,
-                                         CUDAVirtualMemAllocator* a) {
-  std::lock_guard<std::mutex> g(s_reg_mu_);
-  auto it = s_regs_.find(device);
-  if (it == s_regs_.end()) return;
-  auto& v = it->second;
-  v.erase(std::remove(v.begin(), v.end(), a), v.end());
-  if (v.empty()) s_regs_.erase(it);
-}
-
-bool CUDAVirtualMemAllocator::TryExportShareHandle(int device,
-                                                   void* any_va,
-                                                   VmmShareInfo* out) {
-  std::lock_guard<std::mutex> g(s_reg_mu_);
-  auto it = s_regs_.find(device);
-  if (it == s_regs_.end()) return false;
-  CUdeviceptr va = reinterpret_cast<CUdeviceptr>(any_va);
-  for (auto* a : it->second) {
-    if (a && a->ExportShareHandleFromVA(va, out)) return true;
-  }
-  return false;
 }
 
 }  // namespace paddle::memory::allocation
