@@ -18,13 +18,40 @@ import multiprocessing
 import os
 import random
 import sys
+import traceback
 import unittest
 from functools import wraps
-from multiprocessing.reduction import DupFd
 
 import numpy as np
 
-# 2) Hook pybind: DenseTensor._share_cuda / _new_shared_cuda
+try:
+    import paddle
+    from paddle.base import core
+
+    _orig_share_vmm = core.DenseTensor._share_vmm
+    _orig_new_shared_vmm = core.DenseTensor._new_shared_vmm
+
+    @wraps(_orig_share_vmm)
+    def _spy_share_vmm(self):
+        meta = _orig_share_vmm(self)
+        traceback.print_stack(limit=10, file=sys.stdout)
+        return meta
+
+    @wraps(_orig_new_shared_vmm)
+    def _spy_new_shared_vmm(meta):
+        meta = _orig_new_shared_vmm(meta)
+        traceback.print_stack(limit=10, file=sys.stdout)
+        return _orig_new_shared_vmm(meta)
+
+    core.DenseTensor._share_vmm = _spy_share_vmm
+    core.DenseTensor._new_shared_vmm = _spy_new_shared_vmm
+except Exception as e:
+    print(
+        f"[IPC-HOOK] core hook failed: {e}",
+        file=sys.stderr,
+        flush=True,
+    )
+"""
 try:
     import paddle
     from paddle.base import core
@@ -106,6 +133,7 @@ except Exception as e:
         file=sys.stderr,
         flush=True,
     )
+"""
 
 import sys
 from functools import wraps
@@ -447,6 +475,7 @@ class TestDistMPTraining(unittest.TestCase):
                     optimizer_b.fused_states_buffer_ipc_meta,
                 )
                 # step1: update meta infos
+                print("=========== DO_FUSE_OPTIMIZER ==========")
                 task = (DO_FUSE_OPTIMIZER, meta_infos)
                 self.task_queue.put(task)
                 print(

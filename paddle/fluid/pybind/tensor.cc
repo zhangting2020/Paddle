@@ -66,6 +66,7 @@ limitations under the License. */
 #include "paddle/phi/backends/dynload/cuda_driver.h"
 #include "paddle/phi/core/memory/allocation/cuda_ipc_allocator.h"
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator.h"
+#include "paddle/phi/core/memory/allocation/virtual_memory_auto_growth_best_fit_allocator.h"
 #endif
 #include "paddle/fluid/platform/enforce.h"
 #include "paddle/fluid/platform/init.h"
@@ -668,115 +669,182 @@ void BindTensor(pybind11::module &m) {  // NOLINT
           throw std::runtime_error(
               "Tensor not initialized or numel is 0.  could not pass "
               "to shared memory. ");
+        auto base_holder = self.Holder();
+        VLOG(0) << "holder RTTI = " << typeid(*base_holder.get()).name()
+            << ", place=" << base_holder->place().DebugString();
         auto* holder = dynamic_cast<memory::allocation::Allocation*>(
           self.Holder().get());
+        PADDLE_ENFORCE_NOT_NULL(holder,
+                                "Not a VMM BlockAllocation (need VMM IPC)");
         PADDLE_ENFORCE_EQ(
             phi::is_gpu_place(holder->place()), true,
             common::errors::InvalidArgument(
                 "Tensor is not on GPU. share_cuda only support GPU "
                 "Tensor, share_filename is for CPU tensor."));
+        auto& parts = *(holder->parts());
+        PADDLE_ENFORCE_GT(parts.size(), 0, "Empty VMM parts");
 
         // Export a shareable handle from the current device's VMM allocator
         const int &device_id = paddle::platform::GetCurrentDeviceId();
         auto stream =
             paddle::platform::get_current_stream(device_id);
         stream->Synchronize();
-        CUdeviceptr base = 0;
-        size_t range = 0;
-        CUdeviceptr va = reinterpret_cast<CUdeviceptr>(holder->ptr());
 
-        PADDLE_ENFORCE_GPU_SUCCESS(
-            phi::dynload::cuMemGetAddressRange(&base, &range, va));
-        void* any_va = reinterpret_cast<void*>(base);
-        VLOG(10) << "VMM export try: dev=" << device_id
-                 << " any_va=" << any_va
-                 << " range=(" << reinterpret_cast<void*>(base)
-                 << ",+" << range << ")";
+        using paddle::memory::allocation::VmmIpcHeader;
+        using paddle::memory::allocation::VmmIpcEntry;
+        VmmIpcHeader header{};
+        header.version     = 1;
+        header.type        = 2;
+        header.flags       = 0x1;  // pidfd 路线
+        header.pid         = static_cast<uint32_t>(::getpid());
+        header.num_entries = static_cast<uint32_t>(parts.size());
+        header.total_size  = static_cast<uint64_t>(holder->size());
 
-        memory::allocation::VmmShareInfo info{};
-        bool success = memory::allocation::CUDAVirtualMemAllocator::
-             TryExportShareHandle(device_id, any_va, &info);
-        if (!success) {
-          PADDLE_THROW(common::errors::InvalidArgument(
-            "VMM export failed: dev=%d any_va=%p range=(%p,+%zu) place=%s",
-            device_id, any_va, reinterpret_cast<void*>(base), range,
-            holder->place().DebugString().c_str()));}
+        std::string blob;
+        blob.resize(sizeof(VmmIpcHeader));
+        std::memcpy(blob.data(), &header, sizeof(VmmIpcHeader));
 
-        int type_idx = static_cast<int>(self.type());
-        int fd = info.os_fd;
-        int fd_dup = ::fcntl(fd, F_DUPFD_CLOEXEC, 0);
-        PADDLE_ENFORCE_NE(fd_dup, -1,
-                          common::errors::External("dup FD failed"));
-        return py::make_tuple(py::int_(fd_dup),
-                              py::int_(info.offset),
-                              py::int_(info.size),
-                              py::int_(type_idx),
-                              common::vectorize(self.dims()),
-                              self.lod(),
-                              py::int_(info.device));
-      })
-      .def("_new_shared_vmm", [](py::tuple t) {
-        if (t.size() != 7)
-          throw std::runtime_error(
-            "Invalid Tensor meta info for shared cuda tensor!");
-        int fd         = t[0].cast<int>();
-        ptrdiff_t offset_bytes  = (ptrdiff_t)t[1].cast<int64_t>();
-        size_t size  = t[2].cast<size_t>();
-        auto dims      = common::make_ddim(t[4].cast<std::vector<int>>());
-        int export_dev = t[6].cast<int>();
+        uint64_t rel = 0;
+        for (const auto& p : parts) {
+          VLOG(0) << "get VmmIpcEntry start";
+          VmmIpcEntry entry{};
+          entry.handle_type = 1;  // FD
+          entry.rel_offset  = rel;
+          entry.seg_len     = p.len;
 
-        int flags = fcntl(fd, F_GETFD);
-        PADDLE_ENFORCE_NE(flags, -1,
-          common::errors::InvalidArgument(
-            "VMM IPC fd is invalid (EBADF). "
-            "Did you pass it via SCM_RIGHTS / DupFd?"));
-
-        int cur_dev = 0;
-        PADDLE_ENFORCE_GPU_SUCCESS(cudaGetDevice(&cur_dev));
-        if (export_dev != cur_dev) {
-          int can_access_peer = 0;
+          int fd = -1;
+          VLOG(0) << "cuMemExportToShareableHandle start";
+          auto chunk = p.chunk;
+          PADDLE_ENFORCE_NOT_NULL(chunk, "chunk is null");
+          // 打印底层句柄与设备，确认不是未初始化的垃圾值
+          VLOG(0) << "chunk handle="
+                  << static_cast<int64_t>(chunk->handle)
+                  << " device=" << chunk->device
+                  << " chunk_rel_off=" << p.chunk_rel_off
+                  << " len=" << p.len;
+          PADDLE_ENFORCE_NE(p.chunk->handle, 0,
+                            "Underlying allocation is not VMM (handle=0)");
+          VLOG(0) << "cuMemExportToShareableHandle start";
           PADDLE_ENFORCE_GPU_SUCCESS(
-            cudaDeviceCanAccessPeer(
-              &can_access_peer, cur_dev, export_dev));
-          PADDLE_ENFORCE_NE(can_access_peer, 0, common::errors::Unavailable(
-              "VMM: device %d cannot access peer device %d;"
-              "cannot map memory exported from it.",
-              cur_dev, export_dev));
+            phi::dynload::cuMemExportToShareableHandle(
+              &fd, p.chunk->handle,
+              CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0));
+          VLOG(0) << "cuMemExportToShareableHandle end";
+          const size_t old = blob.size();
+          blob.resize(old + sizeof(VmmIpcEntry) + sizeof(int));
+          std::memcpy(blob.data() + old,
+                      &entry, sizeof(VmmIpcEntry));
+          std::memcpy(blob.data() + old + sizeof(VmmIpcEntry),
+                      &fd, sizeof(int));
+
+          rel += p.len;
+          VLOG(0) << "get VmmIpcEntry end";
         }
 
-        CUmemGenericAllocationHandle handle;
-        PADDLE_ENFORCE_GPU_SUCCESS(
-          phi::dynload::cuMemImportFromShareableHandle(
-          &handle, reinterpret_cast<void*>(static_cast<intptr_t>(fd)),
-          CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+        const int dtype_idx = static_cast<int>(self.type());
+        VLOG(0) << "get dtype_idx end";
+        return py::make_tuple(py::bytes(blob),
+                              py::int_(dtype_idx),
+                              common::vectorize(self.dims()),
+                              self.lod(),
+                              py::int_(device_id));
+      })
+      .def("_new_shared_vmm", [](py::tuple meta) {
+        if (meta.size() != 5)
+          throw std::runtime_error(
+            "Invalid Tensor meta info for shared cuda tensor!");
+        std::string blob = meta[0].cast<py::bytes>();
+        int dtype_idx = meta[1].cast<int>();
+        std::vector<int64_t> dims_vec = meta[2].cast<std::vector<int64_t>>();
+        const auto lod = meta[3].cast<std::vector<std::vector<size_t>>>();
+        int device_id = meta[4].cast<int>();
 
-        CUdeviceptr addr = 0;
-        PADDLE_ENFORCE_GPU_SUCCESS(
-          phi::dynload::cuMemAddressReserve(&addr, size, 0, 0, 0));
+        using paddle::memory::allocation::VmmIpcHeader;
+        using paddle::memory::allocation::VmmIpcEntry;
+        PADDLE_ENFORCE_GE(blob.size(), sizeof(VmmIpcHeader), "bad blob");
+        const VmmIpcHeader* hdr =
+            reinterpret_cast<const VmmIpcHeader*>(blob.data());
+        PADDLE_ENFORCE_EQ(hdr->version, 1, "bad version");
+        PADDLE_ENFORCE_EQ(hdr->type, 2, "bad type");
 
+        // 预留 VA
+        CUdeviceptr base = 0;
         PADDLE_ENFORCE_GPU_SUCCESS(
-          phi::dynload::cuMemMap(addr, size, 0, handle, 0));
+          phi::dynload::cuMemAddressReserve(&base, hdr->total_size, 0, 0, 0));
 
+        // 访问权限
         CUmemAccessDesc desc{};
         desc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-        desc.location.id   = cur_dev;
+        desc.location.id   = device_id;
         desc.flags         = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-        PADDLE_ENFORCE_GPU_SUCCESS(
-          phi::dynload::cuMemSetAccess(addr, size, &desc, 1));
 
-        phi::dynload::cuMemRelease(handle);
-        ::close(fd);
+        // 导入句柄并映射
+        std::vector<CUmemGenericAllocationHandle> hs;
+        hs.reserve(hdr->num_entries);
 
-        void* dev = reinterpret_cast<void*>(addr + offset_bytes);
-        auto shared_holder =
-        std::make_shared<memory::allocation::Allocation>(
-            dev, /*base_ptr*/reinterpret_cast<void*>(addr),
-            /*size*/size, phi::GPUPlace(cur_dev));
-        phi::DenseTensor tensor;
-        tensor.ResetHolderWithType(
-            shared_holder, static_cast<phi::DataType>(t[3].cast<int>()));
-        tensor.Resize(dims);
-        return tensor;
+        int pidfd = -1;
+        if (hdr->flags & 0x1) {
+          pidfd = static_cast<int>(::syscall(SYS_pidfd_open,
+                                   (pid_t)hdr->pid, 0));
+          PADDLE_ENFORCE_NE(pidfd, -1, "pidfd_open failed");
+        }
+
+        size_t off = sizeof(VmmIpcHeader);
+        for (uint32_t i = 0; i < hdr->num_entries; ++i) {
+          PADDLE_ENFORCE_GE(blob.size() - off,
+              sizeof(VmmIpcEntry), "bad entry");
+          const VmmIpcEntry* e =
+              reinterpret_cast<const VmmIpcEntry*>(blob.data() + off);
+          off += sizeof(VmmIpcEntry);
+
+          CUmemGenericAllocationHandle h = 0;
+
+          // 目前只支持 FD（handle_type==1）
+          PADDLE_ENFORCE_GE(blob.size() - off, sizeof(int), "no fd payload");
+          int remote_fd = *reinterpret_cast<const int*>(blob.data() + off);
+          off += sizeof(int);
+
+          int myfd = static_cast<int>(
+            ::syscall(SYS_pidfd_getfd, pidfd, remote_fd, 0));
+          PADDLE_ENFORCE_NE(myfd, -1, "pidfd_getfd failed");
+
+          PADDLE_ENFORCE_GPU_SUCCESS(
+            phi::dynload::cuMemImportFromShareableHandle(
+              &h, reinterpret_cast<void*>(static_cast<intptr_t>(myfd)),
+              CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+
+          ::close(myfd);
+
+          hs.push_back(h);
+
+          // map + set access
+          PADDLE_ENFORCE_GPU_SUCCESS(
+            phi::dynload::cuMemMap(
+              base + e->rel_offset, e->seg_len, 0, h, 0));
+          PADDLE_ENFORCE_GPU_SUCCESS(
+            phi::dynload::cuMemSetAccess(
+              base + e->rel_offset, e->seg_len, &desc, 1));
+        }
+
+        if (pidfd != -1) ::close(pidfd);
+
+        auto keep = std::make_shared<memory::allocation::ImportedVmmMulti>();
+        keep->base  = base;
+        keep->total = hdr->total_size;
+        keep->hs    = std::move(hs);
+
+        auto alloc =
+        std::make_unique<memory::allocation::VmmImportedAllocation>(
+            reinterpret_cast<void*>(base),
+            hdr->total_size,
+            phi::GPUPlace(device_id), keep);
+
+        phi::DenseTensor out;
+        out.Resize(phi::make_ddim(dims_vec));
+        out.ResetHolder(std::move(alloc));
+        out.set_type(static_cast<phi::DataType>(dtype_idx));
+
+        return out;
       })
       .def("_share_buffer_with",
            [](phi::DenseTensor &self, const phi::DenseTensor src,

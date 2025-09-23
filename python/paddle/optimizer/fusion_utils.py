@@ -143,6 +143,7 @@ class FusionStorage:
             'FLAGS_use_virtual_memory_auto_growth'
         ]:
             # buffer_ipc_meta: (fd, offset, size, dtype, dims, lod, device)
+            # vmm_meta: (blob: bytes, dtype_idx: int, dims: List[int], lod, device: int)
             self.buffer_ipc_meta = self.buffer.value().get_tensor()._share_vmm()
         else:
             self.buffer_ipc_meta = (
