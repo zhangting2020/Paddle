@@ -45,8 +45,11 @@ class StreamSafeCUDAAllocation : public Allocation {
   bool CanBeFreed();
   gpuStream_t GetOwningStream() const;
 
+  const CUmemGenericAllocationHandle handle() const override {
+    return underlying_allocation_ ? underlying_allocation_->handle() : 0ULL;
+  }
+
   const std::vector<BlockPart> *parts() const override {
-    // 假设有 inner_ 指向被包裹的分配；命名以你的代码为准
     return underlying_allocation_ ? underlying_allocation_->parts() : nullptr;
   }
 

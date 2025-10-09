@@ -17,6 +17,9 @@
 #include <mutex>
 
 #include "paddle/phi/core/memory/allocation/aligned_allocator.h"
+#ifdef PADDLE_WITH_CUDA
+#include "paddle/phi/backends/dynload/cuda_driver.h"
+#endif
 
 namespace paddle {
 namespace memory {
@@ -70,35 +73,6 @@ static inline void AppendPartsTail(std::vector<BlockPart> *dst,
   } else {
     dst->insert(dst->end(), src.begin(), src.end());
   }
-}
-
-// 把 src 的 parts 追加到 dst 的头部；在边界尝试折叠（同段且相邻）
-static inline void AppendPartsHead(std::vector<BlockPart> *dst,
-                                   const std::vector<BlockPart> &src) {
-  if (src.empty()) return;
-  if (!dst->empty() && !src.empty()) {
-    // 尝试折叠 src.tail + dst->head
-    if (src.back().chunk.get() == dst->front().chunk.get() &&
-        src.back().chunk_rel_off + src.back().len ==
-            dst->front().chunk_rel_off) {
-      // 合成一条：更新 dst->head
-      BlockPart head = dst->front();
-      head.chunk_rel_off = src.back().chunk_rel_off;
-      head.len += src.back().len;
-      // 组装：src 前面部分 + head + dst 余下部分
-      std::vector<BlockPart> tmp;
-      tmp.reserve(src.size() - 1 + 1 + (dst->size() - 1));
-      tmp.insert(tmp.end(), src.begin(), std::prev(src.end()));
-      tmp.push_back(std::move(head));
-      tmp.insert(tmp.end(), std::next(dst->begin()), dst->end());
-      dst->swap(tmp);
-      return;
-    }
-  }
-  // 无法折叠，直接头插
-  std::vector<BlockPart> tmp = src;
-  tmp.insert(tmp.end(), dst->begin(), dst->end());
-  dst->swap(tmp);
 }
 
 VirtualMemoryAutoGrowthBestFitAllocator::
@@ -280,29 +254,35 @@ phi::Allocation *VirtualMemoryAutoGrowthBestFitAllocator::AllocFromFreeBlocks(
     std::list<Block>::iterator block_it = iter->second;
     free_blocks_.erase(iter);
     if (NeedSplit(block_it->size_, alignment_, size)) {
+      void *remaining_ptr = reinterpret_cast<uint8_t *>(block_it->ptr_) + size;
       size_t remaining_size = block_it->size_ - size;
-      // 剩余 free 的 parts：取原 parts 的前 remaining_size
-      std::vector<BlockPart> remaining_parts =
-          SlicePartsForRange(block_it->parts_, /*pick_off=*/0, remaining_size);
-      // 分配块的 parts：取原 parts 的后 size
+      VLOG(10) << "[AllocFromFreeBlocks] Block size: " << block_it->size_
+               << ", Request size: " << size
+               << ", Remaining: " << remaining_size
+               << ", Original parts count: " << block_it->parts_.size();
       std::vector<BlockPart> alloc_parts = SlicePartsForRange(
-          block_it->parts_, /*pick_off=*/remaining_size, /*pick_len=*/size);
-      auto remaining_free_block =
-          all_blocks_.insert(block_it,
-                             Block(block_it->ptr_,
-                                   remaining_size,
-                                   true,
-                                   std::move(remaining_parts)));
-      free_blocks_.emplace(std::make_pair(remaining_size, block_it->ptr_),
-                           remaining_free_block);
-      block_it->ptr_ =
-          reinterpret_cast<uint8_t *>(block_it->ptr_) + remaining_size;
+          block_it->parts_, /*pick_off=*/0, /*pick_len=*/size);
+      std::vector<BlockPart> remaining_parts = SlicePartsForRange(
+          block_it->parts_, /*pick_off=*/size, /*pick_len=*/remaining_size);
+      VLOG(10) << "[AllocFromFreeBlocks] Alloc parts count: "
+               << alloc_parts.size()
+               << ", Remaining parts count: " << remaining_parts.size();
       block_it->size_ = size;
-      // 把后半段赋给已分配块
-      block_it->parts_.swap(alloc_parts);
-    }
+      block_it->is_free_ = false;
+      block_it->parts_.swap(alloc_parts);  // 设置分配块的 parts
 
-    block_it->is_free_ = false;
+      // 创建剩余空闲块，并设置其 parts
+      auto remaining_free_block = all_blocks_.insert(
+          std::next(block_it),
+          Block(remaining_ptr,
+                remaining_size,
+                true,
+                std::move(remaining_parts)));  // 设置剩余块的 parts
+      free_blocks_.emplace(std::make_pair(remaining_size, remaining_ptr),
+                           remaining_free_block);
+    } else {
+      block_it->is_free_ = false;
+    }
     return new BlockAllocation(block_it, place_);
   }
 

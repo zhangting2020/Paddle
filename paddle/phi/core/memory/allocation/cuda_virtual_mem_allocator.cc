@@ -221,6 +221,9 @@ phi::Allocation* CUDAVirtualMemAllocator::AllocateImpl(size_t size) {
   virtual_2_physical_map_.emplace(ptr, std::make_pair(handle, size));
 
   virtual_mem_alloced_offset_ += size;
+  VLOG(10) << "AllocateImpl chunk handle: " << static_cast<int64_t>(handle)
+           << ", size=" << size
+           << ", device=" << static_cast<int>(place_.device);
 
   return new Allocation(reinterpret_cast<void*>(ptr),
                         size,

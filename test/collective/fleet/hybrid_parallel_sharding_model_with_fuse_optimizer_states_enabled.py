@@ -17,126 +17,9 @@ import copy
 import multiprocessing
 import os
 import random
-import sys
-import traceback
 import unittest
-from functools import wraps
 
 import numpy as np
-
-try:
-    import paddle
-    from paddle.base import core
-
-    _orig_share_vmm = core.DenseTensor._share_vmm
-    _orig_new_shared_vmm = core.DenseTensor._new_shared_vmm
-
-    @wraps(_orig_share_vmm)
-    def _spy_share_vmm(self):
-        meta = _orig_share_vmm(self)
-        traceback.print_stack(limit=10, file=sys.stdout)
-        return meta
-
-    @wraps(_orig_new_shared_vmm)
-    def _spy_new_shared_vmm(meta):
-        meta = _orig_new_shared_vmm(meta)
-        traceback.print_stack(limit=10, file=sys.stdout)
-        return _orig_new_shared_vmm(meta)
-
-    core.DenseTensor._share_vmm = _spy_share_vmm
-    core.DenseTensor._new_shared_vmm = _spy_new_shared_vmm
-except Exception as e:
-    print(
-        f"[IPC-HOOK] core hook failed: {e}",
-        file=sys.stderr,
-        flush=True,
-    )
-"""
-try:
-    import paddle
-    from paddle.base import core
-
-    _orig_share_vmm = core.DenseTensor._share_vmm
-    _orig_new_shared_vmm = core.DenseTensor._new_shared_vmm
-
-    @wraps(_orig_share_vmm)
-    def _spy_share_vmm(self):
-        meta = _orig_share_vmm(self)
-        try:
-            fd, off, size, dtype, dims, lod, dev = meta
-            fd_safely = fd
-            fd_safely = DupFd(fd)
-            meta = (fd_safely, off, size, dtype, dims, lod, dev)
-            print(
-                f"[IPC-TX] pid={os.getpid()} "
-                f"_share_vmm dev={dev} fd(type)={type(fd_safely).__name__} off={off} size={size}B",
-                flush=True,
-            )
-            print(
-                f"[TX] before put: type(fd)={type(fd).__name__}  off={off}  size={size}  dev={dev}",
-                flush=True,
-            )
-            # traceback.print_stack(limit=10, file=sys.stdout)
-        except Exception as e:
-            print(
-                f"[IPC-TX] _share_vmm meta decode failed: {e}",
-                file=sys.stderr,
-                flush=True,
-            )
-        return meta
-
-    @wraps(_orig_new_shared_vmm)
-    def _spy_new_shared_vmm(meta):
-        try:
-            fd, off, size, dtype, dims, lod, dev = meta
-            print(
-                f"[RX] before _new_shared_vmm: type(fd)={type(fd).__name__}  repr(fd)={fd}",
-                flush=True,
-            )
-            print("before set device: ", core.get_cuda_current_device_id())
-            core.set_cuda_current_device_id(dev)
-            print("before set device: ", core.get_cuda_current_device_id())
-            if hasattr(fd, "detach"):
-                fd = fd.detach()
-                print(f"[RX] after detach: fd(int)={fd}", flush=True)
-            import os as _os
-
-            _os.fstat(fd)
-            print(
-                f"[IPC-RX] pid={os.getpid()} "
-                f"_new_shared_vmm dev={dev} fd(int)={fd} off={off} size={size}B",
-                flush=True,
-            )
-            # traceback.print_stack(limit=10, file=sys.stdout)
-            meta = (
-                fd,
-                off,
-                size,
-                dtype,
-                dims,
-                lod,
-                dev,
-            )
-        except Exception as e:
-            print(
-                f"[IPC-RX] _new_shared_vmm precheck failed: {e}",
-                file=sys.stderr,
-                flush=True,
-            )
-        return _orig_new_shared_vmm(meta)
-
-    core.DenseTensor._share_vmm = _spy_share_vmm
-    core.DenseTensor._new_shared_vmm = _spy_new_shared_vmm
-except Exception as e:
-    print(
-        f"[IPC-HOOK] core hook failed: {e}",
-        file=sys.stderr,
-        flush=True,
-    )
-"""
-
-import sys
-from functools import wraps
 
 import paddle
 import paddle.distributed as dist
@@ -158,9 +41,9 @@ g_shard_param_with_color = int(
 )
 
 vocab_size = 20
-hidden_size = 10
+hidden_size = 256
 inner_size = 8
-output_size = 10
+output_size = 256
 seq_length = 2
 batch_size = 4
 STEPS = 10
@@ -475,13 +358,8 @@ class TestDistMPTraining(unittest.TestCase):
                     optimizer_b.fused_states_buffer_ipc_meta,
                 )
                 # step1: update meta infos
-                print("=========== DO_FUSE_OPTIMIZER ==========")
                 task = (DO_FUSE_OPTIMIZER, meta_infos)
                 self.task_queue.put(task)
-                print(
-                    f"[TX] queue.put obj type={type(task)} start_method=?",
-                    flush=True,
-                )
                 self.fusion_buffer_version = optimizer_b.fused_buffer_version
             # step2: sync params
             self.task_queue.put((DO_SYNC_PARAM, None))

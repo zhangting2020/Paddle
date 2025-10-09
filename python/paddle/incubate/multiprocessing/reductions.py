@@ -14,7 +14,6 @@
 
 import copy
 import multiprocessing
-import os
 
 # TODO: check the hooks of tensor
 # TODO: check serializing named tensor
@@ -94,26 +93,10 @@ def _rebuild_tensor(cls, lodtensor, metadata):
 
 
 def _rebuild_vmm_tensor(
-    cls, fd_or_dup, offset_bytes, size, type_idx, dims, lod, device_idx
-):
-    if hasattr(fd_or_dup, "detach"):
-        fd = fd_or_dup.detach()
-    else:
-        fd = int(fd_or_dup)
-    try:
-        os.fstat(fd)
-    except Exception as e:
-        raise ValueError(f"VMM meta fd invalid before import: fd={fd}, err={e}")
-    lodtensor = cls._new_shared_vmm(
-        (fd, offset_bytes, size, type_idx, dims, lod, device_idx)
-    )
-    return lodtensor
-
-
-def _rebuild_vmm_tensor(
     cls, blob: bytes, dtype_idx: int, dims: list[int], lod, device: int
 ):
-    cls._new_shared_vmm((blob, dtype_idx, dims, lod, int))
+    lodtensor = cls._new_shared_vmm((blob, dtype_idx, dims, lod, device))
+    return lodtensor
 
 
 def _reduce_tensor(tensor):

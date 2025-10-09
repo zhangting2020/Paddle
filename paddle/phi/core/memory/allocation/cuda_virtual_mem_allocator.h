@@ -85,16 +85,15 @@ struct VmmIpcHeader {
 struct VmmIpcEntry {
   uint8_t handle_type;  // 1: POSIX_FD（cuMemExportToShareableHandle FD）
   uint8_t reserved[7];
-  uint64_t rel_offset;  // 相对“块起点”的偏移（累加）
-  uint64_t seg_len;     // 该条长度
-  // 紧随 payload:
-  //   if handle_type==1: int32_t remote_fd （导出侧的 fd 值）
+  uint64_t rel_offset;  // 该 part 映射到目标连续 VA 的相对偏移
+  uint64_t seg_len;     // 该 part 的长度（需为 VMM granularity 倍数）
+  uint64_t chunk_rel_off;  // ★ 该 part 在“底层 allocation handle”内的偏移
 };
 #pragma pack(pop)
 
 // 可选：编译期校验，防止意外改动
 static_assert(sizeof(VmmIpcHeader) == 20, "VmmIpcHeader size changed");
-static_assert(sizeof(VmmIpcEntry) == 24, "VmmIpcEntry size changed");
+static_assert(sizeof(VmmIpcEntry) == 32, "VmmIpcEntry size changed");
 
 class CUDAVirtualMemAllocator : public Allocator {
  public:
@@ -106,6 +105,7 @@ class CUDAVirtualMemAllocator : public Allocator {
                                       size_t size,
                                       int device_id,
                                       VmmShareInfo* out);
+  size_t granularity() const { return granularity_; }
 
  protected:
   void FreeImpl(phi::Allocation* allocation) override;

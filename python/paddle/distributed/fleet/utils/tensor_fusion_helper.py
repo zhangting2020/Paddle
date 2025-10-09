@@ -370,17 +370,10 @@ def build_reduce_scatter_buffer(
         if paddle.get_flags('FLAGS_use_virtual_memory_auto_growth')[
             'FLAGS_use_virtual_memory_auto_growth'
         ]:
-            # vmm_meta: (fd, offset, size, dtype, dims, lod, device)
             # vmm_meta: (blob: bytes, dtype_idx: int, dims: List[int], lod, device: int)
-            print("=============== build_reduce_scatter_buffer ==========")
             ipc_meta = param_buffer.value().get_tensor()._share_vmm()
         else:
-            ipc_meta = (
-                "cuda_ipc",
-                param_buffer.value().get_tensor()._share_cuda(),
-            )
-
-        tag, meta = ipc_meta
+            ipc_meta = param_buffer.value().get_tensor()._share_cuda()
         param_buffer_ipc_meta = ipc_meta
     else:
         param_buffer_ipc_meta = None

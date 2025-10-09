@@ -127,7 +127,7 @@ class Allocation : public phi::Allocation {
       : phi::Allocation(ptr, size, place), base_ptr_(ptr), handle_(handle) {}
 
   void* base_ptr() const { return base_ptr_; }
-  CUmemGenericAllocationHandle handle() const { return handle_; }
+  virtual const CUmemGenericAllocationHandle handle() const { return handle_; }
   virtual const std::vector<BlockPart>* parts() const { return nullptr; }
 
  private:
