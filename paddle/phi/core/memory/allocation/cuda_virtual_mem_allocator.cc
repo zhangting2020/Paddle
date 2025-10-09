@@ -231,36 +231,6 @@ phi::Allocation* CUDAVirtualMemAllocator::AllocateImpl(size_t size) {
                         handle);  // NOLINT
 }
 
-bool CUDAVirtualMemAllocator::ExportShareHandleFromVA(
-    CUdeviceptr va,
-    CUdeviceptr base_ptr,
-    CUmemGenericAllocationHandle handle,
-    size_t size,
-    int device_id,
-    VmmShareInfo* out) {
-  int fd = -1;
-  auto r = phi::dynload::cuMemExportToShareableHandle(
-      &fd, handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0);
-  if (r != CUDA_SUCCESS) {
-    const char* err_name = nullptr;
-    const char* err_str = nullptr;
-    phi::dynload::cuGetErrorName(r, &err_name);
-    phi::dynload::cuGetErrorString(r, &err_str);
-    VLOG(0) << "cuMemExportToShareableHandle failed r=" << r << " ("
-            << (err_name ? err_name : "") << ") " << (err_str ? err_str : "")
-            << " dev=" << device_id
-            << " handle=" << reinterpret_cast<void*>(handle)
-            << " base=" << reinterpret_cast<void*>(base_ptr)
-            << " size=" << size;
-    return false;
-  }
-  out->device = device_id;
-  out->os_fd = fd;
-  out->offset = static_cast<size_t>(va - base_ptr);
-  out->size = size;
-  return true;
-}
-
 }  // namespace paddle::memory::allocation
 
 #endif

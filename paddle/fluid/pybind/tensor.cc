@@ -672,20 +672,16 @@ void BindTensor(pybind11::module &m) {  // NOLINT
           throw std::runtime_error(
               "Tensor not initialized or numel is 0.  could not pass "
               "to shared memory. ");
-        auto base_holder = self.Holder();
-        auto* holder = dynamic_cast<memory::allocation::Allocation*>(
+        auto *holder = dynamic_cast<memory::allocation::Allocation *>(
           self.Holder().get());
-        PADDLE_ENFORCE_NOT_NULL(holder,
-                                "Not a VMM BlockAllocation (need VMM IPC)");
         PADDLE_ENFORCE_EQ(
             phi::is_gpu_place(holder->place()), true,
             common::errors::InvalidArgument(
-                "Tensor is not on GPU. share_cuda only support GPU "
+                "Tensor is not on GPU. share_vmm only support GPU "
                 "Tensor, share_filename is for CPU tensor."));
         auto& parts = *(holder->parts());
         PADDLE_ENFORCE_GT(parts.size(), 0, "Empty VMM parts");
 
-        // Export a shareable handle from the current device's VMM allocator
         const int &device_id = paddle::platform::GetCurrentDeviceId();
         auto stream =
             paddle::platform::get_current_stream(device_id);
@@ -696,10 +692,15 @@ void BindTensor(pybind11::module &m) {  // NOLINT
         VmmIpcHeader header{};
         header.version     = 1;
         header.type        = 2;
-        header.flags       = 0x1;  // pidfd 路线
+        header.flags       = 0x1;  // pidfd
         header.pid         = static_cast<uint32_t>(::getpid());
         header.num_entries = static_cast<uint32_t>(parts.size());
-        header.total_size  = static_cast<uint64_t>(holder->size());
+        header.alloc_size  = static_cast<uint64_t>(holder->size());
+        header.offset = parts[0].chunk_rel_off;
+        header.reserved_size = 0;
+        for (const auto& p : parts) {
+          header.reserved_size += p.chunk->size;
+        }
 
         std::string blob;
         blob.reserve(sizeof(VmmIpcHeader) +
@@ -707,12 +708,12 @@ void BindTensor(pybind11::module &m) {  // NOLINT
         blob.resize(sizeof(VmmIpcHeader));
         std::memcpy(blob.data(), &header, sizeof(VmmIpcHeader));
 
-        uint64_t rel = 0;
+        uint64_t rel_offset = 0;
         for (const auto& p : parts) {
           VmmIpcEntry entry{};
-          entry.handle_type = 1;  // FD
-          entry.rel_offset  = rel;
-          entry.seg_len     = p.chunk->size;
+          entry.handle_type = 1;  // POSIX_FD
+          entry.rel_offset  = rel_offset;
+          entry.chunk_size     = p.chunk->size;
           entry.chunk_rel_off = p.chunk_rel_off;
 
           int fd = -1;
@@ -721,25 +722,25 @@ void BindTensor(pybind11::module &m) {  // NOLINT
           VLOG(10) << "chunk handle="
                   << static_cast<int64_t>(chunk->handle)
                   << " device=" << chunk->device
-                  << " seg_len=" << p.chunk->size
-                  << " rel_offset=" << rel
+                  << " chunk_size=" << p.chunk->size
+                  << " rel_offset=" << rel_offset
                   << " chunk_rel_off=" << p.chunk_rel_off
                   << " len=" << p.len;
           PADDLE_ENFORCE_NE(p.chunk->handle, 0,
-                            "Underlying allocation is not VMM (handle=0)");
+                            "Underlying allocation is not VMM allocation.");
           PADDLE_ENFORCE_GPU_SUCCESS(
             phi::dynload::cuMemExportToShareableHandle(
               &fd, p.chunk->handle,
               CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0));
 
-          const size_t old = blob.size();
-          blob.resize(old + sizeof(VmmIpcEntry) + sizeof(int));
-          std::memcpy(blob.data() + old,
+          const size_t old_size = blob.size();
+          blob.resize(old_size + sizeof(VmmIpcEntry) + sizeof(int));
+          std::memcpy(blob.data() + old_size,
                       &entry, sizeof(VmmIpcEntry));
-          std::memcpy(blob.data() + old + sizeof(VmmIpcEntry),
+          std::memcpy(blob.data() + old_size + sizeof(VmmIpcEntry),
                       &fd, sizeof(int));
 
-          rel += p.chunk->size;
+          rel_offset += p.chunk->size;
         }
 
         const int dtype_idx = static_cast<int>(self.type());
@@ -756,31 +757,32 @@ void BindTensor(pybind11::module &m) {  // NOLINT
         std::string blob = meta[0].cast<py::bytes>();
         int dtype_idx = meta[1].cast<int>();
         std::vector<int64_t> dims_vec = meta[2].cast<std::vector<int64_t>>();
-        const auto lod = meta[3].cast<std::vector<std::vector<size_t>>>();
         int device_id = meta[4].cast<int>();
 
         using paddle::memory::allocation::VmmIpcHeader;
         using paddle::memory::allocation::VmmIpcEntry;
         PADDLE_ENFORCE_GE(blob.size(), sizeof(VmmIpcHeader), "bad blob");
-        const VmmIpcHeader* hdr =
+        const VmmIpcHeader* header =
             reinterpret_cast<const VmmIpcHeader*>(blob.data());
-        PADDLE_ENFORCE_EQ(hdr->version, 1, "bad version");
-        PADDLE_ENFORCE_EQ(hdr->type, 2, "bad type");
-        VLOG(10) << "[VMM-IPC] hdr: ver=" << static_cast<int>(hdr->version)
-                 << " type=" << static_cast<int>(hdr->type)
-                 << " pid=" << hdr->pid
-                 << " entries=" << hdr->num_entries
-                 << " total_size=" << hdr->total_size;
+        PADDLE_ENFORCE_EQ(header->version, 1, "bad version");
+        PADDLE_ENFORCE_EQ(header->type, 2, "bad type");
+        VLOG(10) << "[VMM-IPC] header: ver="
+                 << static_cast<int>(header->version)
+                 << " type=" << static_cast<int>(header->type)
+                 << " pid=" << header->pid
+                 << " num_entries=" << header->num_entries
+                 << " alloc_size=" << header->alloc_size
+                 << " reserved_size=" << header->reserved_size
+                 << " offset=" << header->offset;
 
-        auto log_cuda_err = [](const char* api, CUresult r){
+        auto log_cuda_err = [](const char* api, CUresult result){
           const char *n = nullptr, *s = nullptr;
-          phi::dynload::cuGetErrorName(r, &n);
-          phi::dynload::cuGetErrorString(r, &s);
+          phi::dynload::cuGetErrorName(result, &n);
+          phi::dynload::cuGetErrorString(result, &s);
           VLOG(10) << "[VMM-IPC] " << api
-                   << " r=" << static_cast<int>(r)
+                   << " result=" << static_cast<int>(result)
                    << " (" << (n?n:"") << ") " << (s?s:"");
         };
-
 
         // 预留 VA
         CUmemAllocationProp prop{};
@@ -788,47 +790,15 @@ void BindTensor(pybind11::module &m) {  // NOLINT
         prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
         prop.location.id = device_id;
 
-        size_t gran = 0;
-        auto r = phi::dynload::cuMemGetAllocationGranularity(
-            &gran, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
-        if (r != CUDA_SUCCESS) {
-          log_cuda_err("cuMemGetAllocationGranularity(min)", r);
-          PADDLE_ENFORCE_GPU_SUCCESS(r);
-        }
-
         const int cur_dev = paddle::platform::GetCurrentDeviceId();
         // 物理分配所在设备（导出端 cuMemCreate 时的 location.id）
         VLOG(10) << "[VMM-IPC/import] device_id=" << device_id
-                << " cur_dev=" << cur_dev
-                << " gran=" << gran;
-
-        size_t new_reserve_len = 0;
-        size_t offset = sizeof(VmmIpcHeader);
-        int final_chunk_rel_off = 0;
-        for (uint32_t i = 0; i < hdr->num_entries; ++i) {
-          PADDLE_ENFORCE_GE(blob.size() - offset,
-              sizeof(VmmIpcEntry), "bad entry");
-          const VmmIpcEntry* e =
-              reinterpret_cast<const VmmIpcEntry*>(blob.data() + offset);
-          offset += sizeof(VmmIpcEntry) + sizeof(int);
-          new_reserve_len += e->seg_len;
-          VLOG(10) << "#" << i
-                  << " seg_len=" << e->seg_len
-                  << " rel_offset=" << e->rel_offset
-                  << " e->chunk_rel_off=" << e->chunk_rel_off;
-          if (i == 0) {
-            final_chunk_rel_off = e->chunk_rel_off;
-          }
-        }
-        VLOG(10) << "hdr->num_entries=" << hdr->num_entries
-                << ", new_reserve_len=" << new_reserve_len
-                << ", final_chunk_rel_off=" << final_chunk_rel_off;
+                << " cur_dev=" << cur_dev;
 
         CUdeviceptr base = 0;
-        auto result =
-          phi::dynload::cuMemAddressReserve(&base, new_reserve_len, 0, 0, 0);
-        log_cuda_err("cuMemAddressReserve", result);
-        PADDLE_ENFORCE_GPU_SUCCESS(result);
+        PADDLE_ENFORCE_GPU_SUCCESS(
+          phi::dynload::cuMemAddressReserve(
+            &base, header->reserved_size, 0, 0, 0));
 
         // 访问权限
         CUmemAccessDesc desc{};
@@ -837,15 +807,15 @@ void BindTensor(pybind11::module &m) {  // NOLINT
         desc.flags         = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
 
         // 导入句柄并映射
-        std::vector<CUmemGenericAllocationHandle> hs;
-        hs.reserve(hdr->num_entries);
+        std::vector<CUmemGenericAllocationHandle> handles;
+        handles.reserve(header->num_entries);
 
         int pidfd = static_cast<int>(::syscall(SYS_pidfd_open,
-                                   (pid_t)hdr->pid, 0));
+                                   (pid_t)header->pid, 0));
         PADDLE_ENFORCE_NE(pidfd, -1, "pidfd_open failed");
 
         size_t off = sizeof(VmmIpcHeader);
-        for (uint32_t i = 0; i < hdr->num_entries; ++i) {
+        for (uint32_t i = 0; i < header->num_entries; ++i) {
           PADDLE_ENFORCE_GE(blob.size() - off,
               sizeof(VmmIpcEntry), "bad entry");
           const VmmIpcEntry* e =
@@ -861,19 +831,17 @@ void BindTensor(pybind11::module &m) {  // NOLINT
             ::syscall(SYS_pidfd_getfd, pidfd, remote_fd, 0));
           PADDLE_ENFORCE_NE(myfd, -1, "pidfd_getfd failed");
 
-          CUmemGenericAllocationHandle h = 0;
+          CUmemGenericAllocationHandle handle = 0;
           PADDLE_ENFORCE_GPU_SUCCESS(
             phi::dynload::cuMemImportFromShareableHandle(
-              &h, reinterpret_cast<void*>(static_cast<intptr_t>(myfd)),
+              &handle, reinterpret_cast<void*>(static_cast<intptr_t>(myfd)),
               CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR));
+          handles.push_back(handle);
 
           CUmemAllocationProp prop{};
-          auto r =
-            phi::dynload::cuMemGetAllocationPropertiesFromHandle(&prop, h);
-          if (r != CUDA_SUCCESS) {
-            log_cuda_err("cuMemGetAllocationPropertiesFromHandle", r);
-            PADDLE_ENFORCE_GPU_SUCCESS(r);
-          }
+          PADDLE_ENFORCE_GPU_SUCCESS(
+            phi::dynload::cuMemGetAllocationPropertiesFromHandle(
+              &prop, handle));
           VLOG(10) << "[VMM-IPC] prop.type=" << static_cast<int>(prop.type)
                    << " loc.type=" << static_cast<int>(prop.location.type)
                    << " loc.id=" << prop.location.id
@@ -881,60 +849,50 @@ void BindTensor(pybind11::module &m) {  // NOLINT
                    << static_cast<int>(prop.requestedHandleTypes);
 
           size_t gran = 0;
-          r = phi::dynload::cuMemGetAllocationGranularity(
-              &gran, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM);
-          if (r != CUDA_SUCCESS) {
-            log_cuda_err("cuMemGetAllocationGranularity", r);
-          PADDLE_ENFORCE_GPU_SUCCESS(r);
-          }
-
-          VLOG(10) << "[VMM-IPC] entry#" << i
-                   << " rel_off=" << e->rel_offset
-                   << " seg_len=" << e->seg_len
-                   << " gran=" << gran;
-
-          hs.push_back(h);
+          PADDLE_ENFORCE_GPU_SUCCESS(
+            phi::dynload::cuMemGetAllocationGranularity(
+              &gran, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM));
 
           // map + set access
-          const size_t map_len = e->seg_len;
-          VLOG(10) << "[VMM-IPC] map: va=["
+          const size_t map_len = e->chunk_size;
+          VLOG(10) << "[VMM-IPC] entry#" << i
+                   << " map: va=["
                    << reinterpret_cast<void*>(base + e->rel_offset)
                    << ", "
                    << reinterpret_cast<void*>(base + e->rel_offset + map_len)
                    << ") offsetInHandle=" << e->chunk_rel_off
                    << " rel_off=" << e->rel_offset
                    << " map_len=" << map_len
-                   << " (seg_len=" << e->seg_len << ", gran=" << gran << ")"
+                   << " (chunk_size=" << e->chunk_size
+                   << ", gran=" << gran << ")";
           PADDLE_ENFORCE_EQ(static_cast<size_t>(base + e->rel_offset) % gran,
               0UL, "base + e->rel_offset not aligned");
           PADDLE_ENFORCE_EQ(map_len % gran, 0UL, "map_len not aligned");
 
-          result = phi::dynload::cuMemMap(
-              base + e->rel_offset, map_len, 0, h, 0);
-          if (result != CUDA_SUCCESS) {
-            log_cuda_err("cuMemMap", result);
-            PADDLE_ENFORCE_GPU_SUCCESS(result);
-          }
+          PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cuMemMap(
+              base + e->rel_offset, map_len, 0, handle, 0));
 
-          result = phi::dynload::cuMemSetAccess(
-              base + e->rel_offset, map_len, &desc, 1);
-          if (result != CUDA_SUCCESS) {
-            log_cuda_err("cuMemSetAccess", result);
-            PADDLE_ENFORCE_GPU_SUCCESS(result);
-          }
-
-          phi::dynload::cuMemRelease(h);
+          PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cuMemSetAccess(
+              base + e->rel_offset, map_len, &desc, 1));
         }
 
         if (pidfd != -1) ::close(pidfd);
-        auto shared_holder = std::make_shared<memory::allocation::Allocation>(
-            reinterpret_cast<void*>(base + final_chunk_rel_off),
-            reinterpret_cast<void*>(base),
-            hdr->total_size, phi::GPUPlace(device_id));
+
+        auto keep = std::make_shared<memory::allocation::ImportedVmmMulti>();
+        keep->base  = base;
+        keep->reserved_size = header->reserved_size;
+        keep->hs    = std::move(handles);
+
+        auto alloc =
+        std::make_unique<memory::allocation::VmmImportedAllocation>(
+            reinterpret_cast<void*>(base + header->offset),
+            header->alloc_size,
+            phi::GPUPlace(device_id), keep);
+
         phi::DenseTensor tensor;
-        tensor.ResetHolderWithType(
-            shared_holder, static_cast<phi::DataType>(dtype_idx));
         tensor.Resize(phi::make_ddim(dims_vec));
+        tensor.ResetHolder(std::move(alloc));
+        tensor.set_type(static_cast<phi::DataType>(dtype_idx));
         return tensor;
       })
       .def("_share_buffer_with",

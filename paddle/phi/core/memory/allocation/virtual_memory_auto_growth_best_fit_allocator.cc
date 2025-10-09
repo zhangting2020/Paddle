@@ -199,20 +199,13 @@ void VirtualMemoryAutoGrowthBestFitAllocator::ExtendAndMerge(size_t size) {
   size = allocateptr->size();
   allocations_.push_back(std::move(allocateptr));  // hold allocation
 
-  // 从底层 allocation 提取 VMM 段信息
-  auto *raw = allocations_.back().get();
-  auto *base_alloc = dynamic_cast<Allocation *>(raw);
-  PADDLE_ENFORCE_NOT_NULL(base_alloc, "Underlying allocation null");
-  auto handle = base_alloc->handle();
-  PADDLE_ENFORCE_NE(handle, 0, "Underlying allocation is not VMM (handle=0)");
-
+  // Get VmmChunkMeta for IPC.
+  auto *base_alloc = dynamic_cast<Allocation *>(allocations_.back().get());
   auto chunk = std::make_shared<VmmChunkMeta>();
   chunk->base = reinterpret_cast<CUdeviceptr>(ptr);
   chunk->size = size;
-  chunk->handle = handle;
+  chunk->handle = base_alloc->handle();
   chunk->device = place_.device;
-
-  // 新 free 块的 parts：整段一条
   std::vector<BlockPart> new_parts(1,
                                    BlockPart{chunk, /*chunk_rel_off=*/0, size});
 

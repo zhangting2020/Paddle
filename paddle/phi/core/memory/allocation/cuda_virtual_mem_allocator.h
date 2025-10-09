@@ -45,17 +45,17 @@ struct VmmShareInfo {
 
 struct ImportedVmmMulti {
   CUdeviceptr base{0};
-  size_t total{0};
+  size_t reserved_size{0};
   std::vector<CUmemGenericAllocationHandle> hs;
   ~ImportedVmmMulti() {
-    if (base && total) {
-      phi::dynload::cuMemUnmap(base, total);
+    if (base && reserved_size) {
+      phi::dynload::cuMemUnmap(base, reserved_size);
     }
     for (auto h : hs) {
       if (h) phi::dynload::cuMemRelease(h);
     }
-    if (base && total) {
-      phi::dynload::cuMemAddressFree(base, total);
+    if (base && reserved_size) {
+      phi::dynload::cuMemAddressFree(base, reserved_size);
     }
   }
 };
@@ -74,44 +74,37 @@ class VmmImportedAllocation : public phi::Allocation {
 
 #pragma pack(push, 1)
 struct VmmIpcHeader {
-  uint8_t version;       // 固定 1
-  uint8_t type;          // 固定 2: vmm-ipc
-  uint16_t flags;        // bit0: 使用 pidfd 路线
-  uint32_t pid;          // 导出进程 pid
-  uint32_t num_entries;  // N（=1 即单句柄）
-  uint64_t total_size;   // VA 总长度（= Block.size_）
+  uint8_t version;         // 固定 1
+  uint8_t type;            // 固定 2: vmm-ipc
+  uint16_t flags;          // bit0: 使用 pidfd 路线
+  uint32_t pid;            // 导出进程 pid
+  uint32_t num_entries;    // N（=1 即单句柄）
+  uint64_t alloc_size;     // allocation size
+  uint64_t offset;         // allocation首地址相对VA base的偏移
+  uint64_t reserved_size;  // VA 总长度
 };
 
 struct VmmIpcEntry {
   uint8_t handle_type;  // 1: POSIX_FD（cuMemExportToShareableHandle FD）
   uint8_t reserved[7];
   uint64_t rel_offset;  // 该 part 映射到目标连续 VA 的相对偏移
-  uint64_t seg_len;     // 该 part 的长度（需为 VMM granularity 倍数）
+  uint64_t chunk_size;  // 该 part 的长度（需为 VMM granularity 倍数）
   uint64_t chunk_rel_off;  // ★ 该 part 在“底层 allocation handle”内的偏移
 };
 #pragma pack(pop)
 
 // 可选：编译期校验，防止意外改动
-static_assert(sizeof(VmmIpcHeader) == 20, "VmmIpcHeader size changed");
+static_assert(sizeof(VmmIpcHeader) == 36, "VmmIpcHeader size changed");
 static_assert(sizeof(VmmIpcEntry) == 32, "VmmIpcEntry size changed");
 
 class CUDAVirtualMemAllocator : public Allocator {
  public:
   explicit CUDAVirtualMemAllocator(const phi::GPUPlace& place);
   bool IsAllocThreadSafe() const override;
-  static bool ExportShareHandleFromVA(CUdeviceptr va,
-                                      CUdeviceptr base_ptr,
-                                      CUmemGenericAllocationHandle handle,
-                                      size_t size,
-                                      int device_id,
-                                      VmmShareInfo* out);
-  size_t granularity() const { return granularity_; }
 
  protected:
   void FreeImpl(phi::Allocation* allocation) override;
   phi::Allocation* AllocateImpl(size_t size) override;
-
-  bool ExportShareHandleFromVA(CUdeviceptr va, VmmShareInfo* out);
 
  private:
   phi::GPUPlace place_;

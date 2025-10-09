@@ -255,18 +255,6 @@ def _reduce_lodtensor(lodtensor):
         lodtensor._shared_incref()
         # TODO, maintain reference for lodtensor
     elif lodtensor._place().is_gpu_place():
-        """
-        prev_id = paddle.base.core.get_cuda_current_device_id()
-        cur_id = lodtensor._place().gpu_device_id()
-        if prev_id != cur_id:
-            paddle.base.core.set_cuda_current_device_id(cur_id)
-        try:
-            metadata = lodtensor._share_cuda()
-        finally:
-            if prev_id != cur_id:
-                paddle.base.core.set_cuda_current_device_id(prev_id)
-        """
-
         prev_id = paddle.base.core.get_cuda_current_device_id()
         cur_id = lodtensor._place().gpu_device_id()
         if prev_id != cur_id:
@@ -277,15 +265,6 @@ def _reduce_lodtensor(lodtensor):
             ]:
                 metadata = lodtensor._share_vmm()
                 rebuild = _rebuild_vmm_tensor
-                """
-                fd, offset, size, type_idx, dims, lod, device = (
-                    lodtensor._share_vmm()
-                )
-                if not hasattr(fd, "detach"):
-                    fd = multiprocessing.reduction.DupFd(fd)
-                metadata = (fd, offset, size, type_idx, dims, lod, device)
-                rebuild = _rebuild_vmm_tensor
-            """
             else:
                 metadata = lodtensor._share_cuda()
                 rebuild = _rebuild_cuda_tensor
