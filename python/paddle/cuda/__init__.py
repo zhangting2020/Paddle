@@ -33,6 +33,7 @@ from paddle.device import (
     is_current_stream_capturing as _is_current_stream_capturing,
     manual_seed,
     manual_seed_all as device_manual_seed_all,
+    memory_summary as device_memory_summary,
     reset_peak_memory_stats,
     set_stream,
     stream,
@@ -735,6 +736,33 @@ def memory_reserved(device: DeviceLike = None) -> int:
     return paddle_device.memory_reserved(device)
 
 
+def memory_summary(
+    device: DeviceLike = None, abbreviated: bool = False
+) -> str:
+    """
+    Return a formatted summary of allocator statistics for the target device.
+
+    Args:
+        device (DeviceLike, optional): Target device identifier. If ``None`` (default),
+            the current device is inspected.
+        abbreviated (bool, optional): When ``True``, return a condensed single-line summary.
+            Defaults to ``False``.
+
+    Returns:
+        str: A human-readable string describing current and peak memory usage.
+
+    Examples:
+        .. code-block:: python
+
+            >>> # doctest: +REQUIRES(env:GPU)
+            >>> import paddle
+            >>> print(paddle.cuda.memory_summary())
+            >>> print(paddle.cuda.memory_summary(abbreviated=True))
+    """
+
+    return device_memory_summary(device, abbreviated=abbreviated)
+
+
 def set_device(device: DeviceLike) -> None:
     """
     Set the current device.
@@ -857,6 +885,7 @@ __all__ = [
     "is_initialized",
     "memory_allocated",
     "memory_reserved",
+    "memory_summary",
     "set_device",
     "set_stream",
     "manual_seed_all",

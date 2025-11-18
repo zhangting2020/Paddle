@@ -45,6 +45,7 @@ __all__ = [
     'max_memory_reserved',
     'memory_allocated',
     'memory_reserved',
+    'memory_summary',
     'stream_guard',
     'get_device_properties',
     'get_device_name',
@@ -518,6 +519,212 @@ def memory_reserved(device: _CudaPlaceLike | None = None) -> int:
         )
     device_id = extract_cuda_device_id(device, op_name=name)
     return core.device_memory_stat_current_value("Reserved", device_id)
+
+
+def _human_readable_bytes(num_bytes: int | None) -> str:
+    """
+    Convert bytes to a human readable string that uses binary prefixes.
+    """
+    if num_bytes is None:
+        return "N/A"
+    if num_bytes == 0:
+        return "0.00 B"
+    suffixes = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"]
+    value = float(abs(num_bytes))
+    idx = 0
+    while value >= 1024 and idx < len(suffixes) - 1:
+        value /= 1024.0
+        idx += 1
+    prefix = "-" if num_bytes < 0 else ""
+    return f"{prefix}{value:.2f} {suffixes[idx]}"
+
+
+def _format_ratio(value: int, total: int | None) -> str:
+    if total is None or total <= 0:
+        return "N/A"
+    return f"{(float(value) / float(total)) * 100:5.2f}%"
+
+
+def _resolve_device_repr(
+    device: _CudaPlaceLike | None, device_id: int, custom_devices: list[str]
+) -> str:
+    """
+    Build a readable device description string for the summary header.
+    """
+    if device is None:
+        prefix = (
+            'gpu'
+            if core.is_compiled_with_cuda()
+            else (custom_devices[0] if custom_devices else 'device')
+        )
+        return f"{prefix}:{device_id}"
+
+    if isinstance(device, str):
+        return device
+    if isinstance(device, int):
+        prefix = (
+            'gpu'
+            if core.is_compiled_with_cuda()
+            else (custom_devices[0] if custom_devices else 'device')
+        )
+        return f"{prefix}:{device}"
+    if isinstance(device, core.CUDAPlace):
+        return f'gpu:{device.get_device_id()}'
+    if hasattr(core, 'CustomPlace') and isinstance(device, core.CustomPlace):
+        return f"{device.get_device_type()}:{device.get_device_id()}"
+    return str(device)
+
+
+def _format_pool_breakdown(pool_stats: dict | None) -> list[str]:
+    if not pool_stats:
+        return []
+
+    def fmt(label: str, stats: dict[str, int]) -> str:
+        return (
+            f"{label}: reserved={_human_readable_bytes(stats['reserved_bytes'])}, "
+            f"active={_human_readable_bytes(stats['allocated_bytes'])}, "
+            f"idle={_human_readable_bytes(stats['idle_bytes'])}, "
+            f"allocs={stats['allocation_count']}, frees={stats['free_count']}"
+        )
+
+    lines: list[str] = []
+    has_small = bool(pool_stats.get("has_small_pool"))
+    small_stats = pool_stats.get("small", {})
+    large_stats = pool_stats.get("large", {})
+
+    if has_small:
+        lines.append(fmt("Small Pool", small_stats))
+        lines.append(fmt("Large Pool", large_stats))
+        return lines
+
+    # Single-pool mode: choose whichever pool currently tracks usage.
+    primary = large_stats
+    label = "AutoGrowth Pool"
+    if (
+        large_stats.get("reserved_bytes", 0) == 0
+        and large_stats.get("allocated_bytes", 0) == 0
+        and (small_stats.get("reserved_bytes", 0) > 0
+             or small_stats.get("allocated_bytes", 0) > 0)
+    ):
+        primary = small_stats
+    lines.append(fmt(label, primary))
+    return lines
+
+
+def memory_summary(
+    device: _CudaPlaceLike | None = None, abbreviated: bool = False
+) -> str:
+    '''
+    Return a formatted summary of the current and peak memory statistics for the target device.
+
+    Args:
+        device(paddle.CUDAPlace|paddle.CustomPlace|int|str|None, optional): The target device. When ``None``,
+            the currently active device is inspected. Default: None.
+        abbreviated(bool, optional): When ``True``, return a condensed single-line summary. Default: False.
+
+    Returns:
+        str: A human-readable string describing the allocator statistics.
+
+    Examples:
+        .. code-block:: python
+
+            >>> # doctest: +REQUIRES(env:GPU)
+            >>> import paddle
+            >>> paddle.device.set_device('gpu')
+            >>> print(paddle.device.cuda.memory_summary())
+            >>> print(paddle.device.cuda.memory_summary(abbreviated=True))
+    '''
+    name = "paddle.device.cuda.memory_summary"
+    custom_devices = paddle.device.get_all_custom_device_type()
+    if not (
+        core.is_compiled_with_cuda()
+        or (
+            custom_devices
+            and core.is_compiled_with_custom_device(custom_devices[0])
+        )
+    ):
+        raise ValueError(
+            f"The API {name} is not supported in CPU-only PaddlePaddle. Please reinstall PaddlePaddle with GPU or custom device support to call this API."
+        )
+
+    device_id = extract_cuda_device_id(device, op_name=name)
+    current_alloc = core.device_memory_stat_current_value(
+        "Allocated", device_id
+    )
+    peak_alloc = core.device_memory_stat_peak_value("Allocated", device_id)
+    current_reserved = core.device_memory_stat_current_value(
+        "Reserved", device_id
+    )
+    peak_reserved = core.device_memory_stat_peak_value("Reserved", device_id)
+    inactive_current = max(current_reserved - current_alloc, 0)
+    inactive_peak = max(peak_reserved - peak_alloc, 0)
+
+    total_memory = None
+    device_name = None
+    if core.is_compiled_with_cuda():
+        try:
+            props = get_device_properties(device)
+            device_name = props.name
+            total_memory = int(getattr(props, "total_memory", 0)) or None
+        except Exception:
+            device_name = None
+            total_memory = None
+
+    device_repr = _resolve_device_repr(device, device_id, custom_devices)
+    pool_stats = None
+    if hasattr(core, "get_cuda_memory_pool_stats"):
+        try:
+            stats = core.get_cuda_memory_pool_stats(device_id)
+        except Exception:
+            stats = None
+        if stats:
+            pool_stats = stats
+
+    if abbreviated:
+        parts = [
+            f"allocated={_human_readable_bytes(current_alloc)} (peak {_human_readable_bytes(peak_alloc)})",
+            f"reserved={_human_readable_bytes(current_reserved)} (peak {_human_readable_bytes(peak_reserved)})",
+            f"inactive={_human_readable_bytes(inactive_current)} (peak {_human_readable_bytes(inactive_peak)})",
+        ]
+        pool_lines = _format_pool_breakdown(pool_stats)
+        if pool_lines:
+            parts.extend(pool_lines)
+        header = f"Paddle CUDA memory summary ({device_repr}"
+        if device_name:
+            header += f" - {device_name}"
+        header += ")"
+        if total_memory is not None:
+            header += f" total={_human_readable_bytes(total_memory)}"
+        return f"{header}: " + ", ".join(parts)
+
+    header = f"Paddle CUDA memory summary ({device_repr}"
+    if device_name:
+        header += f" - {device_name}"
+    header += ")"
+    lines = [header, "=" * len(header)]
+    if total_memory is not None:
+        lines.append(f"Total capacity    : {_human_readable_bytes(total_memory)}")
+    else:
+        lines.append("Total capacity    : Unknown")
+
+    lines.append(
+        f"Allocated (tensor): current={_human_readable_bytes(current_alloc)}, peak={_human_readable_bytes(peak_alloc)}, util={_format_ratio(current_alloc, total_memory)}"
+    )
+    lines.append(
+        f"Reserved  (pool) : current={_human_readable_bytes(current_reserved)}, peak={_human_readable_bytes(peak_reserved)}, util={_format_ratio(current_reserved, total_memory)}"
+    )
+    lines.append(
+        f"Inactive  (pool) : current={_human_readable_bytes(inactive_current)}, peak={_human_readable_bytes(inactive_peak)}"
+    )
+    pool_lines = _format_pool_breakdown(pool_stats)
+    if pool_lines:
+        lines.append("")
+        lines.append("Pool breakdown:")
+        lines.extend(f"  {line}" for line in pool_lines)
+    lines.append(
+        "Inactive memory represents cached blocks that will be reused by future allocations."
+    )
+    return "\n".join(lines)
 
 
 def _set_current_stream(stream: Stream) -> core.CUDAStream:

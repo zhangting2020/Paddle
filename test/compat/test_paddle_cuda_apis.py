@@ -54,6 +54,30 @@ if should_skip_tests():
     sys.exit(0)
 
 
+def _memory_summary_supported():
+    """
+    The allocator statistics used by memory_summary are only available on CUDA or custom devices.
+    """
+    if paddle.is_compiled_with_cuda():
+        return True
+
+    try:
+        custom_devices = paddle.device.get_all_custom_device_type()
+    except Exception:
+        return False
+
+    if not custom_devices:
+        return False
+
+    return any(
+        paddle.device.is_compiled_with_custom_device(dev)
+        for dev in custom_devices
+    )
+
+
+MEMORY_SUMMARY_SUPPORTED = _memory_summary_supported()
+
+
 class TestCurrentDevice(TestCase):
     def test_current_device_return_type(self):
         """Test that current_device returns an integer."""
@@ -301,6 +325,77 @@ class TestMemoryReserved(TestCase):
                 allocated,
                 "memory_reserved should be >= memory_allocated",
             )
+
+
+@unittest.skipUnless(
+    MEMORY_SUMMARY_SUPPORTED,
+    "memory_summary requires CUDA or custom device support",
+)
+class TestMemorySummary(TestCase):
+    def test_memory_summary_returns_string(self):
+        """memory_summary should always return a string."""
+        result = paddle.cuda.memory_summary()
+        self.assertIsInstance(result, str)
+        self.assertIn("memory", result.lower())
+
+    def test_memory_summary_abbreviated(self):
+        """memory_summary(abbreviated=True) should produce a condensed string."""
+        result = paddle.cuda.memory_summary(abbreviated=True)
+        self.assertIsInstance(result, str)
+        self.assertIn("allocated", result.lower())
+
+    def test_memory_summary_device_argument(self):
+        """memory_summary should accept explicit device identifiers."""
+        if paddle.cuda.device_count() == 0:
+            self.skipTest("No CUDA/custom devices available for explicit device test")
+        result = paddle.cuda.memory_summary(0)
+        self.assertIsInstance(result, str)
+
+    def test_memory_summary_includes_pool_breakdown_when_available(self):
+        """memory_summary should surface pool stats when backend exposes them."""
+        try:
+            from paddle.base import core as core_module
+        except Exception:
+            self.skipTest("core module unavailable")
+
+        if not hasattr(core_module, "get_cuda_memory_pool_stats"):
+            self.skipTest("pool stats API is not exposed")
+
+        original = core_module.get_cuda_memory_pool_stats
+
+        def _fake_stats(device_id):
+            self.assertGreaterEqual(device_id, 0)
+            return {
+                "has_small_pool": True,
+                "small": {
+                    "reserved_bytes": 1024,
+                    "allocated_bytes": 512,
+                    "idle_bytes": 512,
+                    "total_allocation_bytes": 512,
+                    "total_free_bytes": 0,
+                    "allocation_count": 1,
+                    "free_count": 0,
+                },
+                "large": {
+                    "reserved_bytes": 2048,
+                    "allocated_bytes": 1024,
+                    "idle_bytes": 1024,
+                    "total_allocation_bytes": 1024,
+                    "total_free_bytes": 0,
+                    "allocation_count": 2,
+                    "free_count": 1,
+                },
+            }
+
+        core_module.get_cuda_memory_pool_stats = _fake_stats
+        try:
+            summary = paddle.cuda.memory_summary()
+        finally:
+            core_module.get_cuda_memory_pool_stats = original
+
+        self.assertIn("Pool breakdown", summary)
+        self.assertIn("Small Pool", summary)
+        self.assertIn("Large Pool", summary)
 
 
 class TestSetDevice(TestCase):

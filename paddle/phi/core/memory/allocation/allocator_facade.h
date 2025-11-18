@@ -16,6 +16,7 @@
 #include <memory>
 
 #include "paddle/phi/core/memory/allocation/allocator.h"
+#include "paddle/phi/core/memory/allocation/auto_growth_best_fit_allocator.h"
 #ifdef PADDLE_WITH_CUDA
 #include "paddle/phi/core/platform/device/gpu/gpu_info.h"
 #endif
@@ -33,6 +34,8 @@
 namespace paddle {
 namespace memory {
 namespace allocation {
+
+struct AutoGrowthAllocatorStats;
 
 // Allocator Facade is the interface exposed to other modules.
 // All the configuration or dirty code under development should
@@ -107,6 +110,9 @@ class AllocatorFacade {
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
   void PrepareMemoryPoolForCUDAGraph(int64_t id);
   void RemoveMemoryPoolOfCUDAGraph(int64_t id);
+
+  PADDLE_API bool GetGPUMemoryPoolStats(int dev_id,
+                                        AutoGrowthAllocatorStats* stats);
 #endif
 
 #ifdef PADDLE_WITH_CUSTOM_DEVICE

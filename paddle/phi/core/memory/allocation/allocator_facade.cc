@@ -1204,6 +1204,26 @@ class AllocatorFacadePrivate {
   }
 #endif
 
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+  bool GetGPUMemoryPoolStats(int dev_id,
+                             AutoGrowthAllocatorStats* stats) const {
+    if (stats == nullptr) {
+      return false;
+    }
+    auto it = auto_growth_allocators_.find(phi::GPUPlace(dev_id));
+    if (it == auto_growth_allocators_.end()) {
+      return false;
+    }
+    auto allocator =
+        std::dynamic_pointer_cast<AutoGrowthBestFitAllocator>(it->second);
+    if (!allocator) {
+      return false;
+    }
+    *stats = allocator->GetStats();
+    return true;
+  }
+#endif
+
 #ifdef PADDLE_WITH_XPU
   void InitNaiveBestFitXPUAllocator(phi::XPUPlace p) {
     allocators_[p] = std::make_shared<NaiveBestFitAllocator>(p);
@@ -1849,6 +1869,11 @@ void AllocatorFacade::RemoveMemoryPoolOfCUDAGraph(int64_t id) {
     VLOG(10) << "Decrease memory pool ID " << id << " reference count to be "
              << ref_cnt;
   }
+}
+
+bool AllocatorFacade::GetGPUMemoryPoolStats(
+    int dev_id, AutoGrowthAllocatorStats* stats) {
+  return m_->GetGPUMemoryPoolStats(dev_id, stats);
 }
 #endif
 #elif defined(PADDLE_WITH_XPU)

@@ -94,6 +94,14 @@ AutoGrowthBestFitAllocator::AutoGrowthBestFitAllocator(
   total_alloc_size_ = 0;
   total_free_times_ = 0;
   total_free_size_ = 0;
+  small_alloc_times_ = 0;
+  small_alloc_size_ = 0;
+  small_free_times_ = 0;
+  small_free_size_ = 0;
+  large_alloc_times_ = 0;
+  large_alloc_size_ = 0;
+  large_free_times_ = 0;
+  large_free_size_ = 0;
   VLOG(7) << "chunk_size_:" << chunk_size_;
 }
 
@@ -263,8 +271,7 @@ phi::Allocation *AutoGrowthBestFitAllocator::AllocateImpl(
       DumpInfo();
     }
   }
-  ++total_alloc_times_;
-  total_alloc_size_ += size;
+  TrackAllocationStats(is_small, size);
   VLOG(10) << "Alloc " << block_it->size_ << " bytes, ptr = " << block_it->ptr_;
   auto block_t = new BlockAllocation(block_it);
   return block_t;
@@ -282,8 +289,7 @@ void AutoGrowthBestFitAllocator::FreeImpl(phi::Allocation *allocation) {
   bool is_small = block_it->is_small_;
   auto &free_blocks = is_small ? small_free_blocks_ : large_free_blocks_;
 
-  total_free_times_ += 1;
-  total_free_size_ += block_it->size_;
+  TrackFreeStats(is_small, block_it->size_);
 
   block_it->is_free_ = true;
 
@@ -355,34 +361,76 @@ uint64_t AutoGrowthBestFitAllocator::FreeIdleChunks() {
   return bytes;
 }
 
-void AutoGrowthBestFitAllocator::Trace() const {
-  size_t small_cur_idle_bytes = 0;
-  auto small_it = small_free_blocks_.begin();
-  for (; small_it != small_free_blocks_.end(); ++small_it) {
-    small_cur_idle_bytes += small_it->second->size_;
-  }
-  size_t large_cur_idle_bytes = 0;
-  auto large_it = large_free_blocks_.begin();
-  for (; large_it != large_free_blocks_.end(); ++large_it) {
-    large_cur_idle_bytes += large_it->second->size_;
+AutoGrowthAllocatorStats AutoGrowthBestFitAllocator::GetStats() const {
+  AutoGrowthAllocatorStats stats;
+  std::lock_guard<SpinLock> guard(spinlock_);
+  for (const auto& chunk : chunks_) {
+    for (const auto& block : chunk.blocks_) {
+      auto& pool = block.is_small_ ? stats.small : stats.large;
+      pool.reserved_bytes += block.size_;
+      if (block.is_free_) {
+        pool.idle_bytes += block.size_;
+      } else {
+        pool.allocated_bytes += block.size_;
+      }
+    }
   }
 
-  VLOG(1) << "alloc:"
-          << total_alloc_size_ / static_cast<double>(1024 * 1024)  // NOLINT
-          << "m free:"
-          << total_free_size_ / static_cast<double>(1024 * 1024)  // NOLINT
-          << "m busy:"
-          << (total_alloc_size_ - total_free_size_) /  // NOLINT
-                 static_cast<double>(1024 * 1024)
-          << "m small idle:"
-          << small_cur_idle_bytes / static_cast<double>(1024 * 1024)  // NOLINT
-          << "m large idle:"
-          << large_cur_idle_bytes / static_cast<double>(1024 * 1024)  // NOLINT
+  stats.small.total_allocation_bytes = small_alloc_size_;
+  stats.small.total_free_bytes = small_free_size_;
+  stats.small.allocation_count = small_alloc_times_;
+  stats.small.free_count = small_free_times_;
+
+  stats.large.total_allocation_bytes = large_alloc_size_;
+  stats.large.total_free_bytes = large_free_size_;
+  stats.large.allocation_count = large_alloc_times_;
+  stats.large.free_count = large_free_times_;
+
+  stats.has_separate_small_pool = FLAGS_small_pool_size_in_mb > 0;
+  return stats;
+}
+
+void AutoGrowthBestFitAllocator::Trace() const {
+  const auto stats = GetStats();
+  auto to_mb = [](size_t bytes) {
+    return bytes / static_cast<double>(1024 * 1024);
+  };
+  auto busy_bytes = [](size_t alloc, size_t free) -> size_t {
+    return alloc > free ? (alloc - free) : 0;
+  };
+
+  const auto total_alloc_bytes =
+      stats.small.total_allocation_bytes + stats.large.total_allocation_bytes;
+  const auto total_free_bytes =
+      stats.small.total_free_bytes + stats.large.total_free_bytes;
+  const auto total_idle_bytes =
+      stats.small.idle_bytes + stats.large.idle_bytes;
+
+  VLOG(1) << "alloc:" << to_mb(total_alloc_bytes) << "m free:"
+          << to_mb(total_free_bytes) << "m busy:"
+          << to_mb(busy_bytes(total_alloc_bytes, total_free_bytes))
+          << "m idle:" << to_mb(total_idle_bytes)
           << "m alloc_times:" << total_alloc_times_
           << " free_times:" << total_free_times_
           << " small free_blocks_num:" << small_free_blocks_.size()
           << " large free_blocks_num:" << large_free_blocks_.size()
           << " curr_chunks_num:" << chunks_.size();
+
+  VLOG(1) << "  small pool -> reserved:" << to_mb(stats.small.reserved_bytes)
+          << "m active:" << to_mb(stats.small.allocated_bytes)
+          << "m idle:" << to_mb(stats.small.idle_bytes)
+          << "m alloc_bytes:" << to_mb(stats.small.total_allocation_bytes)
+          << "m free_bytes:" << to_mb(stats.small.total_free_bytes)
+          << "m alloc_times:" << stats.small.allocation_count
+          << " free_times:" << stats.small.free_count;
+
+  VLOG(1) << "  large pool -> reserved:" << to_mb(stats.large.reserved_bytes)
+          << "m active:" << to_mb(stats.large.allocated_bytes)
+          << "m idle:" << to_mb(stats.large.idle_bytes)
+          << "m alloc_bytes:" << to_mb(stats.large.total_allocation_bytes)
+          << "m free_bytes:" << to_mb(stats.large.total_free_bytes)
+          << "m alloc_times:" << stats.large.allocation_count
+          << " free_times:" << stats.large.free_count;
 }
 
 }  // namespace paddle::memory::allocation

@@ -29,6 +29,22 @@ namespace paddle {
 namespace memory {
 namespace allocation {
 
+struct AutoGrowthAllocatorPoolStats {
+  size_t reserved_bytes{0};
+  size_t allocated_bytes{0};
+  size_t idle_bytes{0};
+  size_t total_allocation_bytes{0};
+  size_t total_free_bytes{0};
+  size_t allocation_count{0};
+  size_t free_count{0};
+};
+
+struct AutoGrowthAllocatorStats {
+  AutoGrowthAllocatorPoolStats small;
+  AutoGrowthAllocatorPoolStats large;
+  bool has_separate_small_pool{false};
+};
+
 class PADDLE_API AutoGrowthBestFitAllocator : public Allocator {
  public:
   AutoGrowthBestFitAllocator(std::shared_ptr<Allocator> underlying_allocator,
@@ -42,6 +58,8 @@ class PADDLE_API AutoGrowthBestFitAllocator : public Allocator {
   void DumpInfo() const;
 
   void PreAlloc() override;
+
+  AutoGrowthAllocatorStats GetStats() const;
 
  protected:
   phi::Allocation *AllocateImpl(size_t size) override;
@@ -120,8 +138,40 @@ class PADDLE_API AutoGrowthBestFitAllocator : public Allocator {
   size_t total_alloc_size_;
   size_t total_free_times_;
   size_t total_free_size_;
+  size_t small_alloc_times_;
+  size_t small_alloc_size_;
+  size_t small_free_times_;
+  size_t small_free_size_;
+  size_t large_alloc_times_;
+  size_t large_alloc_size_;
+  size_t large_free_times_;
+  size_t large_free_size_;
 
-  SpinLock spinlock_;
+  inline void TrackAllocationStats(bool is_small, size_t size) {
+    ++total_alloc_times_;
+    total_alloc_size_ += size;
+    if (is_small) {
+      ++small_alloc_times_;
+      small_alloc_size_ += size;
+    } else {
+      ++large_alloc_times_;
+      large_alloc_size_ += size;
+    }
+  }
+
+  inline void TrackFreeStats(bool is_small, size_t size) {
+    ++total_free_times_;
+    total_free_size_ += size;
+    if (is_small) {
+      ++small_free_times_;
+      small_free_size_ += size;
+    } else {
+      ++large_free_times_;
+      large_free_size_ += size;
+    }
+  }
+
+  mutable SpinLock spinlock_;
 };
 
 }  // namespace allocation

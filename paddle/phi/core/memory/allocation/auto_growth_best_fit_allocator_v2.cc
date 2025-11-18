@@ -156,8 +156,7 @@ phi::Allocation *AutoGrowthBestFitAllocatorV2::AllocateImpl(
               << remaining_size;
     }
   }
-  ++total_alloc_times_;
-  total_alloc_size_ += size;
+  TrackAllocationStats(/*is_small=*/true, size);
   VLOG(10) << "Alloc " << block_it->size_ << " bytes, ptr = " << block_it->ptr_;
   return new BlockAllocation(block_it);
 }

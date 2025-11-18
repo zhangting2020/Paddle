@@ -92,6 +92,7 @@ if core.is_compiled_with_cuda():
         max_memory_reserved,
         memory_allocated,
         memory_reserved,
+        memory_summary,
         reset_max_memory_allocated,
         reset_max_memory_reserved,
         set_rng_state,
@@ -147,6 +148,12 @@ else:
             set_rng_state,
         )
 
+if 'memory_summary' not in globals():
+
+    def memory_summary(*args, **kwargs):
+        raise ValueError(
+            "The API paddle.device.memory_summary is only available when PaddlePaddle is built with GPU or custom device support."
+        )
 
 __all__ = [
     'get_cudnn_version',
@@ -181,6 +188,7 @@ __all__ = [
     'reset_max_memory_reserved',
     'memory_allocated',
     'memory_reserved',
+    'memory_summary',
     'is_available',
     'is_current_stream_capturing',
     'get_device_name',

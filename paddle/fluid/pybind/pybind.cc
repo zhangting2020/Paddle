@@ -3303,6 +3303,39 @@ All parameter, weight, gradient are variables in Paddle.
   m.def("host_memory_stat_peak_value", memory::HostMemoryStatPeakValue);
   m.def("host_memory_stat_reset_peak_value",
         memory::HostMemoryStatResetPeakValue);
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+  m.def(
+      "get_cuda_memory_pool_stats",
+      [](int dev_id) -> py::object {
+        paddle::memory::allocation::AutoGrowthAllocatorStats stats;
+        if (!paddle::memory::allocation::AllocatorFacade::Instance()
+                 .GetGPUMemoryPoolStats(dev_id, &stats)) {
+          return py::none();
+        }
+        auto pack = [](const paddle::memory::allocation::
+                           AutoGrowthAllocatorPoolStats& pool) {
+          py::dict data;
+          data["reserved_bytes"] = pool.reserved_bytes;
+          data["allocated_bytes"] = pool.allocated_bytes;
+          data["idle_bytes"] = pool.idle_bytes;
+          data["total_allocation_bytes"] = pool.total_allocation_bytes;
+          data["total_free_bytes"] = pool.total_free_bytes;
+          data["allocation_count"] = pool.allocation_count;
+          data["free_count"] = pool.free_count;
+          return data;
+        };
+        py::dict result;
+        result["has_small_pool"] = stats.has_separate_small_pool;
+        result["small"] = pack(stats.small);
+        result["large"] = pack(stats.large);
+        return result;
+      },
+      py::arg("device_id"));
+#else
+  m.def("get_cuda_memory_pool_stats",
+        [](int) -> py::object { return py::none(); },
+        py::arg("device_id"));
+#endif
   m.def(
       "run_cmd",
       [](const std::string &cmd,
