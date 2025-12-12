@@ -24,6 +24,7 @@ void SolveGradKernel(const Context& dev_ctx,
                      const DenseTensor& y,
                      const DenseTensor& out,
                      const DenseTensor& dout,
+                     bool left,
                      DenseTensor* dx,
                      DenseTensor* dy);
 

@@ -5143,7 +5143,7 @@
   traits: pir::UnaryElementWiseTrait
 
 - op : solve
-  args : (Tensor x, Tensor y)
+  args : (Tensor x, Tensor y, bool left = true)
   output : Tensor
   infer_meta :
     func : SolveInferMeta

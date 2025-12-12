@@ -4463,7 +4463,10 @@ void ValueCompareInferMeta(const MetaTensor& x,
   out->set_dtype(DataType::BOOL);
 }
 
-void SolveInferMeta(const MetaTensor& x, const MetaTensor& y, MetaTensor* out) {
+void SolveInferMeta(const MetaTensor& x,
+                    const MetaTensor& y,
+                    bool left,
+                    MetaTensor* out) {
   auto x_dims = x.dims();
   auto y_dims = y.dims();
 
@@ -4500,51 +4503,60 @@ void SolveInferMeta(const MetaTensor& x, const MetaTensor& y, MetaTensor* out) {
                         x_dims[x_dims_n - 2],
                         x_dims[x_dims_n - 1]));
 
-  bool x_broadcasted = false, y_broadcasted = false;
-  bool trans_x = false, trans_y = false;
-  if (x_dims_n == 1) {
-    x_dims_vec.insert(x_dims_vec.begin(), 1);
-    x_dims_n = 2;
-    x_broadcasted = true;
+  std::vector<int64_t> x_batch(x_dims_vec.begin(), x_dims_vec.end() - 2);
+  std::vector<int64_t> y_batch =
+      y_dims_n > 1
+          ? std::vector<int64_t>(y_dims_vec.begin(), y_dims_vec.end() - 2)
+          : std::vector<int64_t>();
+
+  std::vector<int64_t> batch;
+  size_t max_bn = std::max(x_batch.size(), y_batch.size());
+  batch.resize(max_bn);
+  for (size_t i = 0; i < max_bn; ++i) {
+    int64_t xb = (i < max_bn - x_batch.size())
+                     ? 1
+                     : x_batch[i - (max_bn - x_batch.size())];
+    int64_t yb = (i < max_bn - y_batch.size())
+                     ? 1
+                     : y_batch[i - (max_bn - y_batch.size())];
+    PADDLE_ENFORCE_EQ((xb == yb) || (xb == 1) || (yb == 1),
+                      true,
+                      common::errors::InvalidArgument(
+                          "Broadcast dimension mismatch in solve: x_batch=%d, "
+                          "y_batch=%d at dim %zu",
+                          xb,
+                          yb,
+                          i));
+    batch[i] = xb == 1 ? yb : xb;
   }
 
-  if (y_dims_n == 1) {
-    y_dims_vec.push_back(1);
-    y_dims_n = 2;
-    y_broadcasted = true;
-  }
-
-  size_t M = 0, N = 0;
-  if (trans_x) {
-    M = x_dims_vec[x_dims_n - 1];
+  std::vector<int64_t> out_dims(batch);
+  if (left) {
+    if (y_dims_n == 1) {
+      out_dims.push_back(x_dims_vec[x_dims_n - 1]);
+    } else {
+      out_dims.push_back(y_dims_vec[y_dims_n - 2]);
+      out_dims.push_back(y_dims_vec[y_dims_n - 1]);
+    }
   } else {
-    M = x_dims_vec[x_dims_n - 2];
-  }
-  if (trans_y) {
-    N = y_dims_vec[y_dims_n - 2];
-  } else {
-    N = y_dims_vec[y_dims_n - 1];
-  }
-
-  std::vector<int64_t> new_dims;
-  if (x_dims_n >= y_dims_n) {
-    new_dims.assign(x_dims_vec.begin(), x_dims_vec.end() - 2);
-  } else {
-    new_dims.assign(y_dims_vec.begin(), y_dims_vec.end() - 2);
-  }
-  if (!x_broadcasted) {
-    new_dims.push_back(M);  // NOLINT
-  }
-  if (!y_broadcasted) {
-    new_dims.push_back(N);  // NOLINT
-  }
-  if (x_broadcasted && y_broadcasted) {
-    new_dims.push_back(1);
+    PADDLE_ENFORCE_GE(y_dims_n,
+                      2,
+                      common::errors::InvalidArgument(
+                          "Right solve expects Y to be at least 2D, but "
+                          "received %d.",
+                          y_dims_n));
+    PADDLE_ENFORCE_EQ(
+        y_dims_vec[y_dims_n - 1],
+        x_dims_vec[x_dims_n - 1],
+        common::errors::InvalidArgument(
+            "Right solve expects Y.shape[-1] == X.shape[-1], but got %d vs %d",
+            y_dims_vec[y_dims_n - 1],
+            x_dims_vec[x_dims_n - 1]));
+    out_dims.push_back(y_dims_vec[y_dims_n - 2]);
+    out_dims.push_back(x_dims_vec[x_dims_n - 1]);
   }
 
-  auto out_dims = common::make_ddim(new_dims);
-
-  out->set_dims(out_dims);
+  out->set_dims(common::make_ddim(out_dims));
   out->set_dtype(x.dtype());
   out->set_layout(x.layout());
   out->share_lod(x);

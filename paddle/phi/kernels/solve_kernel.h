@@ -31,6 +31,7 @@ template <typename T, typename Context>
 void SolveKernel(const Context& dev_ctx,
                  const DenseTensor& x,
                  const DenseTensor& y,
+                 bool left,
                  DenseTensor* out);
 
 }  // namespace phi

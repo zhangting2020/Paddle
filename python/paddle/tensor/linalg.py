@@ -4237,11 +4237,9 @@ def solve(
     """
     if not left:
         _check_right_solve_shape(x, y)
-        x = _transpose_last_2dim(x)
-        y = _transpose_last_2dim(y)
 
     if in_dynamic_or_pir_mode():
-        ret = _C_ops.solve(x, y)
+        ret = _C_ops.solve(x, y, left)
     else:
         inputs = {"X": [x], "Y": [y]}
         helper = LayerHelper("solve", **locals())
@@ -4250,11 +4248,12 @@ def solve(
         out = helper.create_variable_for_type_inference(dtype=x.dtype)
 
         helper.append_op(
-            type="solve", inputs={"X": x, "Y": y}, outputs={"Out": out}
+            type="solve",
+            inputs={"X": x, "Y": y},
+            outputs={"Out": out},
+            attrs={"left": left},
         )
 
-    if not left:
-        ret = _transpose_last_2dim(ret)
     if out is not None:
         paddle.assign(ret, out)
     return ret

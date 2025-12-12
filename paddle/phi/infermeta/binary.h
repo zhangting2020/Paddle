@@ -821,6 +821,7 @@ PADDLE_API void ValueCompareInferMeta(const MetaTensor& x,
 
 PADDLE_API void SolveInferMeta(const MetaTensor& x,
                                const MetaTensor& y,
+                               bool left,
                                MetaTensor* out);
 
 PADDLE_API void SwiGLUInferMeta(const MetaTensor& x,
