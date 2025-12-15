@@ -228,6 +228,7 @@ template <typename T, typename Context>
 void SolveKernel(const Context& dev_ctx,
                  const DenseTensor& x,
                  const DenseTensor& y,
+                 bool left,
                  DenseTensor* out) {
   if (x.numel() == 0 || y.numel() == 0) {
     auto x_dims = x.dims();
@@ -263,7 +264,7 @@ void SolveKernel(const Context& dev_ctx,
     dev_ctx.template Alloc<T>(out);
     return;
   }
-  linalg_solve<Context, T>(dev_ctx, x, y, out);
+  linalg_solve<Context, T>(dev_ctx, x, y, left, out);
 }
 
 }  // namespace phi

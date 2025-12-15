@@ -17,6 +17,7 @@ limitations under the License. */
 
 #include "paddle/phi/core/tensor_utils.h"
 #include "paddle/phi/kernels/expand_as_kernel.h"
+#include "paddle/phi/kernels/funcs/math_function.h"
 #include "paddle/phi/kernels/funcs/matrix_solve.h"
 #include "paddle/phi/kernels/funcs/reduce_functor.h"
 #include "paddle/phi/kernels/lu_kernel.h"
@@ -104,49 +105,6 @@ get_broadcast_dims(const Tensor& x, const Tensor& y) {
                         y_dims_vec[static_cast<int>(y_dims_vec.size()) - 1]});
 
   return std::make_tuple(x_expand_size, y_expand_size);
-}
-
-template <typename T, typename Context>
-void SolveKernel(const Context& dev_ctx,
-                 const DenseTensor& x,
-                 const DenseTensor& y,
-                 bool left,
-                 DenseTensor* out) {
-  if (x.numel() == 0 || y.numel() == 0) {
-    auto x_dims = x.dims();
-    auto y_dims = y.dims();
-    std::vector<int> out_dims;
-    if (y_dims.size() == 1) {
-      out_dims =
-          std::vector<int>(x_dims.Get(), x_dims.Get() + x_dims.size() - 2);
-      out_dims.push_back(y_dims[y_dims.size() - 1]);
-    } else {
-      // broadcast
-      std::vector<int> x_shape(x_dims.Get(), x_dims.Get() + x_dims.size() - 2);
-      std::vector<int> y_shape(y_dims.Get(), y_dims.Get() + y_dims.size() - 2);
-      auto x_it = x_shape.rbegin();
-      auto y_it = y_shape.rbegin();
-      while (x_it != x_shape.rend() || y_it != y_shape.rend()) {
-        int x_dim = (x_it != x_shape.rend()) ? *x_it : 1;
-        int y_dim = (y_it != y_shape.rend()) ? *y_it : 1;
-        if (x_dim == 0 || y_dim == 0) {
-          out_dims.push_back(0);
-        } else {
-          out_dims.push_back(std::max(x_dim, y_dim));
-        }
-        if (x_it != x_shape.rend()) ++x_it;
-        if (y_it != y_shape.rend()) ++y_it;
-      }
-      std::reverse(out_dims.begin(), out_dims.end());
-      out_dims.insert(out_dims.end(),
-                      y_dims.Get() + y_dims.size() - 2,
-                      y_dims.Get() + y_dims.size());
-    }
-    out->Resize(phi::make_ddim(out_dims));
-    dev_ctx.template Alloc<T>(out);
-    return;
-  }
-  linalg_solve<Context, T>(dev_ctx, x, y, out);
 }
 
 template <typename Context, typename T>
@@ -239,7 +197,8 @@ static void linalg_solve(const GPUContext& dev_ctx,
       dev_ctx, tmp_x_bc, /*pivot=*/true, &lu, &pivots, &infos);
 
   // check cusolver info to align with torch error reporting
-  auto info_vec = phi::TensorToVector<int>(infos, dev_ctx);
+  std::vector<int> info_vec;
+  phi::TensorToVector(infos, dev_ctx, &info_vec);
   for (size_t i = 0; i < info_vec.size(); ++i) {
     PADDLE_ENFORCE_EQ(info_vec[i],
                       0,
@@ -274,8 +233,51 @@ static void linalg_solve(const GPUContext& dev_ctx,
     trans(dev_ctx, out_tmp, out, new_axis);
   }
 }
-#endif
+
+template <typename T, typename Context>
+void SolveGPUKernel(const Context& dev_ctx,
+                    const DenseTensor& x,
+                    const DenseTensor& y,
+                    bool left,
+                    DenseTensor* out) {
+  if (x.numel() == 0 || y.numel() == 0) {
+    auto x_dims = x.dims();
+    auto y_dims = y.dims();
+    std::vector<int> out_dims;
+    if (y_dims.size() == 1) {
+      out_dims =
+          std::vector<int>(x_dims.Get(), x_dims.Get() + x_dims.size() - 2);
+      out_dims.push_back(y_dims[y_dims.size() - 1]);
+    } else {
+      // broadcast
+      std::vector<int> x_shape(x_dims.Get(), x_dims.Get() + x_dims.size() - 2);
+      std::vector<int> y_shape(y_dims.Get(), y_dims.Get() + y_dims.size() - 2);
+      auto x_it = x_shape.rbegin();
+      auto y_it = y_shape.rbegin();
+      while (x_it != x_shape.rend() || y_it != y_shape.rend()) {
+        int x_dim = (x_it != x_shape.rend()) ? *x_it : 1;
+        int y_dim = (y_it != y_shape.rend()) ? *y_it : 1;
+        if (x_dim == 0 || y_dim == 0) {
+          out_dims.push_back(0);
+        } else {
+          out_dims.push_back(std::max(x_dim, y_dim));
+        }
+        if (x_it != x_shape.rend()) ++x_it;
+        if (y_it != y_shape.rend()) ++y_it;
+      }
+      std::reverse(out_dims.begin(), out_dims.end());
+      out_dims.insert(out_dims.end(),
+                      y_dims.Get() + y_dims.size() - 2,
+                      y_dims.Get() + y_dims.size());
+    }
+    out->Resize(phi::make_ddim(out_dims));
+    dev_ctx.template Alloc<T>(out);
+    return;
+  }
+  linalg_solve<Context, T>(dev_ctx, x, y, left, out);
+}
 
 }  // namespace phi
 
-PD_REGISTER_KERNEL(solve, GPU, ALL_LAYOUT, phi::SolveKernel, float, double) {}
+PD_REGISTER_KERNEL(solve, GPU, ALL_LAYOUT, phi::SolveGPUKernel, float, double) {
+}
