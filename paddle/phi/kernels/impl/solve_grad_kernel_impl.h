@@ -97,8 +97,7 @@ void SolveGradKernel(const Context& dev_ctx,
     return;
   }
 
-  bool is_vector = false;
-  is_vector = is_vector_rhs(x, y);
+  const bool is_vector = is_vector_rhs(x, y);
   DenseTensor tmp_y;
   if (is_vector) {
     dev_ctx.Alloc(&tmp_y, y.dtype());
@@ -136,9 +135,25 @@ void SolveGradKernel(const Context& dev_ctx,
   std::vector<int> new_axis = phi::funcs::getNewAxis(x.dims().size());
   trans(dev_ctx, x, &tmp_input, new_axis);
 
+  // Patch: restore correct vector RHS gradient handling to match baseline and
+  // PyTorch. For vector RHS, all backward math must run on a temporarily
+  // unsqueezed (n, 1) shape, and we only squeeze back at the final dy output.
+  const DenseTensor* dout_for_solve = &dout;
+  DenseTensor tmp_dout;
+  if (is_vector) {
+    tmp_dout.Resize(dout.dims());
+    dev_ctx.Alloc(&tmp_dout, dout.dtype());
+    phi::Unsqueeze<T, Context>(dev_ctx,
+                               dout,
+                               paddle::experimental::IntArray({-1}),
+                               &tmp_dout,
+                               nullptr);
+    dout_for_solve = &tmp_dout;
+  }
+
   if (dy) {
     dev_ctx.template Alloc<T>(dy);
-    linalg_solve<Context, T>(dev_ctx, tmp_input, dout, &tmp_dy);
+    linalg_solve<Context, T>(dev_ctx, tmp_input, *dout_for_solve, &tmp_dy);
   }
 
   if (dx) {
@@ -152,7 +167,7 @@ void SolveGradKernel(const Context& dev_ctx,
       auto mat_dim_b1 = phi::funcs::CreateMatrixDescriptor(out.dims(), 0, true);
       blas.MatMul(tmp_dy, mat_dim_a1, out, mat_dim_b1, T(-1), &tmp_dx, T(0));
 
-    } else if (is_vector_rhs(x, y)) {
+    } else if (is_vector) {
       DenseTensor tmp_dy_;
       dev_ctx.Alloc(&tmp_dy_, y.dtype());
 
@@ -197,7 +212,7 @@ void SolveGradKernel(const Context& dev_ctx,
     std::vector<std::int64_t> y_dims = common::vectorize(y.dims());
     std::vector<std::int64_t> dout_dims = common::vectorize(dout.dims());
 
-    if (is_vector_rhs(x, y)) {
+    if (is_vector) {
       dout_dims.push_back(1);
     }
 

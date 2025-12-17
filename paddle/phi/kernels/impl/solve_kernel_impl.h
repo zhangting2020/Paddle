@@ -113,8 +113,7 @@ static void linalg_solve(const Context& dev_ctx,
 
   // input y can be vector or matrix
   // but need to be unsqueezed if y is a vector
-  bool is_vector = false;
-  is_vector = is_vector_rhs(x, y);
+  const bool is_vector = is_vector_rhs(x, y);
 
   Tensor tmp_y;
   if (is_vector) {
