@@ -14,6 +14,7 @@
 
 #include "paddle/phi/core/memory/allocation/virtual_memory_auto_growth_best_fit_allocator.h"
 #include <algorithm>
+#include <cstdint>
 #include <mutex>
 #include "glog/logging.h"
 #include "paddle/common/flags.h"
@@ -64,6 +65,10 @@ PHI_DEFINE_EXPORTED_bool(native_compact,
 namespace paddle {
 namespace memory {
 namespace allocation {
+
+static inline uintptr_t BlockDebugId(const std::list<Block>::iterator &it) {
+  return reinterpret_cast<uintptr_t>(&(*it));
+}
 
 bool NeedSplit(size_t block_size, size_t alignment, size_t alloc_size) {
   return block_size > (alloc_size * 2) || (block_size - alloc_size) > alignment;
@@ -143,12 +148,23 @@ void VirtualMemoryAutoGrowthBestFitAllocator::FreeImpl(
   std::lock_guard<SpinLock> guard(spinlock_);
   void *ptr = allocation->ptr();
   auto block_it = FindBlockByPtr(ptr);
+  if (block_it->is_free_) {
+    VLOG(1) << "[VMM][DoubleFree] ptr=" << ptr
+            << " block_size=" << block_it->size_
+            << " block_id=" << BlockDebugId(block_it);
+    // DumpInfo("[VMM][DoubleFree] dump allocator state");
+    delete allocation;
+    return;
+  }
+
   if (block_it == all_blocks_.end()) {
-    VLOG(4) << "[VMM][FreeImplMissingBlock] ptr=" << ptr
+    VLOG(1) << "[VMM][FreeImplMissingBlock] ptr=" << ptr
             << " allocation_size=" << allocation->size();
     delete allocation;
     return;
   }
+  VLOG(1) << "[VMM][Free] block_id=" << BlockDebugId(block_it) << " ptr=" << ptr
+          << " size=" << block_it->size_;
   TryMergeBlock2Blocks(block_it);
   delete allocation;
 }
@@ -423,6 +439,8 @@ phi::Allocation *VirtualMemoryAutoGrowthBestFitAllocator::AllocFromFreeBlocks(
     } else {
       block_it->is_free_ = false;
     }
+    VLOG(1) << "[VMM][AllocFromFreeBlocks] block_id=" << BlockDebugId(block_it)
+            << " ptr=" << block_it->ptr_ << " size=" << block_it->size_;
     return new BlockAllocation(block_it, place_);
   }
   return nullptr;
