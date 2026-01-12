@@ -13,8 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License. */
 
 #include "paddle/phi/kernels/funcs/matrix_solve.h"
+#include <cstdlib>
+#include "paddle/phi/backends/dynload/cusolver.h"
 #include "paddle/phi/backends/gpu/cuda/cudnn_workspace_helper.h"
+#include "paddle/phi/backends/gpu/gpu_decls.h"
 #include "paddle/phi/common/memory_utils.h"
+#include "paddle/phi/common/type_traits.h"
 #include "paddle/phi/core/tensor_utils.h"
 #include "paddle/phi/kernels/funcs/blas/blas.h"
 #include "paddle/phi/kernels/funcs/math_function.h"
@@ -149,6 +153,52 @@ void MatrixSolveFunctor<Context, T>::operator()(const Context& dev_ctx,
                                                 const DenseTensor& b,
                                                 DenseTensor* out) {
 #ifndef PADDLE_WITH_HIP
+  auto getrf_buffer_size =
+      [](solverHandle_t handle, int m, int n, T* data, int lda, int* lwork) {
+        if constexpr (std::is_same<T, float>::value) {
+          return phi::dynload::cusolverDnSgetrf_bufferSize(
+              handle, m, n, data, lda, lwork);
+        } else {
+          return phi::dynload::cusolverDnDgetrf_bufferSize(
+              handle, m, n, data, lda, lwork);
+        }
+      };
+
+  auto getrf_compute = [](solverHandle_t handle,
+                          int m,
+                          int n,
+                          T* data,
+                          int lda,
+                          T* workspace,
+                          int* pivot,
+                          int* info) {
+    if constexpr (std::is_same<T, float>::value) {
+      return phi::dynload::cusolverDnSgetrf(
+          handle, m, n, data, lda, workspace, pivot, info);
+    } else {
+      return phi::dynload::cusolverDnDgetrf(
+          handle, m, n, data, lda, workspace, pivot, info);
+    }
+  };
+
+  auto getrs_compute = [](solverHandle_t handle,
+                          cublasOperation_t trans,
+                          int n,
+                          int nrhs,
+                          T* data,
+                          int lda,
+                          int* pivot,
+                          T* b_data,
+                          int ldb,
+                          int* info) {
+    if constexpr (std::is_same<T, float>::value) {
+      return phi::dynload::cusolverDnSgetrs(
+          handle, trans, n, nrhs, data, lda, pivot, b_data, ldb, info);
+    } else {
+      return phi::dynload::cusolverDnDgetrs(
+          handle, trans, n, nrhs, data, lda, pivot, b_data, ldb, info);
+    }
+  };
 
   // solve the equation: Ax = B,
   // use cuBlas cublas<S/D>getrfBatched function to performs the LU
@@ -170,6 +220,13 @@ void MatrixSolveFunctor<Context, T>::operator()(const Context& dev_ctx,
   int ldb = n;
   CUDNN_ENFORCE_TENSOR_SIZE_SUPPORTED(b);
 
+  // Shape helpers for routing; right-solve 2D path is opt-in to avoid
+  // perturbing already aligned cases.
+  bool is_2d_single_batch = (a_rank == 2 && batch_size == 1 && b_rank == 2);
+  bool is_right_solve_2d =
+      is_2d_single_batch &&
+      (std::getenv("PADDLE_SOLVE_USE_CUSOLVER_RIGHT") != nullptr);
+
   // 1. Copy input A to a temporary tensor tmp_a for LU factorization.
   DenseTensor tmp_a(a.dtype());
   tmp_a.Resize(a.dims());
@@ -187,6 +244,87 @@ void MatrixSolveFunctor<Context, T>::operator()(const Context& dev_ctx,
 
   const T* a_data_in_gpu = tmp_a.data<T>();
   T* b_data_in_gpu = out->data<T>();
+
+  if (is_right_solve_2d) {
+    // Right-solve (left=False) 2D path: rely on cuSOLVER with explicit
+    // column-major buffers. Other paths stay on the original TRSM flow.
+    DenseTensor tmp_a_col(a.dtype());
+    tmp_a_col.Resize(a.dims());
+    dev_ctx.template Alloc<T>(&tmp_a_col);
+    std::vector<int> new_axis_a = getNewAxis(a_rank);
+    trans(dev_ctx,
+          tmp_a,
+          &tmp_a_col,
+          new_axis_a);  // row-major transpose -> col-major
+
+    // out currently holds transpose(B) in row-major; that layout is equivalent
+    // to column-major of the original B. Use it directly as RHS buffer.
+    auto handle = dev_ctx.cusolver_dn_handle();
+    int lwork = 0;
+    phi::Allocator::AllocationPtr d_work;
+    PADDLE_ENFORCE_GPU_SUCCESS(
+        getrf_buffer_size(handle, n, n, tmp_a_col.data<T>(), n, &lwork));
+
+    d_work = phi::memory_utils::Alloc(
+        dev_ctx.GetPlace(),
+        lwork * sizeof(T),
+        phi::Stream(reinterpret_cast<phi::StreamId>(dev_ctx.stream())));
+
+    DenseTensor dev_info;
+    dev_info.Resize({1});
+    dev_ctx.template Alloc<int>(&dev_info);
+    int* dev_info_ptr = dev_info.data<int>();
+    std::vector<int> info_host(1, 0);
+
+    DenseTensor pivots;
+    pivots.Resize({n});
+    dev_ctx.template Alloc<int>(&pivots);
+    int* pivot_ptr = pivots.data<int>();
+
+    // Factorization (in-place on tmp_a)
+    PADDLE_ENFORCE_GPU_SUCCESS(
+        getrf_compute(handle,
+                      n,
+                      n,
+                      tmp_a_col.data<T>(),
+                      n,
+                      reinterpret_cast<T*>(d_work->ptr()),
+                      pivot_ptr,
+                      dev_info_ptr));
+
+    // Solve; Python already transposed x/y for left == false, so op = N.
+    PADDLE_ENFORCE_GPU_SUCCESS(getrs_compute(handle,
+                                             CUBLAS_OP_N,
+                                             n,
+                                             nrhs,
+                                             tmp_a_col.data<T>(),
+                                             n,
+                                             pivot_ptr,
+                                             b_data_in_gpu,
+                                             n,
+                                             dev_info_ptr));
+
+    memory_utils::Copy(phi::CPUPlace(),
+                       info_host.data(),
+                       dev_ctx.GetPlace(),
+                       dev_info_ptr,
+                       sizeof(int),
+                       dev_ctx.stream());
+    PADDLE_ENFORCE_EQ(
+        info_host[0],
+        0,
+        common::errors::PreconditionNotMet(
+            "cusolver getrf/getrs failed, info = %d", info_host[0]));
+
+    // transpose back to row-major form
+    DenseTensor tmp_b(b.type());
+    tmp_b.Resize(b_dims);
+    dev_ctx.template Alloc<T>(&tmp_b);
+    phi::funcs::TransposeNormal<Context, T> trans2;
+    trans2(dev_ctx, *out, &tmp_b, new_axis);
+    *out = tmp_b;
+    return;
+  }
 
   std::vector<const T*> cpu_ptrs(batch_size * 2);
   for (int64_t i = 0; i < batch_size; ++i) {
