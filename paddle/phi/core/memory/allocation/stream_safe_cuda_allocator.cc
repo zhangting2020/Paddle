@@ -18,6 +18,9 @@
 
 #include "paddle/phi/api/profiler/event_tracing.h"
 #include "paddle/phi/backends/gpu/gpu_info.h"
+#include "paddle/phi/core/memory/allocation/retry_allocator.h"
+#include "paddle/phi/core/memory/allocation/stat_allocator.h"
+#include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_multi_pool_allocator_v2.h"
 
 #if defined(PADDLE_WITH_CUDA)
 #include "paddle/phi/backends/gpu/cuda/cuda_graph.h"
@@ -26,6 +29,57 @@
 #endif
 
 namespace paddle::memory::allocation {
+
+namespace {
+
+VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVmmV2MultiPoolAllocator(
+    const std::shared_ptr<Allocator>& allocator) {
+  if (allocator == nullptr) {
+    return nullptr;
+  }
+  if (auto* vmm = dynamic_cast<VMMAutoGrowthBestFitMultiPoolAllocatorV2*>(
+          allocator.get())) {
+    return vmm;
+  }
+  if (auto* retry = dynamic_cast<RetryAllocator*>(allocator.get())) {
+    return GetVmmV2MultiPoolAllocator(retry->GetUnderLyingAllocator());
+  }
+  if (auto* stat = dynamic_cast<StatAllocator*>(allocator.get())) {
+    return GetVmmV2MultiPoolAllocator(stat->GetUnderLyingAllocator());
+  }
+  return nullptr;
+}
+
+void TrySetVmmV2RemapEvent(StreamSafeCUDAAllocator* allocator,
+                           StreamSafeCUDAAllocation* allocation) {
+  auto* vmm = GetVmmV2MultiPoolAllocator(allocator->GetUnderLyingAllocator());
+  if (vmm == nullptr) {
+    return;
+  }
+
+  gpuEvent_t event;
+#ifdef PADDLE_WITH_CUDA
+  PADDLE_ENFORCE_GPU_SUCCESS(
+      cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
+  PADDLE_ENFORCE_GPU_SUCCESS(
+      cudaEventRecord(event, allocation->GetOwningStream()));
+#else
+  PADDLE_ENFORCE_GPU_SUCCESS(
+      hipEventCreateWithFlags(&event, hipEventDisableTiming));
+  PADDLE_ENFORCE_GPU_SUCCESS(
+      hipEventRecord(event, allocation->GetOwningStream()));
+#endif
+  if (!vmm->SetBlockRemapEvent(
+          allocation->ptr(), allocation->GetOwningStream(), event)) {
+#ifdef PADDLE_WITH_CUDA
+    PADDLE_ENFORCE_GPU_SUCCESS(cudaEventDestroy(event));
+#else
+    PADDLE_ENFORCE_GPU_SUCCESS(hipEventDestroy(event));
+#endif
+  }
+}
+
+}  // namespace
 
 StreamSafeCUDAAllocation::StreamSafeCUDAAllocation(
     DecoratedAllocationPtr underlying_allocation,
@@ -234,6 +288,7 @@ void StreamSafeCUDAAllocator::FreeImpl(phi::Allocation* allocation) {
       static_cast<StreamSafeCUDAAllocation*>(allocation);
 
   VLOG(8) << "Try free allocation " << stream_safe_cuda_allocation->ptr();
+  TrySetVmmV2RemapEvent(this, stream_safe_cuda_allocation);
   if (stream_safe_cuda_allocation->CanBeFreed()) {
     VLOG(9) << "Directly delete allocation";
     delete stream_safe_cuda_allocation;

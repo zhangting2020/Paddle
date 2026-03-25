@@ -18,6 +18,7 @@
 #include "glog/logging.h"
 
 COMMON_DECLARE_int64(offload_retry_times);
+COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
 
 namespace paddle::memory::allocation {
 
@@ -63,6 +64,15 @@ phi::Allocation* RetryAllocator::AllocateImpl(size_t size) {
   auto alloc_func = [&, this]() {
     return underlying_allocator_->Allocate(size).release();
   };
+  auto try_remap = [&, this]() -> bool {
+    if (!FLAGS_vmm_v2_remap_on_oom) {
+      return false;
+    }
+    const size_t remapped = underlying_allocator_->Compact(place_);
+    VLOG(10) << "Compact on " << place_ << " remapped " << remapped
+             << " bytes before offload callback.";
+    return remapped > 0;
+  };
   // In fact, we can unify the code of allocation success and failure
   // But it would add lock even when allocation success at the first time
   try {
@@ -75,8 +85,20 @@ phi::Allocation* RetryAllocator::AllocateImpl(size_t size) {
           return alloc_func();
         } catch (BadAlloc&) {
           VLOG(10) << "Allocation " << size << " on " << place_
-                   << " failed, try to run OOM callback " << i;
+                   << " failed, try remap/offload on retry " << i;
+          if (try_remap()) {
+            try {
+              return alloc_func();
+            } catch (BadAlloc&) {
+            }
+          }
           has_offloaded = (g_oom_callback(place_, size) > 0);
+          if (has_offloaded && try_remap()) {
+            try {
+              return alloc_func();
+            } catch (BadAlloc&) {
+            }
+          }
         }
       }
       return alloc_func();

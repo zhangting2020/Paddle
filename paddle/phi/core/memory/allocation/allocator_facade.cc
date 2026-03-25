@@ -100,6 +100,11 @@ PHI_DEFINE_EXPORTED_bool(
     use_vmm_auto_growth_best_fit_allocator_v2,
     false,
     "Use VMMAutoGrowthBestFitAllocatorV2.");
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_remap_on_oom,
+    true,
+    "Whether RetryAllocator should try VMM V2 remap before running the OOM "
+    "offload callback.");
 
 // NOTE(Ruibiao): This FLAGS is just to be compatible with
 // the old single-stream CUDA allocator. It will be removed

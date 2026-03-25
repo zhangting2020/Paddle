@@ -18,6 +18,7 @@
 #include <iterator>
 
 #include "paddle/phi/core/enforce.h"
+#include "paddle/phi/core/memory/allocation/free_block_remap_compactor.h"
 namespace paddle {
 namespace memory {
 namespace allocation {
@@ -130,15 +131,15 @@ void AppendPartsTail(std::vector<BlockPartV2>* dst,
 }  // namespace
 
 VMMAutoGrowthBestFitAllocatorV2::
-    VMMAutoGrowthBestFitAllocatorV2(  // 构造函数，初始化分配器
+    VMMAutoGrowthBestFitAllocatorV2(
         const std::shared_ptr<CUDAVirtualMemAllocatorV2>& underlying_allocator,
         size_t alignment,
         const GPUPlace& place,
         PoolType pool_type)
-    : underlying_allocator_(underlying_allocator),  // 底层虚拟内存分配器
-      alignment_(alignment),                        // 内存对齐大小
-      place_(place),                                // GPU设备位置
-      pool_type_(pool_type) {}                      // 内存池类型
+    : underlying_allocator_(underlying_allocator),
+      alignment_(alignment),
+      place_(place),
+      pool_type_(pool_type) {}
 
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   std::lock_guard<SpinLock> guard(spinlock_);
@@ -192,6 +193,23 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   }
 
   return new Allocation(it->ptr_, it->ptr_, it->size_, place_);
+}
+
+size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place) {
+  PADDLE_ENFORCE_EQ(
+      place,
+      place_,
+      common::errors::InvalidArgument(
+          "VMM best-fit V2 compact only supports its own place %s, but got %s.",
+          place_,
+          place));
+  std::lock_guard<SpinLock> guard(spinlock_);
+  FreeBlockRemapCompactor compactor(underlying_allocator_, pool_type_);
+  const size_t remapped = compactor.Compact(&all_blocks_);
+  if (remapped > 0) {
+    RebuildFreeBlockIndex();
+  }
+  return remapped;
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
@@ -301,6 +319,15 @@ void VMMAutoGrowthBestFitAllocatorV2::InsertFreeBlock(BlockListIt it) {
 
 void VMMAutoGrowthBestFitAllocatorV2::EraseFreeBlock(BlockListIt it) {
   free_blocks_.erase({it->size_, it->ptr_});
+}
+
+void VMMAutoGrowthBestFitAllocatorV2::RebuildFreeBlockIndex() {
+  free_blocks_.clear();
+  for (auto it = all_blocks_.begin(); it != all_blocks_.end(); ++it) {
+    if (it->type_ == BlockType::kFree) {
+      InsertFreeBlock(it);
+    }
+  }
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it) {

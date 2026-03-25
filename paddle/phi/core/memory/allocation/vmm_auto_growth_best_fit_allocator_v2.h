@@ -60,12 +60,14 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
 
  protected:
   phi::Allocation* AllocateImpl(size_t size) override;
+  size_t CompactImpl(const Place& place) override;
   void FreeImpl(phi::Allocation* allocation) override;
 
  private:
   phi::Allocation* AllocFromFreeBlocks(size_t size);
   void InsertFreeBlock(BlockListIt it);
   void EraseFreeBlock(BlockListIt it);
+  void RebuildFreeBlockIndex();
   void TryMerge(BlockListIt it);
 
   // Best-fit V2 only grows from the fixed-handle CUDA VMM provider. This

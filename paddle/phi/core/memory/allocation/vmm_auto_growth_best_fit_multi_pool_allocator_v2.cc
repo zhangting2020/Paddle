@@ -83,6 +83,22 @@ phi::Allocation* VMMAutoGrowthBestFitMultiPoolAllocatorV2::AllocateImpl(
   return allocation.release();
 }
 
+size_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::CompactImpl(
+    const Place& place) {
+  PADDLE_ENFORCE_EQ(
+      place,
+      place_,
+      common::errors::InvalidArgument(
+          "VMM multipool V2 compact only supports its own place %s, but got %s.",
+          place_,
+          place));
+  return stable_allocator_->Compact(place_) +
+         longlived_allocator_->Compact(place_) +
+         transient_small_allocator_->Compact(place_) +
+         transient_large_allocator_->Compact(place_) +
+         oversized_allocator_->Compact(place_);
+}
+
 void VMMAutoGrowthBestFitMultiPoolAllocatorV2::FreeImpl(
     phi::Allocation* allocation) {
   AllocationRoute route{PoolType::kTransient, nullptr};

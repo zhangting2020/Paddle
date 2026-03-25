@@ -31,6 +31,12 @@ std::shared_ptr<CUDAVirtualMemAllocatorV2> CreateUnderlyingAllocator() {
       phi::GPUPlace(), 2UL << 20, PoolType::kTransient);
 }
 
+__global__ void BusyWaitKernel(uint64_t cycles) {
+  uint64_t start = clock64();
+  while (clock64() - start < cycles) {
+  }
+}
+
 }  // namespace
 
 TEST(VMMAutoGrowthBestFitAllocatorV2, SplitFreeBlockOnReuse) {
@@ -502,6 +508,153 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, ThreeWayMerge) {
   EXPECT_EQ(merged.type_, BlockType::kFree);
   EXPECT_EQ(merged.size_, underlying->handle_size() * 3);
   EXPECT_EQ(merged.parts_.size(), 3UL);
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2, CompactRemapsWholeFreeHandleToTail) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kTransient);
+
+  auto first = allocator.Allocate(underlying->handle_size());
+  auto middle = allocator.Allocate(underlying->handle_size());
+  auto last = allocator.Allocate(underlying->handle_size());
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(middle, nullptr);
+  ASSERT_NE(last, nullptr);
+
+  auto* first_ptr = first->ptr();
+  auto* middle_ptr = middle->ptr();
+  auto* last_ptr = last->ptr();
+  std::shared_ptr<VmmHandleMeta> middle_handle;
+  for (const auto& block : allocator.all_blocks_) {
+    if (block.ptr_ == middle_ptr) {
+      ASSERT_EQ(block.parts_.size(), 1UL);
+      middle_handle = block.parts_.front().handle;
+      break;
+    }
+  }
+  ASSERT_NE(middle_handle, nullptr);
+
+  middle.reset();
+  const size_t remapped = allocator.Compact(phi::GPUPlace());
+  EXPECT_EQ(remapped, underlying->handle_size());
+
+  ASSERT_EQ(allocator.all_blocks_.size(), 4UL);
+  auto it = allocator.all_blocks_.begin();
+  ASSERT_EQ(it->type_, BlockType::kActive);
+  EXPECT_EQ(it->ptr_, first_ptr);
+  ++it;
+  ASSERT_EQ(it->type_, BlockType::kGap);
+  EXPECT_EQ(it->ptr_, middle_ptr);
+  EXPECT_EQ(it->size_, underlying->handle_size());
+  EXPECT_TRUE(it->parts_.empty());
+  ++it;
+  ASSERT_EQ(it->type_, BlockType::kActive);
+  EXPECT_EQ(it->ptr_, last_ptr);
+  ++it;
+  ASSERT_EQ(it->type_, BlockType::kFree);
+  EXPECT_EQ(it->size_, underlying->handle_size());
+  ASSERT_EQ(it->parts_.size(), 1UL);
+  EXPECT_EQ(it->parts_.front().handle.get(), middle_handle.get());
+  EXPECT_EQ(it->parts_.front().handle_rel_off, 0UL);
+  EXPECT_EQ(it->parts_.front().len, underlying->handle_size());
+  EXPECT_EQ(it->parts_.front().handle->base,
+            reinterpret_cast<VmmDevicePtr>(it->ptr_));
+  EXPECT_EQ(allocator.free_blocks_.size(), 1UL);
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2, CompactSkipsPartialFreeHandle) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kTransient);
+
+  auto allocation = allocator.Allocate(256UL);
+  ASSERT_NE(allocation, nullptr);
+
+  ASSERT_EQ(allocator.all_blocks_.size(), 2UL);
+  const size_t remapped = allocator.Compact(phi::GPUPlace());
+  EXPECT_EQ(remapped, 0UL);
+
+  ASSERT_EQ(allocator.all_blocks_.size(), 2UL);
+  auto it = allocator.all_blocks_.begin();
+  ASSERT_EQ(it->type_, BlockType::kActive);
+  ++it;
+  ASSERT_EQ(it->type_, BlockType::kFree);
+  EXPECT_EQ(it->ptr_,
+            reinterpret_cast<uint8_t*>(allocation->ptr()) + allocation->size());
+  EXPECT_EQ(it->size_, underlying->handle_size() - 256UL);
+  ASSERT_EQ(it->parts_.size(), 1UL);
+  EXPECT_EQ(it->parts_.front().handle_rel_off, 256UL);
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2, CompactWaitsForRemapSafeEvent) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kTransient);
+
+  auto allocation = allocator.Allocate(underlying->handle_size());
+  ASSERT_NE(allocation, nullptr);
+
+  gpuStream_t stream;
+  ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
+  BusyWaitKernel<<<1, 1, 0, stream>>>(500000000ULL);
+  ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+
+  gpuEvent_t event;
+  ASSERT_EQ(cudaEventCreateWithFlags(&event, cudaEventDisableTiming),
+            cudaSuccess);
+  ASSERT_EQ(cudaEventRecord(event, stream), cudaSuccess);
+  ASSERT_TRUE(allocator.SetBlockRemapEvent(allocation->ptr(), stream, event));
+
+  allocation.reset();
+  EXPECT_EQ(allocator.Compact(phi::GPUPlace()), 0UL);
+
+  ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+  EXPECT_EQ(allocator.Compact(phi::GPUPlace()), underlying->handle_size());
+
+  ASSERT_EQ(allocator.all_blocks_.size(), 2UL);
+  auto it = allocator.all_blocks_.begin();
+  ASSERT_EQ(it->type_, BlockType::kGap);
+  ++it;
+  ASSERT_EQ(it->type_, BlockType::kFree);
+  EXPECT_EQ(it->size_, underlying->handle_size());
+  ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2, CompactReusesGapWhenTailIsExhausted) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kTransient);
+
+  auto first = allocator.Allocate(underlying->handle_size());
+  auto middle = allocator.Allocate(underlying->handle_size());
+  auto last = allocator.Allocate(underlying->handle_size());
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(middle, nullptr);
+  ASSERT_NE(last, nullptr);
+
+  auto* middle_ptr = middle->ptr();
+  middle.reset();
+
+  const size_t remaining_tail =
+      underlying->virtual_mem_size() - underlying->tail_offset();
+  underlying->AdvanceTailOffset(remaining_tail);
+
+  const size_t remapped = allocator.Compact(phi::GPUPlace());
+  EXPECT_EQ(remapped, underlying->handle_size());
+
+  ASSERT_EQ(allocator.all_blocks_.size(), 3UL);
+  bool found_middle_free = false;
+  for (const auto& block : allocator.all_blocks_) {
+    if (block.type_ == BlockType::kFree && block.ptr_ == middle_ptr) {
+      found_middle_free = true;
+      EXPECT_EQ(block.size_, underlying->handle_size());
+      ASSERT_EQ(block.parts_.size(), 1UL);
+      EXPECT_EQ(block.parts_.front().handle_rel_off, 0UL);
+      EXPECT_EQ(block.parts_.front().len, underlying->handle_size());
+    }
+  }
+  EXPECT_TRUE(found_middle_free);
 }
 
 }  // namespace allocation

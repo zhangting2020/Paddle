@@ -81,6 +81,7 @@ class VMMAutoGrowthBestFitMultiPoolAllocatorV2 : public Allocator {
 
  protected:
   phi::Allocation* AllocateImpl(size_t size) override;
+  size_t CompactImpl(const Place& place) override;
   void FreeImpl(phi::Allocation* allocation) override;
 
  private:
