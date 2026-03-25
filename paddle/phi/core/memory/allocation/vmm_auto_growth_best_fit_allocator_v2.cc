@@ -128,6 +128,30 @@ void AppendPartsTail(std::vector<BlockPartV2>* dst,
               std::make_move_iterator(src->end()));
 }
 
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+void MergeRemapRuntimeState(BlockV2* keep, BlockV2* remove) {
+  if (remove->remap_safe_event_ == nullptr) {
+    return;
+  }
+  if (keep->remap_safe_event_ == nullptr) {
+    keep->last_use_stream_ = remove->last_use_stream_;
+    keep->remap_safe_event_ = remove->remap_safe_event_;
+    remove->remap_safe_event_ = nullptr;
+    return;
+  }
+  if (keep->remap_safe_event_ == remove->remap_safe_event_) {
+    remove->remap_safe_event_ = nullptr;
+    return;
+  }
+#ifdef PADDLE_WITH_CUDA
+  PADDLE_ENFORCE_GPU_SUCCESS(cudaEventDestroy(remove->remap_safe_event_));
+#else
+  PADDLE_ENFORCE_GPU_SUCCESS(hipEventDestroy(remove->remap_safe_event_));
+#endif
+  remove->remap_safe_event_ = nullptr;
+}
+#endif
+
 }  // namespace
 
 VMMAutoGrowthBestFitAllocatorV2::
@@ -341,6 +365,9 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it) {
         reinterpret_cast<uint8_t*>(prev->ptr_) + prev->size_ ==
             reinterpret_cast<uint8_t*>(it->ptr_)) {
       EraseFreeBlock(prev);
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+      MergeRemapRuntimeState(&(*prev), &(*it));
+#endif
       AppendPartsTail(&prev->parts_, &it->parts_);
       prev->size_ += it->size_;
       all_blocks_.erase(it);
@@ -353,6 +380,9 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it) {
       reinterpret_cast<uint8_t*>(it->ptr_) + it->size_ ==
           reinterpret_cast<uint8_t*>(next->ptr_)) {
     EraseFreeBlock(next);
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+    MergeRemapRuntimeState(&(*it), &(*next));
+#endif
     AppendPartsTail(&it->parts_, &next->parts_);
     it->size_ += next->size_;
     all_blocks_.erase(next);

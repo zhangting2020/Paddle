@@ -19,6 +19,7 @@
 
 COMMON_DECLARE_int64(offload_retry_times);
 COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
+COMMON_DECLARE_bool(use_vmm_auto_growth_best_fit_allocator_v2);
 
 namespace paddle::memory::allocation {
 
@@ -65,7 +66,8 @@ phi::Allocation* RetryAllocator::AllocateImpl(size_t size) {
     return underlying_allocator_->Allocate(size).release();
   };
   auto try_remap = [&, this]() -> bool {
-    if (!FLAGS_vmm_v2_remap_on_oom) {
+    if (!FLAGS_vmm_v2_remap_on_oom ||
+        !FLAGS_use_vmm_auto_growth_best_fit_allocator_v2) {
       return false;
     }
     const size_t remapped = underlying_allocator_->Compact(place_);

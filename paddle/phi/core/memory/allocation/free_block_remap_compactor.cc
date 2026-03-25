@@ -284,7 +284,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
       for (const auto& part : gap_it->parts_) {
         TryAppendPart(&prev->parts_, part);
       }
-      gap_it = blocks->erase(gap_it);
+      blocks->erase(gap_it);
+      gap_it = prev;
     }
   }
   if (gap_it != blocks->end()) {
