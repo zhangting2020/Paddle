@@ -70,30 +70,45 @@ phi::Allocation* RetryAllocator::AllocateImpl(size_t size) {
         !FLAGS_use_vmm_auto_growth_best_fit_allocator_v2) {
       return false;
     }
-    const size_t remapped = underlying_allocator_->Compact(place_);
-    VLOG(10) << "Compact on " << place_ << " remapped " << remapped
-             << " bytes before offload callback.";
-    return remapped > 0;
+    try {
+      const size_t remapped = underlying_allocator_->Compact(place_);
+      VLOG(10) << "Compact on " << place_ << " remapped " << remapped
+               << " bytes before offload callback.";
+      return remapped > 0;
+    } catch (const std::exception& e) {
+      VLOG(10) << "Compact on " << place_ << " failed with exception: "
+               << e.what();
+      return false;
+    } catch (...) {
+      VLOG(10) << "Compact on " << place_
+               << " failed with unknown exception.";
+      return false;
+    }
   };
   // In fact, we can unify the code of allocation success and failure
   // But it would add lock even when allocation success at the first time
   try {
-    if (FLAGS_offload_retry_times <= 0 || g_oom_callback == nullptr) {
+    try {
       return alloc_func();
-    } else {
+    } catch (BadAlloc&) {
+      VLOG(10) << "Allocation " << size << " on " << place_
+               << " failed, try remap before offload.";
+      if (try_remap()) {
+        try {
+          return alloc_func();
+        } catch (BadAlloc&) {
+        }
+      }
+    }
+
+    if (FLAGS_offload_retry_times > 0 && g_oom_callback != nullptr) {
       bool has_offloaded = true;
       for (int64_t i = 0; i < FLAGS_offload_retry_times && has_offloaded; ++i) {
         try {
           return alloc_func();
         } catch (BadAlloc&) {
           VLOG(10) << "Allocation " << size << " on " << place_
-                   << " failed, try remap/offload on retry " << i;
-          if (try_remap()) {
-            try {
-              return alloc_func();
-            } catch (BadAlloc&) {
-            }
-          }
+                   << " failed, try offload on retry " << i;
           has_offloaded = (g_oom_callback(place_, size) > 0);
           if (has_offloaded && try_remap()) {
             try {
@@ -103,8 +118,8 @@ phi::Allocation* RetryAllocator::AllocateImpl(size_t size) {
           }
         }
       }
-      return alloc_func();
     }
+    return alloc_func();
   } catch (BadAlloc&) {
     {
       WaitedAllocateSizeGuard guard(&waited_allocate_size_, size);
