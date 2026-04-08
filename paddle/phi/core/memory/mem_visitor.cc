@@ -199,6 +199,59 @@ void VMMV2PoolStatsVisitor::Visit(
   }
 }
 
+void VMMV2DetailedPoolStatsVisitor::Visit(
+    VMMAutoGrowthBestFitAllocatorV2* allocator) {
+  size_t active_count = 0, active_bytes = 0;
+  size_t free_count = 0, free_bytes = 0;
+  size_t largest_free_block = 0;
+  for (const auto& block : allocator->all_blocks()) {
+    switch (block.type_) {
+      case allocation::BlockType::kActive:
+        ++active_count;
+        active_bytes += block.size_;
+        break;
+      case allocation::BlockType::kFree:
+        ++free_count;
+        free_bytes += block.size_;
+        if (block.size_ > largest_free_block) {
+          largest_free_block = block.size_;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+  detailed_pool_stats_.emplace_back(static_cast<int>(allocator->pool_type()),
+                                    active_count,
+                                    active_bytes,
+                                    free_count,
+                                    free_bytes,
+                                    largest_free_block,
+                                    allocator->grow_count(),
+                                    allocator->grow_bytes(),
+                                    allocator->alloc_count(),
+                                    allocator->free_count_stat());
+}
+
+void VMMV2DetailedPoolStatsVisitor::Visit(
+    VMMAutoGrowthBestFitMultiPoolAllocatorV2* allocator) {
+  if (allocator->stable_allocator()) {
+    Visit(allocator->stable_allocator().get());
+  }
+  if (allocator->longlived_allocator()) {
+    Visit(allocator->longlived_allocator().get());
+  }
+  if (allocator->transient_small_allocator()) {
+    Visit(allocator->transient_small_allocator().get());
+  }
+  if (allocator->transient_large_allocator()) {
+    Visit(allocator->transient_large_allocator().get());
+  }
+  if (allocator->oversized_allocator()) {
+    Visit(allocator->oversized_allocator().get());
+  }
+}
+
 void VmmTensorPartsVisitor::Visit(
     VirtualMemoryAutoGrowthBestFitAllocator* allocator) {
   if (found_) {

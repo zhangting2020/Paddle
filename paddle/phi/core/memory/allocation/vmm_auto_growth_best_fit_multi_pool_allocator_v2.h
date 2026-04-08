@@ -62,8 +62,8 @@ class VMMAutoGrowthBestFitMultiPoolAllocatorV2 : public Allocator {
       const {
     return stable_allocator_;
   }
-  const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>&
-  longlived_allocator() const {
+  const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>& longlived_allocator()
+      const {
     return longlived_allocator_;
   }
   const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>&
@@ -82,6 +82,7 @@ class VMMAutoGrowthBestFitMultiPoolAllocatorV2 : public Allocator {
  protected:
   phi::Allocation* AllocateImpl(size_t size) override;
   size_t CompactImpl(const Place& place) override;
+  uint64_t ReleaseImpl(const Place& place) override;
   void FreeImpl(phi::Allocation* allocation) override;
 
  private:

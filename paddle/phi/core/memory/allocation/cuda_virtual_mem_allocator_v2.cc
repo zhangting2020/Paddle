@@ -34,7 +34,8 @@ size_t GetPoolVAMultiplier(PoolType pool_type) {
       return 2;
     case PoolType::kLongLived:
       return 3;
-    case PoolType::kTransient:
+    case PoolType::kTransientSmall:
+    case PoolType::kTransientLarge:
       return 4;
     case PoolType::kOversized:
       return 1;
@@ -173,6 +174,13 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
 void CUDAVirtualMemAllocatorV2::UnmapHandle(VmmDevicePtr ptr, size_t size) {
   platform::CUDADeviceGuard guard(place_.device);
   PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cuMemUnmap(ptr, size));
+}
+
+void CUDAVirtualMemAllocatorV2::UnmapAndReleaseHandle(VmmHandleMeta* meta) {
+  platform::CUDADeviceGuard guard(place_.device);
+  PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cuMemUnmap(meta->base, meta->size));
+  PADDLE_ENFORCE_GPU_SUCCESS(
+      platform::RecordedGpuMemRelease(meta->handle, meta->size, meta->device));
 }
 
 void CUDAVirtualMemAllocatorV2::MapHandlesToVA(

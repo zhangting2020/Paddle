@@ -114,6 +114,24 @@ PADDLE_API extern std::vector<
     std::tuple<int, size_t, size_t, size_t, size_t, size_t, size_t>>
 VmmV2PoolStats(const GPUPlace& place);
 
+// Extended per-pool stats with fragmentation metrics:
+// (pool_type, active_count, active_bytes,
+//             free_count,   free_bytes,
+//             largest_free_block,
+//             grow_count,   grow_bytes,
+//             alloc_count,  free_op_count)
+PADDLE_API extern std::vector<std::tuple<int,
+                                         size_t,
+                                         size_t,
+                                         size_t,
+                                         size_t,
+                                         size_t,
+                                         size_t,
+                                         size_t,
+                                         size_t,
+                                         size_t>>
+VmmV2DetailedPoolStats(const GPUPlace& place);
+
 // Get allocate event when start FLAGS_record_alloc_event.
 PADDLE_API extern std::vector<
     std::tuple<uintptr_t, bool, uint64_t, size_t, int64_t, int64_t>>

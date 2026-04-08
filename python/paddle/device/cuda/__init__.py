@@ -894,6 +894,37 @@ def vmm_v2_pool_stats(
     return core.vmm_v2_pool_stats(device_id)
 
 
+def vmm_v2_detailed_pool_stats(
+    device: _CudaPlaceLike | None = None,
+) -> list[tuple[int, int, int, int, int, int, int, int, int, int]]:
+    '''
+    Query extended per-pool statistics with fragmentation metrics.
+
+    Returns a list of tuples, one per pool, each containing
+    (pool_type, active_count, active_bytes,
+                free_count,   free_bytes,
+                largest_free_block,
+                grow_count,   grow_bytes,
+                alloc_count,  free_op_count).
+
+    Pool types: 0=Stable, 1=LongLived, 2=Transient, 3=Oversized.
+
+    Args:
+        device(paddle.CUDAPlace|int|str|None, optional): The device.
+            Default: None (current device).
+
+    Returns:
+        list[tuple]: Per-pool detailed statistics.
+    '''
+    name = 'paddle.device.cuda.vmm_v2_detailed_pool_stats'
+    if not (core.is_compiled_with_cuda()):
+        raise ValueError(
+            f"The API {name} is not supported in CPU-only PaddlePaddle."
+        )
+    device_id = extract_cuda_device_id(device, op_name=name)
+    return core.vmm_v2_detailed_pool_stats(device_id)
+
+
 def memory_summary(device: _CudaPlaceLike | None = None) -> None:
     '''
     Get detailed summary of the CUDA memory usage

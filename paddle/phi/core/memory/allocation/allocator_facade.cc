@@ -96,10 +96,9 @@ PHI_DEFINE_EXPORTED_bool(
 PHI_DEFINE_EXPORTED_bool(use_virtual_memory_auto_growth,
                          false,
                          "Use VirtualMemoryAutoGrowthBestFitAllocator.");
-PHI_DEFINE_EXPORTED_bool(
-    use_vmm_auto_growth_best_fit_allocator_v2,
-    false,
-    "Use VMMAutoGrowthBestFitAllocatorV2.");
+PHI_DEFINE_EXPORTED_bool(use_vmm_auto_growth_best_fit_allocator_v2,
+                         false,
+                         "Use VMMAutoGrowthBestFitAllocatorV2.");
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_remap_on_oom,
     true,
@@ -140,10 +139,27 @@ PHI_DEFINE_EXPORTED_uint64(
     "Requests larger than or equal to this threshold in MiB are routed to the "
     "Oversized pool of VMMAutoGrowthBestFitAllocatorV2.");
 
+PHI_DEFINE_EXPORTED_int32(
+    vmm_v2_pool_mode,
+    0,
+    "VMM V2 pool routing mode for experiments. "
+    "0 = default 5-pool (Stable/LongLived/TrSmall/TrLarge/Oversized). "
+    "1 = Stable + Transient small/large (LongLived hint ignored; "
+    "Oversized disabled). "
+    "2 = single pool (all hints ignored, everything to TrSmall). "
+    "3 = size-based 2-pool (TrSmall + TrLarge by threshold, all hints "
+    "ignored; mirrors V1 small/large pool split).");
+
+PHI_DEFINE_EXPORTED_int32(
+    vmm_v2_stable_handle_size_in_mb,
+    128,
+    "Physical memory handle size in MiB for the Stable pool of VMM V2. "
+    "Smaller values reduce initialization peak memory but increase handle "
+    "count. Typical values: 2, 8, 16, 32, 128. Default: 128.");
+
 namespace paddle::memory::allocation {
 namespace {
 
-constexpr size_t kVMMV2StableHandleSize = 128UL << 20;
 constexpr size_t kVMMV2LongLivedHandleSize = 32UL << 20;
 constexpr size_t kVMMV2TransientHandleSize = 2UL << 20;
 constexpr size_t kVMMV2TransientSmallThreshold = 2UL << 20;
@@ -1022,8 +1038,9 @@ class AllocatorFacadePrivate {
   }
 
   std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>
-  CreateVMMAutoGrowthBestFitPoolAllocatorV2(
-      GPUPlace p, size_t handle_size, PoolType pool_type) {
+  CreateVMMAutoGrowthBestFitPoolAllocatorV2(GPUPlace p,
+                                            size_t handle_size,
+                                            PoolType pool_type) {
 #ifdef PADDLE_WITH_CUDA
     auto cuda_allocator =
         std::make_shared<CUDAVirtualMemAllocatorV2>(p, handle_size, pool_type);
@@ -1035,16 +1052,17 @@ class AllocatorFacadePrivate {
 #endif
   }
 
-  std::shared_ptr<Allocator> CreateVMMAutoGrowthBestFitAllocatorV2(
-      GPUPlace p) {
+  std::shared_ptr<Allocator> CreateVMMAutoGrowthBestFitAllocatorV2(GPUPlace p) {
     auto stable_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(
-        p, kVMMV2StableHandleSize, PoolType::kStable);
+        p,
+        static_cast<size_t>(FLAGS_vmm_v2_stable_handle_size_in_mb) << 20,
+        PoolType::kStable);
     auto longlived_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(
         p, kVMMV2LongLivedHandleSize, PoolType::kLongLived);
     auto transient_small_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(
-        p, kVMMV2TransientHandleSize, PoolType::kTransient);
+        p, kVMMV2TransientHandleSize, PoolType::kTransientSmall);
     auto transient_large_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(
-        p, kVMMV2TransientHandleSize, PoolType::kTransient);
+        p, kVMMV2TransientHandleSize, PoolType::kTransientLarge);
     auto oversized_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(
         p, kVMMV2OversizedHandleSize, PoolType::kOversized);
     return std::make_shared<VMMAutoGrowthBestFitMultiPoolAllocatorV2>(

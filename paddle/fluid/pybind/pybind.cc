@@ -3761,6 +3761,9 @@ All parameter, weight, gradient are variables in Paddle.
   m.def("vmm_v2_pool_stats", [](int device_id) {
     return paddle::memory::VmmV2PoolStats(GPUPlace(device_id));
   });
+  m.def("vmm_v2_detailed_pool_stats", [](int device_id) {
+    return paddle::memory::VmmV2DetailedPoolStats(GPUPlace(device_id));
+  });
   m.def("_set_vmm_pool_hint", [](int hint) {
     paddle::memory::allocation::SetCurrentPoolHint(
         static_cast<paddle::memory::allocation::PoolHint>(hint));

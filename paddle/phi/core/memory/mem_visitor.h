@@ -357,6 +357,48 @@ class VMMV2PoolStatsVisitor : public AllocatorComputeStreamVisitor {
       pool_stats_;
 };
 
+// Extended pool stats with fragmentation metrics for analysis.
+// Tuple: (pool_type,
+//         active_count, active_bytes,
+//         free_count,   free_bytes,
+//         largest_free_block,
+//         grow_count,   grow_bytes,
+//         alloc_count,  free_op_count)
+class VMMV2DetailedPoolStatsVisitor : public AllocatorComputeStreamVisitor {
+  using AllocatorComputeStreamVisitor::Visit;
+
+ public:
+  std::vector<std::tuple<int,
+                         size_t,
+                         size_t,
+                         size_t,
+                         size_t,
+                         size_t,
+                         size_t,
+                         size_t,
+                         size_t,
+                         size_t>>
+  GetDetailedPoolStats() const {
+    return detailed_pool_stats_;
+  }
+
+  void Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) override;
+  void Visit(VMMAutoGrowthBestFitMultiPoolAllocatorV2* allocator) override;
+
+ private:
+  std::vector<std::tuple<int,
+                         size_t,
+                         size_t,
+                         size_t,
+                         size_t,
+                         size_t,
+                         size_t,
+                         size_t,
+                         size_t,
+                         size_t>>
+      detailed_pool_stats_;
+};
+
 class VmmTensorPartsVisitor : public AllocatorVisitor {
  public:
   using BlockPart = allocation::BlockPart;

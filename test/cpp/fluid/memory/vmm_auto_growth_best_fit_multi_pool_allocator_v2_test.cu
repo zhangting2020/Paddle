@@ -39,8 +39,8 @@ std::unique_ptr<VMMAutoGrowthBestFitMultiPoolAllocatorV2> CreateAllocator() {
   return std::make_unique<VMMAutoGrowthBestFitMultiPoolAllocatorV2>(
       CreatePoolAllocator(8UL << 20, PoolType::kStable),
       CreatePoolAllocator(4UL << 20, PoolType::kLongLived),
-      CreatePoolAllocator(2UL << 20, PoolType::kTransient),
-      CreatePoolAllocator(2UL << 20, PoolType::kTransient),
+      CreatePoolAllocator(2UL << 20, PoolType::kTransientSmall),
+      CreatePoolAllocator(2UL << 20, PoolType::kTransientLarge),
       CreatePoolAllocator(8UL << 20, PoolType::kOversized),
       2UL << 20,
       8UL << 20,
@@ -58,9 +58,9 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, RouteTransientSmallAndLarge) {
   ASSERT_NE(large, nullptr);
 
   EXPECT_EQ(allocator->active_allocations_[small->ptr()].pool_type,
-            PoolType::kTransient);
+            PoolType::kTransientSmall);
   EXPECT_EQ(allocator->active_allocations_[large->ptr()].pool_type,
-            PoolType::kTransient);
+            PoolType::kTransientLarge);
   EXPECT_EQ(allocator->active_allocations_[small->ptr()].allocator,
             allocator->transient_small_allocator_.get());
   EXPECT_EQ(allocator->active_allocations_[large->ptr()].allocator,
@@ -207,7 +207,8 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
             allocator->transient_large_allocator_.get());
 }
 
-TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, StableHintOverridesDefaultRoute) {
+TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
+     StableHintOverridesDefaultRoute) {
   auto allocator = CreateAllocator();
 
   PoolHintGuard guard(PoolHint::kStable);

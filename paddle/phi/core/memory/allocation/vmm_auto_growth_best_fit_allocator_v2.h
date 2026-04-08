@@ -47,6 +47,10 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   const BlockList& all_blocks() const { return all_blocks_; }
   PoolType pool_type() const { return pool_type_; }
   size_t alignment() const { return alignment_; }
+  size_t grow_count() const { return grow_count_; }
+  size_t grow_bytes() const { return grow_bytes_; }
+  size_t alloc_count() const { return alloc_count_; }
+  size_t free_count_stat() const { return free_count_; }
 
   bool SetBlockRemapEvent(void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
@@ -61,6 +65,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
  protected:
   phi::Allocation* AllocateImpl(size_t size) override;
   size_t CompactImpl(const Place& place) override;
+  uint64_t ReleaseImpl(const Place& place) override;
   void FreeImpl(phi::Allocation* allocation) override;
 
  private:
@@ -84,6 +89,13 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   PtrBlockMap allocated_blocks_;
   std::map<std::pair<size_t, void*>, BlockListIt> free_blocks_;
   SpinLock spinlock_;
+
+  // ── Instrumentation counters (no lock needed; only updated under spinlock_)
+  // ──
+  size_t grow_count_{0};   // number of times we grew (new handle allocation)
+  size_t grow_bytes_{0};   // cumulative bytes from grow events
+  size_t alloc_count_{0};  // total allocation requests
+  size_t free_count_{0};   // total free requests
 };
 
 }  // namespace allocation

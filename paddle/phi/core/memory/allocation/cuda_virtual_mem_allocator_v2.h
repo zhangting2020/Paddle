@@ -39,7 +39,7 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   // override this explicitly when routing by lifecycle.
   CUDAVirtualMemAllocatorV2(const GPUPlace& place,
                             size_t handle_size,
-                            PoolType pool = PoolType::kTransient);
+                            PoolType pool = PoolType::kTransientSmall);
 
   bool IsAllocThreadSafe() const override;
 
@@ -55,6 +55,10 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
 
   void UnmapHandle(VmmDevicePtr ptr, size_t size);
   void MapHandlesToVA(VmmDevicePtr ptr, const std::vector<VmmAllocHandle>& hs);
+  // Unmap a handle from its current VA and release the physical memory back
+  // to the CUDA driver.  After this call the VmmHandleMeta is invalidated
+  // and its VA region becomes a GAP.  Used by ReleaseImpl (empty_cache).
+  void UnmapAndReleaseHandle(VmmHandleMeta* meta);
   // Exposes the allocation-level handle list for IPC/export queries. The key
   // is the raw allocation ptr returned by this allocator.
   bool CollectAllocationHandleLayout(void* ptr, HandleLayout* layout) const;

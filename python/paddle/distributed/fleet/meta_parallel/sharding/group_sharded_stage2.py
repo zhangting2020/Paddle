@@ -165,6 +165,12 @@ class GroupShardedStage2(nn.Layer):
         self._redefine_opt_step()
         self._redefine_opt_clear()
 
+        # Release free physical memory handles accumulated during
+        # initialization (parameter loading, AMP cast, resharding, etc.).
+        # Without this, pools like Stable may hold large amounts of free
+        # reserved memory that will never be reused.
+        paddle.device.cuda.empty_cache()
+
     def forward(self, *inputs, **kwargs):
         """
         A wrapper for Sharding Stage2 layer.

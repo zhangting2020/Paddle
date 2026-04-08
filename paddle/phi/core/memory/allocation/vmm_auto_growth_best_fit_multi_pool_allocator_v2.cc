@@ -17,6 +17,8 @@
 #include "paddle/phi/core/enforce.h"
 #include "paddle/phi/core/memory/allocation/alloc_hint.h"
 
+COMMON_DECLARE_int32(vmm_v2_pool_mode);
+
 namespace paddle {
 namespace memory {
 namespace allocation {
@@ -88,10 +90,10 @@ size_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::CompactImpl(
   PADDLE_ENFORCE_EQ(
       place,
       place_,
-      common::errors::InvalidArgument(
-          "VMM multipool V2 compact only supports its own place %s, but got %s.",
-          place_,
-          place));
+      common::errors::InvalidArgument("VMM multipool V2 compact only supports "
+                                      "its own place %s, but got %s.",
+                                      place_,
+                                      place));
   return stable_allocator_->Compact(place_) +
          longlived_allocator_->Compact(place_) +
          transient_small_allocator_->Compact(place_) +
@@ -99,9 +101,26 @@ size_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::CompactImpl(
          oversized_allocator_->Compact(place_);
 }
 
+uint64_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::ReleaseImpl(
+    const Place& place) {
+  PADDLE_ENFORCE_EQ(
+      place,
+      place_,
+      common::errors::InvalidArgument(
+          "VMM multipool V2 release only supports its own place %s, "
+          "but got %s.",
+          place_,
+          place));
+  return stable_allocator_->Release(place_) +
+         longlived_allocator_->Release(place_) +
+         transient_small_allocator_->Release(place_) +
+         transient_large_allocator_->Release(place_) +
+         oversized_allocator_->Release(place_);
+}
+
 void VMMAutoGrowthBestFitMultiPoolAllocatorV2::FreeImpl(
     phi::Allocation* allocation) {
-  AllocationRoute route{PoolType::kTransient, nullptr};
+  AllocationRoute route{PoolType::kTransientSmall, nullptr};
   {
     std::lock_guard<SpinLock> guard(spinlock_);
     auto it = active_allocations_.find(allocation->ptr());
@@ -131,7 +150,7 @@ bool VMMAutoGrowthBestFitMultiPoolAllocatorV2::SetBlockRemapEvent(
     void* event
 #endif
 ) {
-  AllocationRoute route{PoolType::kTransient, nullptr};
+  AllocationRoute route{PoolType::kTransientSmall, nullptr};
   {
     std::lock_guard<SpinLock> guard(spinlock_);
     auto it = active_allocations_.find(ptr);
@@ -161,26 +180,50 @@ void VMMAutoGrowthBestFitMultiPoolAllocatorV2::ImportFromIpc() {
 
 VMMAutoGrowthBestFitMultiPoolAllocatorV2::AllocationRoute
 VMMAutoGrowthBestFitMultiPoolAllocatorV2::RouteAllocation(size_t size) const {
-  // PR3 keeps routing intentionally minimal:
-  // 1. explicit PoolHint routes parameters and optimizer state first
-  // 2. large requests above the oversized threshold use a dedicated pool
-  // 3. all remaining requests default to the transient pool
-  // 4. transient is split into small/large sub-pools by a fixed 2MB boundary
-  switch (GetCurrentPoolHint()) {
-    case PoolHint::kStable:
-      return {PoolType::kStable, stable_allocator_.get()};
-    case PoolHint::kLongLived:
-      return {PoolType::kLongLived, longlived_allocator_.get()};
-    case PoolHint::kNone:
-      break;
+  const int pool_mode = FLAGS_vmm_v2_pool_mode;
+
+  // Mode 2: single pool — everything to transient_small, all hints ignored.
+  if (pool_mode == 2) {
+    return {PoolType::kTransientSmall, transient_small_allocator_.get()};
+  }
+
+  // Mode 3: size-based 2-pool — small + large by threshold, all hints
+  // ignored. Mirrors V1's small_pool / large_pool split for A/B comparison.
+  if (pool_mode == 3) {
+    if (size < transient_small_threshold_) {
+      return {PoolType::kTransientSmall, transient_small_allocator_.get()};
+    }
+    return {PoolType::kTransientLarge, transient_large_allocator_.get()};
+  }
+
+  // Mode 0 (default 5-pool) and Mode 1 (Stable + Transient) both
+  // respect kStable hint.
+  const auto hint = GetCurrentPoolHint();
+  if (hint == PoolHint::kStable) {
+    return {PoolType::kStable, stable_allocator_.get()};
+  }
+
+  // Mode 1: Stable + Transient small/large.
+  // kLongLived hint is ignored — falls through to size-based routing.
+  // Oversized is disabled (routed to transient_large).
+  if (pool_mode == 1) {
+    if (size < transient_small_threshold_) {
+      return {PoolType::kTransientSmall, transient_small_allocator_.get()};
+    }
+    return {PoolType::kTransientLarge, transient_large_allocator_.get()};
+  }
+
+  // Mode 0: default 5-pool routing.
+  if (hint == PoolHint::kLongLived) {
+    return {PoolType::kLongLived, longlived_allocator_.get()};
   }
   if (size >= oversized_threshold_) {
     return {PoolType::kOversized, oversized_allocator_.get()};
   }
   if (size < transient_small_threshold_) {
-    return {PoolType::kTransient, transient_small_allocator_.get()};
+    return {PoolType::kTransientSmall, transient_small_allocator_.get()};
   }
-  return {PoolType::kTransient, transient_large_allocator_.get()};
+  return {PoolType::kTransientLarge, transient_large_allocator_.get()};
 }
 
 }  // namespace allocation
