@@ -177,30 +177,30 @@ void CUDAVirtualMemAllocatorV2::MapHandlesToVA(
   platform::CUDADeviceGuard guard(place_.device);
   // V2 currently assumes one uniform handle size per pool, so remap can
   // re-materialize a contiguous VA range by replaying fixed-size mappings.
-  LOG(INFO) << "MapHandlesToVA dst=" << reinterpret_cast<void*>(ptr)
-            << " handle_count=" << hs.size()
-            << " handle_size=" << handle_size_
-            << " total_bytes=" << hs.size() * handle_size_
-            << " tail_offset=" << virtual_mem_alloced_offset_
-            << " virtual_mem_size=" << virtual_mem_size_;
+  VLOG(10) << "MapHandlesToVA dst=" << reinterpret_cast<void*>(ptr)
+           << " handle_count=" << hs.size()
+           << " handle_size=" << handle_size_
+           << " total_bytes=" << hs.size() * handle_size_
+           << " tail_offset=" << virtual_mem_alloced_offset_
+           << " virtual_mem_size=" << virtual_mem_size_;
   for (size_t i = 0; i < hs.size(); ++i) {
     auto dst = ptr + i * handle_size_;
     auto status = phi::dynload::cuMemMap(dst, handle_size_, 0, hs[i], 0);
     if (status != CUDA_SUCCESS) {
-      LOG(ERROR) << "cuMemMap failed at index=" << i
-                 << " dst=" << reinterpret_cast<void*>(dst)
-                 << " handle_size=" << handle_size_
-                 << " handle=" << reinterpret_cast<void*>(hs[i])
-                 << " total_handles=" << hs.size();
+      VLOG(0) << "cuMemMap failed at index=" << i
+              << " dst=" << reinterpret_cast<void*>(dst)
+              << " handle_size=" << handle_size_
+              << " handle=" << reinterpret_cast<void*>(hs[i])
+              << " total_handles=" << hs.size();
     }
     PADDLE_ENFORCE_GPU_SUCCESS(status);
   }
   auto status = phi::dynload::cuMemSetAccess(
       ptr, hs.size() * handle_size_, access_desc_.data(), access_desc_.size());
   if (status != CUDA_SUCCESS) {
-    LOG(ERROR) << "cuMemSetAccess failed dst=" << reinterpret_cast<void*>(ptr)
-               << " total_bytes=" << hs.size() * handle_size_
-               << " access_desc_count=" << access_desc_.size();
+    VLOG(0) << "cuMemSetAccess failed dst=" << reinterpret_cast<void*>(ptr)
+            << " total_bytes=" << hs.size() * handle_size_
+            << " access_desc_count=" << access_desc_.size();
   }
   PADDLE_ENFORCE_GPU_SUCCESS(status);
 }
