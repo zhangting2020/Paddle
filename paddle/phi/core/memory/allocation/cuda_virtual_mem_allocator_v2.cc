@@ -184,11 +184,25 @@ void CUDAVirtualMemAllocatorV2::MapHandlesToVA(
             << " tail_offset=" << virtual_mem_alloced_offset_
             << " virtual_mem_size=" << virtual_mem_size_;
   for (size_t i = 0; i < hs.size(); ++i) {
-    PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cuMemMap(
-        ptr + i * handle_size_, handle_size_, 0, hs[i], 0));
+    auto dst = ptr + i * handle_size_;
+    auto status = phi::dynload::cuMemMap(dst, handle_size_, 0, hs[i], 0);
+    if (status != CUDA_SUCCESS) {
+      LOG(ERROR) << "cuMemMap failed at index=" << i
+                 << " dst=" << reinterpret_cast<void*>(dst)
+                 << " handle_size=" << handle_size_
+                 << " handle=" << reinterpret_cast<void*>(hs[i])
+                 << " total_handles=" << hs.size();
+    }
+    PADDLE_ENFORCE_GPU_SUCCESS(status);
   }
-  PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cuMemSetAccess(
-      ptr, hs.size() * handle_size_, access_desc_.data(), access_desc_.size()));
+  auto status = phi::dynload::cuMemSetAccess(
+      ptr, hs.size() * handle_size_, access_desc_.data(), access_desc_.size());
+  if (status != CUDA_SUCCESS) {
+    LOG(ERROR) << "cuMemSetAccess failed dst=" << reinterpret_cast<void*>(ptr)
+               << " total_bytes=" << hs.size() * handle_size_
+               << " access_desc_count=" << access_desc_.size();
+  }
+  PADDLE_ENFORCE_GPU_SUCCESS(status);
 }
 
 bool CUDAVirtualMemAllocatorV2::CollectAllocationHandleLayout(
