@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
 
 namespace paddle {
@@ -215,6 +216,12 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
       vmm_allocator_->virtual_mem_base() + vmm_allocator_->tail_offset();
   const VmmDevicePtr va_limit =
       vmm_allocator_->virtual_mem_base() + vmm_allocator_->virtual_mem_size();
+  VLOG(10) << "VMM remap compact pool=" << static_cast<int>(pool_type_)
+           << " remapped_handles=" << remapped_handles.size()
+           << " total_remapped=" << total_remapped
+           << " handle_size=" << handle_size
+           << " tail_va=" << reinterpret_cast<void*>(tail_va)
+           << " va_limit=" << reinterpret_cast<void*>(va_limit);
 
   auto gap_it = blocks->end();
   if (tail_va + total_remapped > va_limit) {
@@ -235,6 +242,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
   }
 
   if (gap_it == blocks->end()) {
+    VLOG(10) << "VMM remap compact using tail path, dst_va="
+             << reinterpret_cast<void*>(tail_va) << " bytes=" << total_remapped;
     vmm_allocator_->MapHandlesToVA(tail_va, remapped_handles);
     vmm_allocator_->AdvanceTailOffset(total_remapped);
 
@@ -258,6 +267,9 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
   }
 
   const VmmDevicePtr gap_va = reinterpret_cast<VmmDevicePtr>(gap_it->ptr_);
+  VLOG(10) << "VMM remap compact using gap path, dst_va="
+           << reinterpret_cast<void*>(gap_va) << " gap_size=" << gap_it->size_
+           << " bytes=" << total_remapped;
   vmm_allocator_->MapHandlesToVA(gap_va, remapped_handles);
 
   BlockV2 free_block = CreateTailFreeBlock(
