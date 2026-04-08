@@ -30,14 +30,10 @@ namespace {
 
 size_t GetPoolVAMultiplier(PoolType pool_type) {
   switch (pool_type) {
-    case PoolType::kStable:
-      return 2;
-    case PoolType::kLongLived:
-      return 3;
-    case PoolType::kTransient:
-      return 4;
-    case PoolType::kOversized:
+    case PoolType::kSmall:
       return 1;
+    case PoolType::kLarge:
+      return 4;
   }
   return 1;
 }

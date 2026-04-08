@@ -18,7 +18,6 @@
 #include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_multi_pool_allocator_v2.h"
 #undef private
 
-#include "paddle/phi/core/memory/allocation/alloc_hint.h"
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator_v2.h"
 
 namespace paddle {
@@ -37,19 +36,15 @@ std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2> CreatePoolAllocator(
 
 std::unique_ptr<VMMAutoGrowthBestFitMultiPoolAllocatorV2> CreateAllocator() {
   return std::make_unique<VMMAutoGrowthBestFitMultiPoolAllocatorV2>(
-      CreatePoolAllocator(8UL << 20, PoolType::kStable),
-      CreatePoolAllocator(4UL << 20, PoolType::kLongLived),
-      CreatePoolAllocator(2UL << 20, PoolType::kTransient),
-      CreatePoolAllocator(2UL << 20, PoolType::kTransient),
-      CreatePoolAllocator(8UL << 20, PoolType::kOversized),
+      CreatePoolAllocator(2UL << 20, PoolType::kSmall),
+      CreatePoolAllocator(2UL << 20, PoolType::kLarge),
       2UL << 20,
-      8UL << 20,
       phi::GPUPlace());
 }
 
 }  // namespace
 
-TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, RouteTransientSmallAndLarge) {
+TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, RouteSmallAndLarge) {
   auto allocator = CreateAllocator();
 
   auto small = allocator->Allocate(256UL);
@@ -58,31 +53,16 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, RouteTransientSmallAndLarge) {
   ASSERT_NE(large, nullptr);
 
   EXPECT_EQ(allocator->active_allocations_[small->ptr()].pool_type,
-            PoolType::kTransient);
+            PoolType::kSmall);
   EXPECT_EQ(allocator->active_allocations_[large->ptr()].pool_type,
-            PoolType::kTransient);
+            PoolType::kLarge);
   EXPECT_EQ(allocator->active_allocations_[small->ptr()].allocator,
-            allocator->transient_small_allocator_.get());
+            allocator->small_allocator_.get());
   EXPECT_EQ(allocator->active_allocations_[large->ptr()].allocator,
-            allocator->transient_large_allocator_.get());
+            allocator->large_allocator_.get());
 
-  EXPECT_EQ(allocator->transient_small_allocator_->allocated_blocks_.size(),
-            1UL);
-  EXPECT_EQ(allocator->transient_large_allocator_->allocated_blocks_.size(),
-            1UL);
-}
-
-TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, RouteOversizedRequests) {
-  auto allocator = CreateAllocator();
-
-  auto allocation = allocator->Allocate(8UL << 20);
-  ASSERT_NE(allocation, nullptr);
-
-  auto found = allocator->active_allocations_.find(allocation->ptr());
-  ASSERT_NE(found, allocator->active_allocations_.end());
-  EXPECT_EQ(found->second.pool_type, PoolType::kOversized);
-  EXPECT_EQ(found->second.allocator, allocator->oversized_allocator_.get());
-  EXPECT_EQ(allocator->oversized_allocator_->allocated_blocks_.size(), 1UL);
+  EXPECT_EQ(allocator->small_allocator_->allocated_blocks_.size(), 1UL);
+  EXPECT_EQ(allocator->large_allocator_->allocated_blocks_.size(), 1UL);
 }
 
 TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, SetBlockRemapEventRoutesByPtr) {
@@ -97,8 +77,8 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, SetBlockRemapEventRoutesByPtr) {
   auto* ptr = allocation->ptr();
   ASSERT_TRUE(allocator->SetBlockRemapEvent(ptr, nullptr, event));
 
-  auto it = allocator->transient_small_allocator_->allocated_blocks_.find(ptr);
-  ASSERT_NE(it, allocator->transient_small_allocator_->allocated_blocks_.end());
+  auto it = allocator->small_allocator_->allocated_blocks_.find(ptr);
+  ASSERT_NE(it, allocator->small_allocator_->allocated_blocks_.end());
   EXPECT_EQ(it->second->remap_safe_event_, event);
 
   allocation.reset();
@@ -117,43 +97,33 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
 
   // Before free: route entry exists, sub-pool has 1 active block.
   EXPECT_EQ(allocator->active_allocations_.size(), 1UL);
-  EXPECT_EQ(allocator->transient_small_allocator_->allocated_blocks_.size(),
-            1UL);
+  EXPECT_EQ(allocator->small_allocator_->allocated_blocks_.size(), 1UL);
 
   allocation.reset();
 
   // After free: route entry erased, sub-pool block freed.
   EXPECT_EQ(allocator->active_allocations_.size(), 0UL);
-  EXPECT_EQ(allocator->transient_small_allocator_->allocated_blocks_.size(),
-            0UL);
+  EXPECT_EQ(allocator->small_allocator_->allocated_blocks_.size(), 0UL);
 }
 
 TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, CrossPoolAllocFree) {
   auto allocator = CreateAllocator();
 
-  // Allocate across all three routed pools.
+  // Allocate across both routed pools.
   auto small = allocator->Allocate(256UL);
   auto large = allocator->Allocate(2UL << 20);
-  auto oversized = allocator->Allocate(8UL << 20);
   ASSERT_NE(small, nullptr);
   ASSERT_NE(large, nullptr);
-  ASSERT_NE(oversized, nullptr);
-  EXPECT_EQ(allocator->active_allocations_.size(), 3UL);
+  EXPECT_EQ(allocator->active_allocations_.size(), 2UL);
 
   // Free in a different order than allocation.
   large.reset();
-  EXPECT_EQ(allocator->active_allocations_.size(), 2UL);
-  EXPECT_EQ(allocator->transient_large_allocator_->allocated_blocks_.size(),
-            0UL);
-
-  oversized.reset();
   EXPECT_EQ(allocator->active_allocations_.size(), 1UL);
-  EXPECT_EQ(allocator->oversized_allocator_->allocated_blocks_.size(), 0UL);
+  EXPECT_EQ(allocator->large_allocator_->allocated_blocks_.size(), 0UL);
 
   small.reset();
   EXPECT_EQ(allocator->active_allocations_.size(), 0UL);
-  EXPECT_EQ(allocator->transient_small_allocator_->allocated_blocks_.size(),
-            0UL);
+  EXPECT_EQ(allocator->small_allocator_->allocated_blocks_.size(), 0UL);
 }
 
 TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
@@ -166,72 +136,22 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
 
 // --- P2: threshold boundary tests ---
 
-TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, OversizedThresholdBoundary) {
-  auto allocator = CreateAllocator();
-  // CreateAllocator uses oversized_threshold = 8MB.
-
-  // size = threshold - 1 → Transient Large (not Oversized).
-  auto just_below = allocator->Allocate((8UL << 20) - 1);
-  ASSERT_NE(just_below, nullptr);
-  EXPECT_EQ(allocator->active_allocations_[just_below->ptr()].allocator,
-            allocator->transient_large_allocator_.get());
-
-  // size = threshold → Oversized.
-  auto exact = allocator->Allocate(8UL << 20);
-  ASSERT_NE(exact, nullptr);
-  EXPECT_EQ(allocator->active_allocations_[exact->ptr()].allocator,
-            allocator->oversized_allocator_.get());
-
-  // size = threshold + 1 → Oversized.
-  auto just_above = allocator->Allocate((8UL << 20) + 1);
-  ASSERT_NE(just_above, nullptr);
-  EXPECT_EQ(allocator->active_allocations_[just_above->ptr()].allocator,
-            allocator->oversized_allocator_.get());
-}
-
 TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
-     TransientSmallThresholdBoundary) {
+     SmallAllocationThresholdBoundary) {
   auto allocator = CreateAllocator();
-  // CreateAllocator uses transient_small_threshold = 2MB.
+  // CreateAllocator uses small_allocation_threshold = 2MB.
 
-  // size = threshold - 1 → Transient Small.
+  // size = threshold - 1 → Small.
   auto just_below = allocator->Allocate((2UL << 20) - 1);
   ASSERT_NE(just_below, nullptr);
   EXPECT_EQ(allocator->active_allocations_[just_below->ptr()].allocator,
-            allocator->transient_small_allocator_.get());
+            allocator->small_allocator_.get());
 
-  // size = threshold → Transient Large (>= threshold goes to large).
+  // size = threshold → Large (>= threshold goes to large).
   auto exact = allocator->Allocate(2UL << 20);
   ASSERT_NE(exact, nullptr);
   EXPECT_EQ(allocator->active_allocations_[exact->ptr()].allocator,
-            allocator->transient_large_allocator_.get());
-}
-
-TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, StableHintOverridesDefaultRoute) {
-  auto allocator = CreateAllocator();
-
-  PoolHintGuard guard(PoolHint::kStable);
-  auto allocation = allocator->Allocate(256UL);
-  ASSERT_NE(allocation, nullptr);
-
-  auto found = allocator->active_allocations_.find(allocation->ptr());
-  ASSERT_NE(found, allocator->active_allocations_.end());
-  EXPECT_EQ(found->second.pool_type, PoolType::kStable);
-  EXPECT_EQ(found->second.allocator, allocator->stable_allocator_.get());
-}
-
-TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
-     LongLivedHintOverridesOversizedRoute) {
-  auto allocator = CreateAllocator();
-
-  PoolHintGuard guard(PoolHint::kLongLived);
-  auto allocation = allocator->Allocate(8UL << 20);
-  ASSERT_NE(allocation, nullptr);
-
-  auto found = allocator->active_allocations_.find(allocation->ptr());
-  ASSERT_NE(found, allocator->active_allocations_.end());
-  EXPECT_EQ(found->second.pool_type, PoolType::kLongLived);
-  EXPECT_EQ(found->second.allocator, allocator->longlived_allocator_.get());
+            allocator->large_allocator_.get());
 }
 
 }  // namespace allocation

@@ -28,7 +28,6 @@ from collections import OrderedDict
 
 import paddle
 import paddle.distributed as dist
-from paddle.base import framework
 from paddle.distributed import ParallelMode, fleet
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     ShardedStateDict,
@@ -337,7 +336,7 @@ class GroupShardedOptimizerStage2(Optimizer):
                     param.dtype == Type.fp16.value
                     or param.dtype == Type.bf16.value
                 ):
-                    master_tensor = framework.cast_to_master_weight(param)
+                    master_tensor = paddle.cast(param, Type.fp32.value)
                     master_tensor.name = param.name
                     self._optim._master_weights[param.name] = master_tensor
 
