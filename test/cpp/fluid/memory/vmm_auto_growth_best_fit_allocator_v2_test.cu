@@ -513,7 +513,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, ThreeWayMerge) {
 TEST(VMMAutoGrowthBestFitAllocatorV2, CompactRemapsWholeFreeHandleToTail) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
-      underlying, 256, phi::GPUPlace(), PoolType::kTransient);
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
 
   auto first = allocator.Allocate(underlying->handle_size());
   auto middle = allocator.Allocate(underlying->handle_size());
@@ -566,7 +566,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactRemapsWholeFreeHandleToTail) {
 TEST(VMMAutoGrowthBestFitAllocatorV2, CompactSkipsPartialFreeHandle) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
-      underlying, 256, phi::GPUPlace(), PoolType::kTransient);
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
 
   auto allocation = allocator.Allocate(256UL);
   ASSERT_NE(allocation, nullptr);
@@ -590,7 +590,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactSkipsPartialFreeHandle) {
 TEST(VMMAutoGrowthBestFitAllocatorV2, CompactWaitsForRemapSafeEvent) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
-      underlying, 256, phi::GPUPlace(), PoolType::kTransient);
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
 
   auto allocation = allocator.Allocate(underlying->handle_size());
   ASSERT_NE(allocation, nullptr);
@@ -624,7 +624,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactWaitsForRemapSafeEvent) {
 TEST(VMMAutoGrowthBestFitAllocatorV2, CompactReusesGapWhenTailIsExhausted) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
-      underlying, 256, phi::GPUPlace(), PoolType::kTransient);
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
 
   auto first = allocator.Allocate(underlying->handle_size());
   auto middle = allocator.Allocate(underlying->handle_size());

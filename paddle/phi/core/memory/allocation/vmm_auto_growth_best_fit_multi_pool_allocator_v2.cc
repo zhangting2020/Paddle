@@ -80,11 +80,7 @@ size_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::CompactImpl(
           "VMM multipool V2 compact only supports its own place %s, but got %s.",
           place_,
           place));
-  return stable_allocator_->Compact(place_) +
-         longlived_allocator_->Compact(place_) +
-         transient_small_allocator_->Compact(place_) +
-         transient_large_allocator_->Compact(place_) +
-         oversized_allocator_->Compact(place_);
+  return small_allocator_->Compact(place_) + large_allocator_->Compact(place_);
 }
 
 void VMMAutoGrowthBestFitMultiPoolAllocatorV2::FreeImpl(
