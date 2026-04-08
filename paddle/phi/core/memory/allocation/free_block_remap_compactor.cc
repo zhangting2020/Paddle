@@ -161,6 +161,16 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
           reinterpret_cast<uint8_t*>(current->ptr_) + block_offset;
       block_offset += part.len;
       if (IsFullyCoveredHandle(part)) {
+        if (remapped_handles.empty()) {
+          VLOG(0) << "First remap candidate pool=" << static_cast<int>(pool_type_)
+                  << " block_ptr=" << current->ptr_
+                  << " block_size=" << current->size_
+                  << " handle_base="
+                  << reinterpret_cast<void*>(part.handle->base)
+                  << " handle_size=" << part.handle->size
+                  << " handle="
+                  << reinterpret_cast<void*>(part.handle->handle);
+        }
         vmm_allocator_->UnmapHandle(part.handle->base, part.len);
         remapped_handles.push_back(part.handle->handle);
         remapped_metas.push_back(part.handle);
