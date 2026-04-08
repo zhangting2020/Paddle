@@ -146,6 +146,7 @@ BlockV2 CreateTailFreeBlock(
 size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
   std::vector<VmmAllocHandle> remapped_handles;
   std::vector<std::shared_ptr<VmmHandleMeta>> remapped_metas;
+  bool logged_first_candidate = false;
 
   for (auto it = blocks->begin(); it != blocks->end();) {
     auto current = it++;
@@ -161,7 +162,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
           reinterpret_cast<uint8_t*>(current->ptr_) + block_offset;
       block_offset += part.len;
       if (IsFullyCoveredHandle(part)) {
-        if (remapped_handles.empty()) {
+        if (!logged_first_candidate) {
           VLOG(0) << "First remap candidate pool=" << static_cast<int>(pool_type_)
                   << " block_ptr=" << current->ptr_
                   << " block_size=" << current->size_
@@ -170,6 +171,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
                   << " handle_size=" << part.handle->size
                   << " handle="
                   << reinterpret_cast<void*>(part.handle->handle);
+          logged_first_candidate = true;
         }
         vmm_allocator_->UnmapHandle(part.handle->base, part.len);
         remapped_handles.push_back(part.handle->handle);
