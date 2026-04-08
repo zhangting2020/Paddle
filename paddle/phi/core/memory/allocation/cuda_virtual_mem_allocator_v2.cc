@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <limits>
 
+#include "glog/logging.h"
 #include "paddle/phi/core/platform/cuda_device_guard.h"
 #include "paddle/phi/core/platform/device/gpu/gpu_info.h"
 
