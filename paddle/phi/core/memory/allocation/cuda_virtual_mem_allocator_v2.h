@@ -52,6 +52,10 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   // V2 keeps this as an explicit cursor instead of reusing V1's
   // virtual_2_physical_map_ bookkeeping.
   void AdvanceTailOffset(size_t bytes) { virtual_mem_alloced_offset_ += bytes; }
+  // Retreat the tail cursor when the compactor discovers that blocks no
+  // longer span up to the previous high-water mark (e.g. after
+  // FreeIdleChunks released tail-end underlying allocations).
+  void SetTailOffset(size_t offset) { virtual_mem_alloced_offset_ = offset; }
 
   void UnmapHandle(VmmDevicePtr ptr, size_t size);
   void MapHandlesToVA(
