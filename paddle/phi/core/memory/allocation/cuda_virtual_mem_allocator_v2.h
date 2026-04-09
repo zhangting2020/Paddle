@@ -54,7 +54,10 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   void AdvanceTailOffset(size_t bytes) { virtual_mem_alloced_offset_ += bytes; }
 
   void UnmapHandle(VmmDevicePtr ptr, size_t size);
-  void MapHandlesToVA(VmmDevicePtr ptr, const std::vector<VmmAllocHandle>& hs);
+  void MapHandlesToVA(
+      VmmDevicePtr ptr,
+      const std::vector<VmmAllocHandle>& hs,
+      const std::vector<std::shared_ptr<VmmHandleMeta>>* metas = nullptr);
   // Exposes the allocation-level handle list for IPC/export queries. The key
   // is the raw allocation ptr returned by this allocator.
   bool CollectAllocationHandleLayout(void* ptr, HandleLayout* layout) const;

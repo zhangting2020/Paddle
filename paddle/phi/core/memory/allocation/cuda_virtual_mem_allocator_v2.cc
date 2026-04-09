@@ -173,7 +173,9 @@ void CUDAVirtualMemAllocatorV2::UnmapHandle(VmmDevicePtr ptr, size_t size) {
 }
 
 void CUDAVirtualMemAllocatorV2::MapHandlesToVA(
-    VmmDevicePtr ptr, const std::vector<VmmAllocHandle>& hs) {
+    VmmDevicePtr ptr,
+    const std::vector<VmmAllocHandle>& hs,
+    const std::vector<std::shared_ptr<VmmHandleMeta>>* metas) {
   platform::CUDADeviceGuard guard(place_.device);
   // V2 currently assumes one uniform handle size per pool, so remap can
   // re-materialize a contiguous VA range by replaying fixed-size mappings.
@@ -192,6 +194,22 @@ void CUDAVirtualMemAllocatorV2::MapHandlesToVA(
               << " handle_size=" << handle_size_
               << " handle=" << reinterpret_cast<void*>(hs[i])
               << " total_handles=" << hs.size();
+      if (metas != nullptr && i < metas->size()) {
+        auto orig = (*metas)[i]->base;
+        VLOG(0) << "Retry mapping failed handle back to original base="
+                << reinterpret_cast<void*>(orig);
+        auto retry_status =
+            phi::dynload::cuMemMap(orig, handle_size_, 0, hs[i], 0);
+        VLOG(0) << "Retry cuMemMap(orig_base) status=" << retry_status;
+        if (retry_status == CUDA_SUCCESS) {
+          auto access_status = phi::dynload::cuMemSetAccess(
+              orig, handle_size_, access_desc_.data(), access_desc_.size());
+          VLOG(0) << "Retry cuMemSetAccess(orig_base) status="
+                  << access_status;
+          auto unmap_status = phi::dynload::cuMemUnmap(orig, handle_size_);
+          VLOG(0) << "Retry cuMemUnmap(orig_base) status=" << unmap_status;
+        }
+      }
     }
     PADDLE_ENFORCE_GPU_SUCCESS(status);
   }

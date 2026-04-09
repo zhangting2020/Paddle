@@ -257,7 +257,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
     VLOG(10) << "VMM remap compact using tail path, dst_va="
              << reinterpret_cast<void*>(tail_va)
              << " bytes=" << total_remapped;
-    vmm_allocator_->MapHandlesToVA(tail_va, remapped_handles);
+    vmm_allocator_->MapHandlesToVA(tail_va, remapped_handles, &remapped_metas);
     vmm_allocator_->AdvanceTailOffset(total_remapped);
 
     BlockV2 tail_free = CreateTailFreeBlock(
@@ -283,7 +283,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
   VLOG(10) << "VMM remap compact using gap path, dst_va="
            << reinterpret_cast<void*>(gap_va) << " gap_size=" << gap_it->size_
            << " bytes=" << total_remapped;
-  vmm_allocator_->MapHandlesToVA(gap_va, remapped_handles);
+  vmm_allocator_->MapHandlesToVA(gap_va, remapped_handles, &remapped_metas);
 
   BlockV2 free_block = CreateTailFreeBlock(
       gap_va, total_remapped, pool_type_, remapped_metas, handle_size);
