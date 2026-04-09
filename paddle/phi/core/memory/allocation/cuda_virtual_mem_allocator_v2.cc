@@ -194,6 +194,17 @@ void CUDAVirtualMemAllocatorV2::MapHandlesToVA(
               << " handle_size=" << handle_size_
               << " handle=" << reinterpret_cast<void*>(hs[i])
               << " total_handles=" << hs.size();
+      CUmemGenericAllocationHandle retained = 0;
+      auto retain_status = phi::dynload::cuMemRetainAllocationHandle(
+          &retained, reinterpret_cast<void*>(dst));
+      VLOG(0) << "Probe dst retain status=" << retain_status
+              << " retained_handle="
+              << reinterpret_cast<void*>(retained);
+      if (retain_status == CUDA_SUCCESS) {
+        auto release_status = phi::dynload::cuMemRelease(retained);
+        VLOG(0) << "Probe dst release retained_handle status="
+                << release_status;
+      }
       if (metas != nullptr && i < metas->size()) {
         auto orig = (*metas)[i]->base;
         VLOG(0) << "Retry mapping failed handle back to original base="
