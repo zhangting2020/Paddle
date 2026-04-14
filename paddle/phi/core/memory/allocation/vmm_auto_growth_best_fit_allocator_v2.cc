@@ -155,12 +155,11 @@ void MergeRemapRuntimeState(BlockV2* keep, BlockV2* remove) {
 
 }  // namespace
 
-VMMAutoGrowthBestFitAllocatorV2::
-    VMMAutoGrowthBestFitAllocatorV2(
-        const std::shared_ptr<CUDAVirtualMemAllocatorV2>& underlying_allocator,
-        size_t alignment,
-        const GPUPlace& place,
-        PoolType pool_type)
+VMMAutoGrowthBestFitAllocatorV2::VMMAutoGrowthBestFitAllocatorV2(
+    const std::shared_ptr<CUDAVirtualMemAllocatorV2>& underlying_allocator,
+    size_t alignment,
+    const GPUPlace& place,
+    PoolType pool_type)
     : underlying_allocator_(underlying_allocator),
       alignment_(alignment),
       place_(place),
@@ -173,8 +172,20 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
     return allocation;
   }
 
-  auto allocation = static_unique_ptr_cast<Allocation>(
-      underlying_allocator_->Allocate(requested_size));
+  // Grow: obtain a new raw allocation from the bottom VMM provider.
+  // If cuMemCreate fails due to physical memory exhaustion (CU error 2),
+  // the driver-level allocator throws EnforceNotMet.  Convert it to BadAlloc
+  // so that RetryAllocator can catch it and trigger try_remap / offload.
+  AllocationPtr raw_alloc;
+  try {
+    raw_alloc = underlying_allocator_->Allocate(requested_size);
+  } catch (...) {
+    PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+        "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes.",
+        static_cast<int>(pool_type_),
+        requested_size));
+  }
+  auto allocation = static_unique_ptr_cast<Allocation>(std::move(raw_alloc));
   HandleLayout layout;
   PADDLE_ENFORCE_EQ(underlying_allocator_->CollectAllocationHandleLayout(
                         allocation->ptr(), &layout),
@@ -232,6 +243,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place) {
   FreeBlockRemapCompactor compactor(underlying_allocator_, pool_type_);
   const size_t remapped = compactor.Compact(&all_blocks_);
   if (remapped > 0) {
+    has_remapped_handles_ = true;
     RebuildFreeBlockIndex();
   }
   return remapped;
@@ -418,6 +430,33 @@ uint64_t VMMAutoGrowthBestFitAllocatorV2::FreeIdleChunks() {
     if (!IsRangeEntirelyFree(base, alloc_size)) {
       ++alloc_it;
       continue;
+    }
+
+    // Defense-in-depth: verify that none of this allocation's handles
+    // have been remapped by the compactor.  If any handle has
+    // remapped==true, we must NOT release this allocation — its
+    // handles are now owned by a different block at a different VA.
+    // Only check when a compact has actually happened (to avoid the
+    // cost of CollectAllocationHandleLayout on every Release).
+    if (has_remapped_handles_) {
+      HandleLayout layout;
+      if (underlying_allocator_->CollectAllocationHandleLayout(
+              (*alloc_it)->ptr(), &layout)) {
+        bool has_remapped = false;
+        for (const auto& h : layout) {
+          if (h->remapped) {
+            has_remapped = true;
+            break;
+          }
+        }
+        if (has_remapped) {
+          VLOG(3) << "VMM V2 pool " << static_cast<int>(pool_type_)
+                  << " skipping idle chunk at " << (*alloc_it)->ptr() << " ("
+                  << alloc_size << " bytes): has remapped handles";
+          ++alloc_it;
+          continue;
+        }
+      }
     }
 
     SplitAndRemoveRange(base, alloc_size);

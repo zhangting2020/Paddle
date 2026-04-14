@@ -319,6 +319,15 @@ size_t StreamSafeCUDAAllocator::CompactImpl(const Place& place) {
   std::lock_guard<SpinLock> lock_guard(allocator_map_lock_);
   VLOG(4) << "enter StreamSafeCUDAAllocator compact!!";
   std::vector<StreamSafeCUDAAllocator*>& allocators = allocator_map_[place];
+
+  // Release idle chunks first so that the compactor can reclaim tail VA.
+  // Without this step the tail may still be mapped by idle underlying
+  // allocations, forcing the compactor into gap-scatter which cannot
+  // consolidate fragmented free blocks.
+  for (StreamSafeCUDAAllocator* allocator : allocators) {
+    allocator->ProcessUnfreedAllocationsAndRelease();
+  }
+
   size_t compact_free_size = 0;
   for (StreamSafeCUDAAllocator* allocator : allocators) {
     compact_free_size += allocator->underlying_allocator_->Compact(place_);

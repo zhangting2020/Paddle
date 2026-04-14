@@ -49,6 +49,11 @@ struct VmmHandleMeta {
   size_t size;
   VmmAllocHandle handle;
   int device;
+  // Set to true by the compactor after it unmaps this handle from its
+  // original VA and remaps it to a new (tail/gap) VA.  FreeImpl must
+  // skip cuMemUnmap+cuMemRelease for remapped handles — their
+  // lifetime is now managed by the block that received them.
+  bool remapped{false};
 };
 
 // HandleLayout is a lightweight allocation-level handle list returned by the

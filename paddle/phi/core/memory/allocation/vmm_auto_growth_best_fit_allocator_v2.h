@@ -88,6 +88,10 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   PtrBlockMap allocated_blocks_;
   std::map<std::pair<size_t, void*>, BlockListIt> free_blocks_;
   SpinLock spinlock_;
+  // Set to true after the first successful Compact that remapped handles.
+  // FreeIdleChunks uses this to skip the expensive remapped-handle check
+  // when no compact has ever been performed.
+  bool has_remapped_handles_{false};
 };
 
 }  // namespace allocation

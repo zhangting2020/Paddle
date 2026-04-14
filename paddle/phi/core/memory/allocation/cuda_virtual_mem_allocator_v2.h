@@ -58,6 +58,8 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   void SetTailOffset(size_t offset) { virtual_mem_alloced_offset_ = offset; }
 
   void UnmapHandle(VmmDevicePtr ptr, size_t size);
+  // Non-throwing variant: returns true if cuMemUnmap succeeds.
+  bool TryUnmapHandle(VmmDevicePtr ptr, size_t size);
   void MapHandlesToVA(
       VmmDevicePtr ptr,
       const std::vector<VmmAllocHandle>& hs,
