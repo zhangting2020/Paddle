@@ -34,6 +34,33 @@ namespace paddle {
 namespace memory {
 namespace allocation {
 
+// RAII wrapper around gpuEvent_t so that multiple blocks can share
+// ownership of the same event via shared_ptr.  The event is only
+// destroyed when the last reference is dropped, preventing the
+// double-destroy SIGSEGV that occurred when raw gpuEvent_t pointers
+// were shallow-copied across split blocks and then independently
+// destroyed during merge.
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+struct CudaEventGuard {
+  gpuEvent_t event{nullptr};
+
+  explicit CudaEventGuard(gpuEvent_t e) : event(e) {}
+  ~CudaEventGuard() {
+    if (event != nullptr) {
+#ifdef PADDLE_WITH_CUDA
+      cudaEventDestroy(event);
+#else
+      hipEventDestroy(event);
+#endif
+    }
+  }
+
+  // Non-copyable — ownership is shared via shared_ptr.
+  CudaEventGuard(const CudaEventGuard&) = delete;
+  CudaEventGuard& operator=(const CudaEventGuard&) = delete;
+};
+#endif
+
 // V2 keeps the bottom-layer shared types independent from the best-fit layer
 // so that CUDAVirtualMemAllocatorV2 can be reviewed and compiled separately.
 enum class PoolType : uint8_t {
@@ -104,7 +131,9 @@ struct BlockV2 {
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
   gpuStream_t owning_stream_{nullptr};
   gpuStream_t last_use_stream_{nullptr};
-  gpuEvent_t remap_safe_event_{nullptr};
+  // Shared ownership: split blocks share the same event; the event is
+  // only destroyed when all blocks drop their reference.
+  std::shared_ptr<CudaEventGuard> remap_safe_event_;
 #endif
   bool ipc_exported_{false};
 };

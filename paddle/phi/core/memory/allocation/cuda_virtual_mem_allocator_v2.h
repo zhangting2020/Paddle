@@ -60,6 +60,8 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   void UnmapHandle(VmmDevicePtr ptr, size_t size);
   // Non-throwing variant: returns true if cuMemUnmap succeeds.
   bool TryUnmapHandle(VmmDevicePtr ptr, size_t size);
+
+  const GPUPlace& place() const { return place_; }
   void MapHandlesToVA(
       VmmDevicePtr ptr,
       const std::vector<VmmAllocHandle>& hs,
@@ -68,13 +70,24 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   // is the raw allocation ptr returned by this allocator.
   bool CollectAllocationHandleLayout(void* ptr, HandleLayout* layout) const;
 
+  // Register a handle layout for handles that were remapped by the compactor
+  // to a new VA.  This allows FreeImpl to release them when the synthetic
+  // allocation is eventually freed.
+  void RegisterHandleLayout(void* ptr, const HandleLayout& layout);
+
+  // Create a synthetic Allocation object for remapped handles.  The handles
+  // already exist (cuMemCreate was done earlier), this just registers
+  // ownership so that FreeImpl can properly release them later.
+  DecoratedAllocationPtr CreateSyntheticAllocation(VmmDevicePtr ptr,
+                                                   size_t size,
+                                                   const HandleLayout& layout);
+
  protected:
   phi::Allocation* AllocateImpl(size_t size) override;
   void FreeImpl(phi::Allocation* allocation) override;
 
  private:
   void InitOnce();
-  void RegisterHandleLayout(void* ptr, const HandleLayout& layout);
   void UnregisterHandleLayout(void* ptr);
 
   GPUPlace place_;

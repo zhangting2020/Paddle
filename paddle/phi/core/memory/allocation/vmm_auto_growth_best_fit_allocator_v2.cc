@@ -131,25 +131,20 @@ void AppendPartsTail(std::vector<BlockPartV2>* dst,
 
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
 void MergeRemapRuntimeState(BlockV2* keep, BlockV2* remove) {
-  if (remove->remap_safe_event_ == nullptr) {
+  if (!remove->remap_safe_event_) {
     return;
   }
-  if (keep->remap_safe_event_ == nullptr) {
+  if (!keep->remap_safe_event_) {
     keep->last_use_stream_ = remove->last_use_stream_;
-    keep->remap_safe_event_ = remove->remap_safe_event_;
-    remove->remap_safe_event_ = nullptr;
+    keep->remap_safe_event_ = std::move(remove->remap_safe_event_);
     return;
   }
-  if (keep->remap_safe_event_ == remove->remap_safe_event_) {
-    remove->remap_safe_event_ = nullptr;
-    return;
-  }
-#ifdef PADDLE_WITH_CUDA
-  PADDLE_ENFORCE_GPU_SUCCESS(cudaEventDestroy(remove->remap_safe_event_));
-#else
-  PADDLE_ENFORCE_GPU_SUCCESS(hipEventDestroy(remove->remap_safe_event_));
-#endif
-  remove->remap_safe_event_ = nullptr;
+  // Both have events.  If they share the same underlying event (from a
+  // prior split), just drop one reference.  Otherwise, keep the "keep"
+  // block's event and release the "remove" block's — shared_ptr handles
+  // destruction when the last holder drops its reference, so no
+  // double-destroy is possible.
+  remove->remap_safe_event_.reset();
 }
 #endif
 
@@ -240,10 +235,10 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place) {
           place_,
           place));
   std::lock_guard<SpinLock> guard(spinlock_);
-  FreeBlockRemapCompactor compactor(underlying_allocator_, pool_type_);
+  FreeBlockRemapCompactor compactor(
+      underlying_allocator_, pool_type_, &underlying_allocations_);
   const size_t remapped = compactor.Compact(&all_blocks_);
   if (remapped > 0) {
-    has_remapped_handles_ = true;
     RebuildFreeBlockIndex();
   }
   return remapped;
@@ -266,13 +261,14 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   delete allocation;
 }
 
-bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(void* ptr,
+bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
+    void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-                                                         gpuStream_t stream,
-                                                         gpuEvent_t event
+    gpuStream_t stream,
+    std::shared_ptr<CudaEventGuard> event
 #else
-                                                         void* stream,
-                                                         void* event
+    void* stream,
+    void* event
 #endif
 ) {
   std::lock_guard<SpinLock> guard(spinlock_);
@@ -282,7 +278,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(void* ptr,
   }
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
   it->second->last_use_stream_ = stream;
-  it->second->remap_safe_event_ = event;
+  it->second->remap_safe_event_ = std::move(event);
 #else
   (void)stream;
   (void)event;
@@ -432,39 +428,15 @@ uint64_t VMMAutoGrowthBestFitAllocatorV2::FreeIdleChunks() {
       continue;
     }
 
-    // Defense-in-depth: verify that none of this allocation's handles
-    // have been remapped by the compactor.  If any handle has
-    // remapped==true, we must NOT release this allocation — its
-    // handles are now owned by a different block at a different VA.
-    // Only check when a compact has actually happened (to avoid the
-    // cost of CollectAllocationHandleLayout on every Release).
-    if (has_remapped_handles_) {
-      HandleLayout layout;
-      if (underlying_allocator_->CollectAllocationHandleLayout(
-              (*alloc_it)->ptr(), &layout)) {
-        bool has_remapped = false;
-        for (const auto& h : layout) {
-          if (h->remapped) {
-            has_remapped = true;
-            break;
-          }
-        }
-        if (has_remapped) {
-          VLOG(3) << "VMM V2 pool " << static_cast<int>(pool_type_)
-                  << " skipping idle chunk at " << (*alloc_it)->ptr() << " ("
-                  << alloc_size << " bytes): has remapped handles";
-          ++alloc_it;
-          continue;
-        }
-      }
-    }
-
     SplitAndRemoveRange(base, alloc_size);
     released += alloc_size;
     VLOG(5) << "VMM V2 pool " << static_cast<int>(pool_type_)
             << " released idle chunk: " << alloc_size << " bytes";
     // Erasing the DecoratedAllocationPtr triggers its deleter, which calls
     // CUDAVirtualMemAllocatorV2::FreeImpl → cuMemUnmap + cuMemRelease.
+    // FreeImpl already skips handles with remapped==true (their physical
+    // memory is owned by the compactor's destination block), so it is
+    // safe to erase even when the allocation contains remapped handles.
     alloc_it = underlying_allocations_.erase(alloc_it);
   }
 
@@ -480,7 +452,13 @@ bool VMMAutoGrowthBestFitAllocatorV2::IsRangeEntirelyFree(uint8_t* base,
     auto* bend = bptr + block.size_;
     if (bend <= base) continue;
     if (bptr >= end) break;
-    if (block.type_ != BlockType::kFree) return false;
+    // Accept both FREE and GAP: GAP blocks represent VA ranges whose
+    // physical memory was remapped elsewhere by the compactor.  The
+    // original allocation can still be released because FreeImpl skips
+    // handles marked remapped==true.
+    if (block.type_ != BlockType::kFree && block.type_ != BlockType::kGap) {
+      return false;
+    }
     covered += static_cast<size_t>(std::min(bend, end) - std::max(bptr, base));
   }
   return covered == size;
@@ -500,9 +478,11 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndRemoveRange(uint8_t* base,
     }
     if (bptr >= end) break;
 
+    const bool is_gap = (it->type_ == BlockType::kGap);
+
     // Case 1: block entirely within [base, end) → remove it.
     if (bptr >= base && bend <= end) {
-      EraseFreeBlock(it);
+      if (!is_gap) EraseFreeBlock(it);
       it = all_blocks_.erase(it);
       continue;
     }
@@ -510,10 +490,14 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndRemoveRange(uint8_t* base,
     // Case 2: block straddles left boundary only → keep left remnant.
     if (bptr < base && bend <= end) {
       const size_t keep = static_cast<size_t>(base - bptr);
-      EraseFreeBlock(it);
-      it->parts_ = SlicePartsForRange(it->parts_, 0, keep);
-      it->size_ = keep;
-      InsertFreeBlock(it);
+      if (!is_gap) {
+        EraseFreeBlock(it);
+        it->parts_ = SlicePartsForRange(it->parts_, 0, keep);
+        it->size_ = keep;
+        InsertFreeBlock(it);
+      } else {
+        it->size_ = keep;
+      }
       ++it;
       continue;
     }
@@ -522,39 +506,55 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndRemoveRange(uint8_t* base,
     if (bptr >= base && bend > end) {
       const size_t trim = static_cast<size_t>(end - bptr);
       const size_t keep = it->size_ - trim;
-      EraseFreeBlock(it);
-      it->parts_ = SlicePartsForRange(it->parts_, trim, keep);
-      it->ptr_ = end;
-      it->size_ = keep;
-      InsertFreeBlock(it);
+      if (!is_gap) {
+        EraseFreeBlock(it);
+        it->parts_ = SlicePartsForRange(it->parts_, trim, keep);
+        it->ptr_ = end;
+        it->size_ = keep;
+        InsertFreeBlock(it);
+      } else {
+        it->ptr_ = end;
+        it->size_ = keep;
+      }
       break;  // nothing more in range
     }
 
     // Case 4: block fully encompasses [base, end) → split into two.
     if (bptr < base && bend > end) {
-      const auto orig_parts = it->parts_;
       const size_t left_size = static_cast<size_t>(base - bptr);
       const size_t right_offset = static_cast<size_t>(end - bptr);
       const size_t right_size = it->size_ - right_offset;
 
-      EraseFreeBlock(it);
-      it->parts_ = SlicePartsForRange(orig_parts, 0, left_size);
-      it->size_ = left_size;
-      InsertFreeBlock(it);
+      if (!is_gap) {
+        const auto orig_parts = it->parts_;
+        EraseFreeBlock(it);
+        it->parts_ = SlicePartsForRange(orig_parts, 0, left_size);
+        it->size_ = left_size;
+        InsertFreeBlock(it);
 
-      BlockV2 right;
-      right.ptr_ = end;
-      right.size_ = right_size;
-      right.type_ = BlockType::kFree;
-      right.parts_ = SlicePartsForRange(orig_parts, right_offset, right_size);
-      right.pool_type_ = it->pool_type_;
+        BlockV2 right;
+        right.ptr_ = end;
+        right.size_ = right_size;
+        right.type_ = BlockType::kFree;
+        right.parts_ = SlicePartsForRange(orig_parts, right_offset, right_size);
+        right.pool_type_ = it->pool_type_;
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-      right.owning_stream_ = nullptr;
-      right.last_use_stream_ = it->last_use_stream_;
-      right.remap_safe_event_ = it->remap_safe_event_;
+        right.owning_stream_ = nullptr;
+        right.last_use_stream_ = it->last_use_stream_;
+        right.remap_safe_event_ = it->remap_safe_event_;
 #endif
-      auto right_it = all_blocks_.insert(std::next(it), std::move(right));
-      InsertFreeBlock(right_it);
+        auto right_it = all_blocks_.insert(std::next(it), std::move(right));
+        InsertFreeBlock(right_it);
+      } else {
+        // GAP: just shrink left and insert right GAP.
+        it->size_ = left_size;
+        BlockV2 right;
+        right.ptr_ = end;
+        right.size_ = right_size;
+        right.type_ = BlockType::kGap;
+        right.pool_type_ = it->pool_type_;
+        all_blocks_.insert(std::next(it), std::move(right));
+      }
       break;  // done
     }
 

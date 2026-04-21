@@ -29,10 +29,8 @@ namespace allocation {
 class VMMAutoGrowthBestFitMultiPoolAllocatorV2 : public Allocator {
  public:
   VMMAutoGrowthBestFitMultiPoolAllocatorV2(
-      const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>&
-          small_allocator,
-      const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>&
-          large_allocator,
+      const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>& small_allocator,
+      const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>& large_allocator,
       size_t small_allocation_threshold,
       const GPUPlace& place);
 
@@ -42,7 +40,7 @@ class VMMAutoGrowthBestFitMultiPoolAllocatorV2 : public Allocator {
   bool SetBlockRemapEvent(void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
                           gpuStream_t stream,
-                          gpuEvent_t event
+                          std::shared_ptr<CudaEventGuard> event
 #else
                           void* stream,
                           void* event
@@ -52,12 +50,12 @@ class VMMAutoGrowthBestFitMultiPoolAllocatorV2 : public Allocator {
   [[noreturn]] void ExportForIpc();
   [[noreturn]] void ImportFromIpc();
 
-  const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>&
-  small_allocator() const {
+  const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>& small_allocator()
+      const {
     return small_allocator_;
   }
-  const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>&
-  large_allocator() const {
+  const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>& large_allocator()
+      const {
     return large_allocator_;
   }
 

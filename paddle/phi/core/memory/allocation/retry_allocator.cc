@@ -76,29 +76,23 @@ phi::Allocation* RetryAllocator::AllocateImpl(size_t size) {
                << " bytes before offload callback.";
       return remapped > 0;
     } catch (const std::exception& e) {
-      VLOG(10) << "Compact on " << place_ << " failed with exception: "
-               << e.what();
+      VLOG(10) << "Compact on " << place_
+               << " failed with exception: " << e.what();
       return false;
     } catch (...) {
-      VLOG(10) << "Compact on " << place_
-               << " failed with unknown exception.";
+      VLOG(10) << "Compact on " << place_ << " failed with unknown exception.";
       return false;
     }
   };
   // In fact, we can unify the code of allocation success and failure
   // But it would add lock even when allocation success at the first time
   try {
+    // StreamSafeCUDAAllocator already does Release + Compact(remap) on
+    // first OOM, so alloc_func() here represents a fully-retried attempt.
+    // If it still fails, go straight to offload (if enabled).
     try {
       return alloc_func();
     } catch (BadAlloc&) {
-      VLOG(10) << "Allocation " << size << " on " << place_
-               << " failed, try remap before offload.";
-      if (try_remap()) {
-        try {
-          return alloc_func();
-        } catch (BadAlloc&) {
-        }
-      }
     }
 
     if (FLAGS_offload_retry_times > 0 && g_oom_callback != nullptr) {

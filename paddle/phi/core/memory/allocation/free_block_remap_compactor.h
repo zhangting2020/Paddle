@@ -28,14 +28,18 @@ class FreeBlockRemapCompactor {
  public:
   FreeBlockRemapCompactor(
       const std::shared_ptr<CUDAVirtualMemAllocatorV2>& vmm_allocator,
-      PoolType pool_type)
-      : vmm_allocator_(vmm_allocator), pool_type_(pool_type) {}
+      PoolType pool_type,
+      std::list<DecoratedAllocationPtr>* underlying_allocations)
+      : vmm_allocator_(vmm_allocator),
+        pool_type_(pool_type),
+        underlying_allocations_(underlying_allocations) {}
 
   size_t Compact(std::list<BlockV2>* blocks);
 
  private:
   std::shared_ptr<CUDAVirtualMemAllocatorV2> vmm_allocator_;
   PoolType pool_type_;
+  std::list<DecoratedAllocationPtr>* underlying_allocations_;
 };
 
 }  // namespace allocation

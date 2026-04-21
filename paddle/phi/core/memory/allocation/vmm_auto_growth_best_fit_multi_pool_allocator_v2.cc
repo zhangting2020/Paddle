@@ -42,10 +42,8 @@ void EmplaceOrEnforce(Map* map,
 
 VMMAutoGrowthBestFitMultiPoolAllocatorV2::
     VMMAutoGrowthBestFitMultiPoolAllocatorV2(
-        const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>&
-            small_allocator,
-        const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>&
-            large_allocator,
+        const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>& small_allocator,
+        const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>& large_allocator,
         size_t small_allocation_threshold,
         const GPUPlace& place)
     : small_allocator_(small_allocator),
@@ -76,10 +74,10 @@ size_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::CompactImpl(
   PADDLE_ENFORCE_EQ(
       place,
       place_,
-      common::errors::InvalidArgument(
-          "VMM multipool V2 compact only supports its own place %s, but got %s.",
-          place_,
-          place));
+      common::errors::InvalidArgument("VMM multipool V2 compact only supports "
+                                      "its own place %s, but got %s.",
+                                      place_,
+                                      place));
   return small_allocator_->Compact(place_) + large_allocator_->Compact(place_);
 }
 
@@ -109,7 +107,7 @@ bool VMMAutoGrowthBestFitMultiPoolAllocatorV2::SetBlockRemapEvent(
     void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
     gpuStream_t stream,
-    gpuEvent_t event
+    std::shared_ptr<CudaEventGuard> event
 #else
     void* stream,
     void* event

@@ -42,7 +42,7 @@ void AppendGapOrFreeSegment(std::vector<BlockV2>* segments,
                             PoolType pool_type,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
                             gpuStream_t last_use_stream,
-                            gpuEvent_t remap_safe_event
+                            std::shared_ptr<CudaEventGuard> remap_safe_event
 #endif
 ) {
   if (size == 0) {
@@ -81,11 +81,24 @@ bool IsRemapSafe(BlockV2* block) {
     return false;
   }
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-  // After the cudaDeviceSynchronize at the top of Compact(), all events are
-  // destroyed and set to nullptr.  This check is a safety net for any blocks
-  // that may still have an event (shouldn't happen in practice).
-  if (block->remap_safe_event_ != nullptr) {
-    return false;
+  // Per-event query: no cudaDeviceSynchronize needed.
+  // If the block has a remap_safe_event_, query whether the GPU work
+  // that last used this memory has completed.  Only remap blocks whose
+  // events are done; skip those still in flight.
+  if (block->remap_safe_event_) {
+#ifdef PADDLE_WITH_CUDA
+    gpuError_t err = cudaEventQuery(block->remap_safe_event_->event);
+#else
+    gpuError_t err = hipEventQuery(block->remap_safe_event_->event);
+#endif
+    if (err == gpuSuccess) {
+      // Event completed — release the shared_ptr (may destroy the event
+      // if this was the last holder).
+      block->remap_safe_event_.reset();
+    } else {
+      // GPU work still pending on this block's memory — not safe to remap.
+      return false;
+    }
   }
 #endif
   return true;
@@ -213,28 +226,15 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
   bool logged_first_candidate = false;
   const size_t handle_size = vmm_allocator_->handle_size();
 
+  LOG(INFO) << "VMM V2 compactor: entering Compact, blocks=" << blocks->size()
+            << " handle_size=" << handle_size;
+
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-  // Compact is a last-resort OOM path.  Synchronize the device so that
-  // all pending GPU work finishes.  This makes every FREE block's
-  // remap_safe_event_ irrelevant — we can destroy them all up-front and
-  // skip per-block cudaEventQuery calls, which avoids SIGSEGV inside the
-  // CUDA driver when the context is corrupted under extreme memory pressure.
-  {
-    gpuError_t sync_err = cudaDeviceSynchronize();
-    if (sync_err != cudaSuccess) {
-      VLOG(0) << "VMM V2 compactor: cudaDeviceSynchronize failed with "
-              << sync_err << ", bailing out of Compact";
-      // Clear the sticky error so subsequent CUDA calls don't chain-fail.
-      cudaGetLastError();
-      return 0;
-    }
-    for (auto& block : *blocks) {
-      if (block.remap_safe_event_ != nullptr) {
-        cudaEventDestroy(block.remap_safe_event_);
-        block.remap_safe_event_ = nullptr;
-      }
-    }
-  }
+  // Clear any sticky CUDA error before we start.
+  cudaGetLastError();
+  // No cudaDeviceSynchronize here — IsRemapSafe uses per-event
+  // cudaEventQuery to check individual blocks, avoiding a full
+  // pipeline stall.
 #endif
 
   // The entire compact is wrapped in try-catch.  If ANY CUDA API call
@@ -243,13 +243,17 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
   // list stays consistent for subsequent FreeImpl/TryMerge calls.
   try {
     // ---- Phase 1: Unmap fully-covered handles from FREE blocks ----
-    // This modifies the block list (replacing FREE blocks with GAP+partial-
-    // FREE segments).  If Phase 2 fails, we must rollback via gap-scatter.
+    LOG(INFO) << "VMM V2 compactor: Phase 1 - scanning FREE blocks for "
+              << "fully-covered handles";
+    size_t free_block_count = 0, safe_block_count = 0;
+    size_t fully_covered_count = 0, partial_count = 0;
     for (auto it = blocks->begin(); it != blocks->end();) {
       auto current = it++;
+      if (current->type_ == BlockType::kFree) free_block_count++;
       if (!IsRemapSafe(&(*current))) {
         continue;
       }
+      safe_block_count++;
 
       std::vector<BlockV2> replacement_segments;
       size_t block_offset = 0;
@@ -259,6 +263,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
             reinterpret_cast<uint8_t*>(current->ptr_) + block_offset;
         block_offset += part.len;
         if (IsFullyCoveredHandle(part)) {
+          fully_covered_count++;
           if (!logged_first_candidate) {
             VLOG(0) << "First remap candidate pool="
                     << static_cast<int>(pool_type_)
@@ -310,6 +315,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
 #endif
           );
           continue;
+        } else {
+          partial_count++;
         }
 
         AppendGapOrFreeSegment(&replacement_segments,
@@ -337,13 +344,23 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
       blocks->erase(current);
     }
 
+    LOG(INFO) << "VMM V2 compactor pool=" << static_cast<int>(pool_type_)
+              << " Phase 1 stats: free_blocks=" << free_block_count
+              << " safe_blocks=" << safe_block_count
+              << " fully_covered_parts=" << fully_covered_count
+              << " partial_parts=" << partial_count;
     if (remapped_handles.empty()) {
+      LOG(INFO) << "VMM V2 compactor: Phase 1 done, no handles to remap"
+                << " (safe_blocks=" << safe_block_count
+                << " fully_covered=" << fully_covered_count << ")";
       return 0;
     }
 
     MergeAdjacentGaps(blocks);
 
     const size_t total_remapped = remapped_handles.size() * handle_size;
+    LOG(INFO) << "VMM V2 compactor: Phase 1 done, " << remapped_handles.size()
+              << " handles (" << total_remapped << " bytes) unmapped";
 
     // -------------------------------------------------------------------
     // Compute the real tail VA from the block list.
@@ -413,6 +430,20 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
       }
       vmm_allocator_->AdvanceTailOffset(total_remapped);
 
+      // Register a synthetic allocation so FreeIdleChunks can release
+      // these handles when the tail block becomes entirely free.
+      HandleLayout tail_layout;
+      for (size_t i = 0; i < remapped_metas.size(); ++i) {
+        tail_layout.push_back(std::make_shared<VmmHandleMeta>(
+            VmmHandleMeta{tail_va + i * handle_size,
+                          handle_size,
+                          remapped_handles[i],
+                          vmm_allocator_->place().device}));
+      }
+      auto synth = vmm_allocator_->CreateSyntheticAllocation(
+          tail_va, total_remapped, tail_layout);
+      underlying_allocations_->emplace_back(std::move(synth));
+
       BlockV2 tail_free = CreateTailFreeBlock(
           tail_va, total_remapped, pool_type_, remapped_metas, handle_size);
 
@@ -454,6 +485,19 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
         rollback();
         return 0;
       }
+
+      // Register synthetic allocation for gap-remapped handles.
+      HandleLayout gap_layout;
+      for (size_t i = 0; i < remapped_metas.size(); ++i) {
+        gap_layout.push_back(std::make_shared<VmmHandleMeta>(
+            VmmHandleMeta{gap_va + i * handle_size,
+                          handle_size,
+                          remapped_handles[i],
+                          vmm_allocator_->place().device}));
+      }
+      auto synth = vmm_allocator_->CreateSyntheticAllocation(
+          gap_va, total_remapped, gap_layout);
+      underlying_allocations_->emplace_back(std::move(synth));
 
       BlockV2 free_block = CreateTailFreeBlock(
           gap_va, total_remapped, pool_type_, remapped_metas, handle_size);
@@ -531,7 +575,19 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
         return 0;
       }
 
+      // Register synthetic allocation for this gap chunk.
+      HandleLayout chunk_layout;
+      for (size_t i = 0; i < to_fill; ++i) {
+        chunk_layout.push_back(std::make_shared<VmmHandleMeta>(
+            VmmHandleMeta{dst + i * handle_size,
+                          handle_size,
+                          chunk[i],
+                          vmm_allocator_->place().device}));
+      }
       const size_t filled_bytes = to_fill * handle_size;
+      auto synth = vmm_allocator_->CreateSyntheticAllocation(
+          dst, filled_bytes, chunk_layout);
+      underlying_allocations_->emplace_back(std::move(synth));
       it->type_ = BlockType::kFree;
       it->parts_.clear();
       for (size_t i = 0; i < to_fill; ++i) {

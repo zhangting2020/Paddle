@@ -69,13 +69,11 @@ void TrySetVmmV2RemapEvent(StreamSafeCUDAAllocator* allocator,
   PADDLE_ENFORCE_GPU_SUCCESS(
       hipEventRecord(event, allocation->GetOwningStream()));
 #endif
+  auto guard = std::make_shared<CudaEventGuard>(event);
   if (!vmm->SetBlockRemapEvent(
-          allocation->ptr(), allocation->GetOwningStream(), event)) {
-#ifdef PADDLE_WITH_CUDA
-    PADDLE_ENFORCE_GPU_SUCCESS(cudaEventDestroy(event));
-#else
-    PADDLE_ENFORCE_GPU_SUCCESS(hipEventDestroy(event));
-#endif
+          allocation->ptr(), allocation->GetOwningStream(), std::move(guard))) {
+    // SetBlockRemapEvent failed (block not found); the shared_ptr destructor
+    // will call cudaEventDestroy automatically — no manual cleanup needed.
   }
 }
 
@@ -262,10 +260,27 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
     ReleaseImpl(place_);
     try {
       underlying_allocation = underlying_allocator_->Allocate(size);
-    } catch (...) {
-      VLOG(3)
-          << "Still allocation failed after release memory from all streams";
-      throw;
+    } catch (BadAlloc&) {
+      // Release alone was not enough — try remap defragmentation.
+      // Compact unmap+remaps scattered FREE handles into a contiguous
+      // block without releasing physical memory, then retry immediately.
+      VLOG(3) << "Still allocation failed after release, trying compact "
+                 "(remap defrag)";
+      size_t compacted = CompactImpl(place_);
+      if (compacted > 0) {
+        VLOG(3) << "Compact returned " << compacted
+                << " bytes, retrying allocation";
+        try {
+          underlying_allocation = underlying_allocator_->Allocate(size);
+        } catch (...) {
+          VLOG(3) << "Allocation failed even after compact";
+          throw;
+        }
+      } else {
+        VLOG(3) << "Compact returned 0, no defrag possible";
+        PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+            "Allocation of %zu bytes failed after release + compact.", size));
+      }
     }
   } catch (...) {
     throw;

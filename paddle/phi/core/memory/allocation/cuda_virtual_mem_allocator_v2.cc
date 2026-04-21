@@ -288,6 +288,19 @@ void CUDAVirtualMemAllocatorV2::UnregisterHandleLayout(void* ptr) {
   allocation_layout_map_.erase(ptr);
 }
 
+DecoratedAllocationPtr CUDAVirtualMemAllocatorV2::CreateSyntheticAllocation(
+    VmmDevicePtr ptr, size_t size, const HandleLayout& layout) {
+  RegisterHandleLayout(reinterpret_cast<void*>(ptr), layout);
+  auto* alloc = new Allocation(reinterpret_cast<void*>(ptr), size, place_);
+  // Use a custom deleter that calls FreeImpl directly, since the
+  // synthetic allocation bypasses the normal Allocate() path and
+  // cannot use RegisterDecoratedAllocator (which is private).
+  CUDAVirtualMemAllocatorV2* self = this;
+  return DecoratedAllocationPtr(alloc, [self](phi::Allocation* a) {
+    self->FreeImpl(static_cast<Allocation*>(a));
+  });
+}
+
 }  // namespace allocation
 }  // namespace memory
 }  // namespace paddle
