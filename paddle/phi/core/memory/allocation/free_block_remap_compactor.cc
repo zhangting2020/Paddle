@@ -75,6 +75,12 @@ void AppendGapOrFreeSegment(std::vector<BlockV2>* segments,
 }
 
 bool IsFullyCoveredHandle(const BlockPartV2& part) {
+  // Skip handles that were already remapped by a previous compact — their
+  // physical memory is owned by a synthetic allocation at a different VA.
+  // Attempting to remap them again would use a stale or released handle.
+  if (part.handle->remapped) {
+    return false;
+  }
   return part.handle_rel_off == 0 && part.len == part.handle->size;
 }
 
