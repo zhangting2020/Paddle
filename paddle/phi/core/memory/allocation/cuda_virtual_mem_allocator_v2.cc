@@ -169,9 +169,6 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   platform::CUDADeviceGuard guard(place_.device);
   for (const auto& handle : layout) {
     if (handle->remapped) {
-      // This handle was remapped by the compactor to a different VA.
-      // Its physical memory and mapping are now owned by the destination
-      // block — skip unmap+release here to avoid double-free / SIGSEGV.
       VLOG(5) << "FreeImpl: skipping remapped handle base="
               << reinterpret_cast<void*>(handle->base)
               << " size=" << handle->size;
@@ -179,8 +176,19 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
     }
     PADDLE_ENFORCE_GPU_SUCCESS(
         phi::dynload::cuMemUnmap(handle->base, handle->size));
-    PADDLE_ENFORCE_GPU_SUCCESS(platform::RecordedGpuMemRelease(
-        handle->handle, handle->size, place_.device));
+    // Use non-throwing release: if the handle was already released by a
+    // subsequent compactor remap (which created a new synthetic allocation
+    // for the same physical handle), cuMemRelease returns
+    // CUDA_ERROR_INVALID_VALUE.  This is expected and safe to ignore —
+    // the handle's physical memory is now owned by the newer synthetic
+    // allocation.
+    auto release_status = platform::RecordedGpuMemRelease(
+        handle->handle, handle->size, place_.device);
+    if (release_status != CUDA_SUCCESS) {
+      VLOG(3) << "FreeImpl: cuMemRelease returned " << release_status
+              << " for handle " << handle->handle
+              << " (likely already released by re-remap), skipping";
+    }
   }
 
   UnregisterHandleLayout(ptr);

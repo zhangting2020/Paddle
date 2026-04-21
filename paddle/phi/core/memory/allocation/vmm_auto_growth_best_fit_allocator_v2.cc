@@ -261,6 +261,21 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   delete allocation;
 }
 
+void VMMAutoGrowthBestFitAllocatorV2::GetFreeBlockStats(size_t* total_free,
+                                                        size_t* max_free) {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  size_t total = 0;
+  for (const auto& entry : free_blocks_) {
+    total += entry.first.first;
+  }
+  size_t max_sz = 0;
+  if (!free_blocks_.empty()) {
+    max_sz = free_blocks_.rbegin()->first.first;
+  }
+  *total_free = total;
+  *max_free = max_sz;
+}
+
 bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
     void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)

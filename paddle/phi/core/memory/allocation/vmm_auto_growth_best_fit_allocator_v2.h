@@ -48,6 +48,10 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   PoolType pool_type() const { return pool_type_; }
   size_t alignment() const { return alignment_; }
 
+  // Query aggregate free-block statistics for OOM dispatch decisions.
+  // total_free = sum of all FREE block sizes, max_free = largest FREE block.
+  void GetFreeBlockStats(size_t* total_free, size_t* max_free);
+
   bool SetBlockRemapEvent(void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
                           gpuStream_t stream,

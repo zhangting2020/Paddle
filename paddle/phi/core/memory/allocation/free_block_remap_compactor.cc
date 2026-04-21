@@ -14,6 +14,8 @@
 
 #include "paddle/phi/core/memory/allocation/free_block_remap_compactor.h"
 
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -344,11 +346,43 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
       blocks->erase(current);
     }
 
+    // Log per-handle coverage to diagnose why handles are partial.
+    // A handle is "fully covered" when a single part spans the entire
+    // handle (off=0, len=handle->size).  Partial handles are split
+    // between ACTIVE and FREE blocks — the ACTIVE portion prevents remap.
+    size_t event_blocked_count = 0;
+    for (auto& block : *blocks) {
+      if (block.type_ == BlockType::kFree && !block.ipc_exported_ &&
+          block.remap_safe_event_) {
+        event_blocked_count++;
+      }
+    }
     LOG(INFO) << "VMM V2 compactor pool=" << static_cast<int>(pool_type_)
               << " Phase 1 stats: free_blocks=" << free_block_count
               << " safe_blocks=" << safe_block_count
+              << " event_blocked=" << event_blocked_count
               << " fully_covered_parts=" << fully_covered_count
               << " partial_parts=" << partial_count;
+    // Log details of first few partial parts for debugging.
+    if (partial_count > 0 && fully_covered_count == 0) {
+      size_t logged = 0;
+      for (auto& block : *blocks) {
+        if (block.type_ != BlockType::kFree || logged >= 5) break;
+        for (const auto& part : block.parts_) {
+          if (!IsFullyCoveredHandle(part) && logged < 5) {
+            LOG(INFO) << "  partial part: block_ptr=" << block.ptr_
+                      << " block_size=" << block.size_ << " handle_base="
+                      << reinterpret_cast<void*>(part.handle->base)
+                      << " handle_size=" << part.handle->size
+                      << " part_off=" << part.handle_rel_off
+                      << " part_len=" << part.len
+                      << " coverage=" << (part.len * 100 / part.handle->size)
+                      << "%";
+            logged++;
+          }
+        }
+      }
+    }
     if (remapped_handles.empty()) {
       LOG(INFO) << "VMM V2 compactor: Phase 1 done, no handles to remap"
                 << " (safe_blocks=" << safe_block_count
@@ -432,6 +466,10 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
 
       // Register a synthetic allocation so FreeIdleChunks can release
       // these handles when the tail block becomes entirely free.
+      // Creates NEW VmmHandleMeta objects with the new VA as base and
+      // remapped=false, so that FreeImpl correctly unmaps+releases them.
+      // The original allocation's layout retains the old metas with
+      // remapped=true (set in Phase 1), so FreeImpl skips them.
       HandleLayout tail_layout;
       for (size_t i = 0; i < remapped_metas.size(); ++i) {
         tail_layout.push_back(std::make_shared<VmmHandleMeta>(

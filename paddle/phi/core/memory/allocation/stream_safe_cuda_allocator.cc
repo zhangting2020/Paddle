@@ -257,29 +257,58 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
     underlying_allocation = underlying_allocator_->Allocate(size);
   } catch (BadAlloc&) {
     VLOG(4) << "Allocation failed when allocating " << size << " bytes";
-    ReleaseImpl(place_);
+    // Step 1: reclaim cross-stream pending frees.
+    {
+      std::lock_guard<SpinLock> lock_guard(allocator_map_lock_);
+      for (auto* alloc : allocator_map_[place_]) {
+        alloc->ProcessUnfreedAllocations();
+      }
+    }
     try {
       underlying_allocation = underlying_allocator_->Allocate(size);
     } catch (BadAlloc&) {
-      // Release alone was not enough — try remap defragmentation.
-      // Compact unmap+remaps scattered FREE handles into a contiguous
-      // block without releasing physical memory, then retry immediately.
-      VLOG(3) << "Still allocation failed after release, trying compact "
-                 "(remap defrag)";
-      size_t compacted = CompactImpl(place_);
-      if (compacted > 0) {
-        VLOG(3) << "Compact returned " << compacted
-                << " bytes, retrying allocation";
+      // Step 2: smart dispatch — remap for fragmentation, release otherwise.
+      auto* vmm = GetVmmV2MultiPoolAllocator(underlying_allocator_);
+      bool tried_compact = false;
+      if (vmm) {
+        size_t total_free = 0, max_free = 0;
+        vmm->GetFreeBlockStats(&total_free, &max_free);
+        VLOG(3) << "OOM dispatch: requested=" << size
+                << " total_free=" << total_free << " max_free=" << max_free;
+        if (total_free >= size && max_free < size) {
+          // Fragmentation: total free is enough but largest block is too small.
+          // Remap to defragment VA layout without releasing physical memory.
+          VLOG(3) << "OOM dispatch: fragmentation detected, trying compact";
+          size_t compacted = CompactImpl(place_);
+          tried_compact = true;
+          VLOG(3) << "OOM retry: compact returned " << compacted << " bytes";
+          try {
+            underlying_allocation = underlying_allocator_->Allocate(size);
+          } catch (BadAlloc&) {
+            VLOG(3) << "Allocation still failed after compact, "
+                    << "falling back to release";
+          }
+        } else {
+          VLOG(3) << "OOM dispatch: not fragmentation "
+                  << "(total_free < requested or max_free >= requested), "
+                  << "skipping compact, trying release";
+        }
+      }
+      if (!underlying_allocation) {
+        // Fallback: release physical memory (FreeIdleChunks).
+        uint64_t released = ReleaseImpl(place_);
+        VLOG(3) << "OOM retry: released " << released << " bytes";
         try {
           underlying_allocation = underlying_allocator_->Allocate(size);
-        } catch (...) {
-          VLOG(3) << "Allocation failed even after compact";
-          throw;
+        } catch (BadAlloc&) {
+          VLOG(3) << "Allocation failed after release";
+          PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+              "Allocation of %zu bytes failed after "
+              "%s and release (%lu bytes freed).",
+              size,
+              tried_compact ? "compact + release" : "release",
+              released));
         }
-      } else {
-        VLOG(3) << "Compact returned 0, no defrag possible";
-        PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
-            "Allocation of %zu bytes failed after release + compact.", size));
       }
     }
   } catch (...) {
@@ -335,12 +364,11 @@ size_t StreamSafeCUDAAllocator::CompactImpl(const Place& place) {
   VLOG(4) << "enter StreamSafeCUDAAllocator compact!!";
   std::vector<StreamSafeCUDAAllocator*>& allocators = allocator_map_[place];
 
-  // Release idle chunks first so that the compactor can reclaim tail VA.
-  // Without this step the tail may still be mapped by idle underlying
-  // allocations, forcing the compactor into gap-scatter which cannot
-  // consolidate fragmented free blocks.
+  // Reclaim cross-stream pending frees so that more blocks become FREE
+  // and eligible for remap.  No Release (FreeIdleChunks) here — we keep
+  // physical memory allocated and only reorganize the VA layout via remap.
   for (StreamSafeCUDAAllocator* allocator : allocators) {
-    allocator->ProcessUnfreedAllocationsAndRelease();
+    allocator->ProcessUnfreedAllocations();
   }
 
   size_t compact_free_size = 0;

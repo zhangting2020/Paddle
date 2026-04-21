@@ -103,6 +103,15 @@ void VMMAutoGrowthBestFitMultiPoolAllocatorV2::FreeImpl(
   route.allocator->Free(allocation);
 }
 
+void VMMAutoGrowthBestFitMultiPoolAllocatorV2::GetFreeBlockStats(
+    size_t* total_free, size_t* max_free) {
+  size_t s_total = 0, s_max = 0, l_total = 0, l_max = 0;
+  small_allocator_->GetFreeBlockStats(&s_total, &s_max);
+  large_allocator_->GetFreeBlockStats(&l_total, &l_max);
+  *total_free = s_total + l_total;
+  *max_free = std::max(s_max, l_max);
+}
+
 bool VMMAutoGrowthBestFitMultiPoolAllocatorV2::SetBlockRemapEvent(
     void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
