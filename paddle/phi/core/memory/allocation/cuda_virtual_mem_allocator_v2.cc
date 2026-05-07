@@ -128,6 +128,14 @@ phi::Allocation* CUDAVirtualMemAllocatorV2::AllocateImpl(size_t size) {
         phi::dynload::cuMemUnmap(m->base, m->size);
         platform::RecordedGpuMemRelease(m->handle, m->size, place_.device);
       }
+      if (ce == CUDA_ERROR_OUT_OF_MEMORY) {
+        PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+            "cuMemCreate failed: out of GPU memory at handle %zu/%zu "
+            "(handle_size=%zu).",
+            i,
+            num_handles,
+            handle_size_));
+      }
       PADDLE_ENFORCE_GPU_SUCCESS(ce);
     }
     auto me = phi::dynload::cuMemMap(

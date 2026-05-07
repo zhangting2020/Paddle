@@ -267,9 +267,11 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
     try {
       underlying_allocation = underlying_allocator_->Allocate(size);
     } catch (BadAlloc&) {
-      // Step 2: smart dispatch — remap for fragmentation, release otherwise.
+      // Step 2: smart dispatch — remap for fragmentation only.
+      // During training, NEVER release physical memory in OOM retry path.
+      // Release causes reserved-pool shrink → regrow thrashing → more OOMs.
+      // Release is reserved for explicit empty_cache() calls only.
       auto* vmm = GetVmmV2MultiPoolAllocator(underlying_allocator_);
-      bool tried_compact = false;
       if (vmm) {
         size_t total_free = 0, max_free = 0;
         vmm->GetFreeBlockStats(&total_free, &max_free);
@@ -280,35 +282,32 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
           // Remap to defragment VA layout without releasing physical memory.
           VLOG(3) << "OOM dispatch: fragmentation detected, trying compact";
           size_t compacted = CompactImpl(place_);
-          tried_compact = true;
           VLOG(3) << "OOM retry: compact returned " << compacted << " bytes";
           try {
             underlying_allocation = underlying_allocator_->Allocate(size);
           } catch (BadAlloc&) {
-            VLOG(3) << "Allocation still failed after compact, "
-                    << "falling back to release";
+            VLOG(3) << "Allocation still failed after compact";
+            PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+                "Allocation of %zu bytes failed after compact "
+                "(remap defrag, %zu bytes compacted).",
+                size,
+                compacted));
           }
         } else {
           VLOG(3) << "OOM dispatch: not fragmentation "
                   << "(total_free < requested or max_free >= requested), "
-                  << "skipping compact, trying release";
-        }
-      }
-      if (!underlying_allocation) {
-        // Fallback: release physical memory (FreeIdleChunks).
-        uint64_t released = ReleaseImpl(place_);
-        VLOG(3) << "OOM retry: released " << released << " bytes";
-        try {
-          underlying_allocation = underlying_allocator_->Allocate(size);
-        } catch (BadAlloc&) {
-          VLOG(3) << "Allocation failed after release";
+                  << "no action available";
           PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
-              "Allocation of %zu bytes failed after "
-              "%s and release (%lu bytes freed).",
+              "Allocation of %zu bytes failed. "
+              "total_free=%zu, max_free=%zu (physical memory exhausted).",
               size,
-              tried_compact ? "compact + release" : "release",
-              released));
+              total_free,
+              max_free));
         }
+      } else {
+        // Non-VMM-V2 allocator: no compact/remap available.
+        PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+            "Allocation of %zu bytes failed.", size));
       }
     }
   } catch (...) {
