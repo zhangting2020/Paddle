@@ -19,7 +19,6 @@
 
 COMMON_DECLARE_int64(offload_retry_times);
 COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
-COMMON_DECLARE_bool(use_vmm_auto_growth_best_fit_allocator_v2);
 
 namespace paddle::memory::allocation {
 
@@ -66,33 +65,40 @@ phi::Allocation* RetryAllocator::AllocateImpl(size_t size) {
     return underlying_allocator_->Allocate(size).release();
   };
   auto try_remap = [&, this]() -> bool {
-    if (!FLAGS_vmm_v2_remap_on_oom ||
-        !FLAGS_use_vmm_auto_growth_best_fit_allocator_v2) {
+    if (!FLAGS_vmm_v2_remap_on_oom) {
       return false;
     }
     try {
-      const size_t remapped = underlying_allocator_->Compact(place_);
-      VLOG(10) << "Compact on " << place_ << " remapped " << remapped
-               << " bytes before offload callback.";
+      const size_t remapped = underlying_allocator_->Compact(place_, size);
+      VLOG(4) << "RetryAllocator: Compact returned " << remapped << " bytes";
       return remapped > 0;
     } catch (const std::exception& e) {
-      VLOG(10) << "Compact on " << place_
-               << " failed with exception: " << e.what();
+      VLOG(4) << "Compact on " << place_
+              << " failed with exception: " << e.what();
       return false;
     } catch (...) {
-      VLOG(10) << "Compact on " << place_ << " failed with unknown exception.";
+      VLOG(4) << "Compact on " << place_ << " failed with unknown exception.";
       return false;
     }
   };
   // In fact, we can unify the code of allocation success and failure
   // But it would add lock even when allocation success at the first time
   try {
-    // StreamSafeCUDAAllocator already does Release + Compact(remap) on
-    // first OOM, so alloc_func() here represents a fully-retried attempt.
-    // If it still fails, go straight to offload (if enabled).
+    // StreamSafeCUDAAllocator reclaims cross-stream pending frees on first
+    // OOM.  If that retry also fails, BadAlloc propagates here.  We then
+    // try compact (remap) and offload before giving up.
     try {
       return alloc_func();
     } catch (BadAlloc&) {
+    }
+
+    // Try compact (remap) unconditionally first — this defragments VA
+    // without releasing physical memory or needing offload.
+    if (try_remap()) {
+      try {
+        return alloc_func();
+      } catch (BadAlloc&) {
+      }
     }
 
     if (FLAGS_offload_retry_times > 0 && g_oom_callback != nullptr) {

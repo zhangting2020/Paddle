@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <iterator>
+#include <unordered_set>
 
 #include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
@@ -226,15 +227,68 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   return new Allocation(it->ptr_, it->ptr_, it->size_, place_);
 }
 
-size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place) {
-  PADDLE_ENFORCE_EQ(
-      place,
-      place_,
-      common::errors::InvalidArgument(
-          "VMM best-fit V2 compact only supports its own place %s, but got %s.",
-          place_,
-          place));
+size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place UNUSED,
+                                                    size_t requested_size) {
   std::lock_guard<SpinLock> guard(spinlock_);
+
+  size_t total_free = 0;
+  size_t max_free = 0;
+  for (const auto& blk : all_blocks_) {
+    if (blk.type_ == BlockType::kFree) {
+      total_free += blk.size_;
+      max_free = std::max(max_free, blk.size_);
+    }
+  }
+
+  if (requested_size > 0) {
+    if (total_free < requested_size) {
+      VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+              << " compact skip: total_free=" << total_free
+              << " < requested=" << requested_size;
+      return 0;
+    }
+    if (max_free >= requested_size) {
+      VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+              << " compact skip: max_free=" << max_free
+              << " >= requested=" << requested_size;
+      return 0;
+    }
+  }
+
+  std::unordered_set<VmmHandleMeta*> active_handles;
+  for (const auto& blk : all_blocks_) {
+    if (blk.type_ == BlockType::kActive) {
+      for (const auto& part : blk.parts_) {
+        active_handles.insert(part.handle.get());
+      }
+    }
+  }
+
+  size_t releasable_handles = 0;
+  for (const auto& blk : all_blocks_) {
+    if (blk.type_ != BlockType::kFree) continue;
+    for (const auto& part : blk.parts_) {
+      if (part.handle_rel_off == 0 && part.len == part.handle->size &&
+          active_handles.find(part.handle.get()) == active_handles.end()) {
+        ++releasable_handles;
+      }
+    }
+  }
+
+  if (releasable_handles == 0) {
+    VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+            << " compact skip: no fully-covered releasable handles"
+            << " (total_free=" << total_free << " max_free=" << max_free
+            << " requested=" << requested_size << ")";
+    return 0;
+  }
+
+  VLOG(3) << "VMM V2 pool " << static_cast<int>(pool_type_)
+          << " compact: total_free=" << total_free << " max_free=" << max_free
+          << " requested=" << requested_size
+          << " releasable_handles=" << releasable_handles
+          << ", proceeding with compaction";
+
   FreeBlockRemapCompactor compactor(
       underlying_allocator_, pool_type_, &underlying_allocations_);
   const size_t remapped = compactor.Compact(&all_blocks_);

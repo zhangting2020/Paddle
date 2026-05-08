@@ -70,15 +70,9 @@ phi::Allocation* VMMAutoGrowthBestFitMultiPoolAllocatorV2::AllocateImpl(
 }
 
 size_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::CompactImpl(
-    const Place& place) {
-  PADDLE_ENFORCE_EQ(
-      place,
-      place_,
-      common::errors::InvalidArgument("VMM multipool V2 compact only supports "
-                                      "its own place %s, but got %s.",
-                                      place_,
-                                      place));
-  return small_allocator_->Compact(place_) + large_allocator_->Compact(place_);
+    const Place& place, size_t requested_size) {
+  return small_allocator_->Compact(place, requested_size) +
+         large_allocator_->Compact(place, requested_size);
 }
 
 void VMMAutoGrowthBestFitMultiPoolAllocatorV2::FreeImpl(
