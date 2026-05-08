@@ -257,16 +257,50 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
     underlying_allocation = underlying_allocator_->Allocate(size);
   } catch (BadAlloc&) {
     VLOG(4) << "Allocation failed when allocating " << size << " bytes";
-    // Reclaim cross-stream pending frees from all stream allocators,
-    // then retry once.  If still OOM, let BadAlloc propagate to
-    // RetryAllocator which handles compact/remap and offload.
+    // Step 1: reclaim cross-stream pending frees.
     {
       std::lock_guard<SpinLock> lock_guard(allocator_map_lock_);
       for (auto* alloc : allocator_map_[place_]) {
         alloc->ProcessUnfreedAllocations();
       }
     }
-    underlying_allocation = underlying_allocator_->Allocate(size);
+    try {
+      underlying_allocation = underlying_allocator_->Allocate(size);
+    } catch (BadAlloc&) {
+      // Step 2: smart dispatch — remap for fragmentation only.
+      // During training, NEVER release physical memory in OOM retry path.
+      auto* vmm = GetVmmV2MultiPoolAllocator(underlying_allocator_);
+      if (vmm) {
+        size_t total_free = 0, max_free = 0;
+        vmm->GetFreeBlockStats(&total_free, &max_free);
+        VLOG(3) << "OOM dispatch: requested=" << size
+                << " total_free=" << total_free << " max_free=" << max_free;
+        if (total_free >= size && max_free < size) {
+          VLOG(3) << "OOM dispatch: fragmentation detected, trying compact";
+          size_t compacted = CompactImpl(place_, size);
+          VLOG(3) << "OOM retry: compact returned " << compacted << " bytes";
+          try {
+            underlying_allocation = underlying_allocator_->Allocate(size);
+          } catch (BadAlloc&) {
+            PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+                "Allocation of %zu bytes failed after compact "
+                "(remap defrag, %zu bytes compacted).",
+                size,
+                compacted));
+          }
+        } else {
+          PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+              "Allocation of %zu bytes failed. "
+              "total_free=%zu, max_free=%zu.",
+              size,
+              total_free,
+              max_free));
+        }
+      } else {
+        PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+            "Allocation of %zu bytes failed.", size));
+      }
+    }
   }
   StreamSafeCUDAAllocation* allocation = new StreamSafeCUDAAllocation(
       static_unique_ptr_cast<Allocation>(std::move(underlying_allocation)),

@@ -71,6 +71,7 @@ phi::Allocation* VMMAutoGrowthBestFitMultiPoolAllocatorV2::AllocateImpl(
 
 size_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::CompactImpl(
     const Place& place, size_t requested_size) {
+  // place is forwarded to each sub-pool which validates independently.
   return small_allocator_->Compact(place, requested_size) +
          large_allocator_->Compact(place, requested_size);
 }

@@ -228,7 +228,8 @@ void RollbackUnmappedHandles(
 
 }  // namespace
 
-size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
+size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
+                                        size_t requested_size) {
   std::vector<VmmAllocHandle> remapped_handles;
   std::vector<std::shared_ptr<VmmHandleMeta>> remapped_metas;
   bool logged_first_candidate = false;
@@ -350,6 +351,18 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks) {
         blocks->insert(insert_pos, std::move(segment));
       }
       blocks->erase(current);
+
+      // Bounded compact: stop collecting handles once we have enough to
+      // satisfy the requested allocation.  This avoids unnecessary remap
+      // work beyond what is needed for this OOM retry.
+      if (requested_size > 0 &&
+          remapped_handles.size() * handle_size >= requested_size) {
+        VLOG(3) << "VMM V2 compactor: bounded exit, collected "
+                << remapped_handles.size() << " handles ("
+                << remapped_handles.size() * handle_size
+                << " bytes) >= requested=" << requested_size;
+        break;
+      }
     }
 
     // Log per-handle coverage to diagnose why handles are partial.

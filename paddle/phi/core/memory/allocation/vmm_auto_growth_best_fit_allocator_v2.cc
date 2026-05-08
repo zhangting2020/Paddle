@@ -227,8 +227,17 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   return new Allocation(it->ptr_, it->ptr_, it->size_, place_);
 }
 
-size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place UNUSED,
+size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
                                                     size_t requested_size) {
+  // Defensive place validation: the call chain
+  // (RetryAllocator → StreamSafe → MultiPool → SinglePool) guarantees
+  // place consistency.  Log a warning on mismatch but do not throw,
+  // since CompactImpl is called inside a try-catch that would silently
+  // swallow the exception and skip compaction.
+  if (UNLIKELY(place != Place(place_))) {
+    LOG(WARNING) << "CompactImpl place mismatch: got " << place.DebugString()
+                 << " but allocator serves " << Place(place_).DebugString();
+  }
   std::lock_guard<SpinLock> guard(spinlock_);
 
   size_t total_free = 0;
@@ -264,10 +273,17 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place UNUSED,
     }
   }
 
+  // Count potentially releasable handles.  Use only static (non-timing)
+  // conditions here: handle not already remapped, fully covered, not active.
+  // Runtime checks (ipc_exported_, remap_safe_event_) are left to the
+  // compactor's IsRemapSafe — they depend on timing and would cause false
+  // negatives in the pre-check (e.g. event completes between pre-check and
+  // compactor execution).
   size_t releasable_handles = 0;
   for (const auto& blk : all_blocks_) {
     if (blk.type_ != BlockType::kFree) continue;
     for (const auto& part : blk.parts_) {
+      if (part.handle->remapped) continue;
       if (part.handle_rel_off == 0 && part.len == part.handle->size &&
           active_handles.find(part.handle.get()) == active_handles.end()) {
         ++releasable_handles;
@@ -277,7 +293,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place UNUSED,
 
   if (releasable_handles == 0) {
     VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
-            << " compact skip: no fully-covered releasable handles"
+            << " compact skip: no releasable handles"
             << " (total_free=" << total_free << " max_free=" << max_free
             << " requested=" << requested_size << ")";
     return 0;
@@ -291,7 +307,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place UNUSED,
 
   FreeBlockRemapCompactor compactor(
       underlying_allocator_, pool_type_, &underlying_allocations_);
-  const size_t remapped = compactor.Compact(&all_blocks_);
+  const size_t remapped = compactor.Compact(&all_blocks_, requested_size);
   if (remapped > 0) {
     RebuildFreeBlockIndex();
   }
