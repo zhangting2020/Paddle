@@ -502,7 +502,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       underlying_allocations_->emplace_back(std::move(synth));
 
       BlockV2 tail_free = CreateTailFreeBlock(
-          tail_va, total_remapped, pool_type_, remapped_metas, handle_size);
+          tail_va, total_remapped, pool_type_, tail_layout, handle_size);
 
       if (!blocks->empty()) {
         auto last = std::prev(blocks->end());
@@ -557,7 +557,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       underlying_allocations_->emplace_back(std::move(synth));
 
       BlockV2 free_block = CreateTailFreeBlock(
-          gap_va, total_remapped, pool_type_, remapped_metas, handle_size);
+          gap_va, total_remapped, pool_type_, gap_layout, handle_size);
       if (gap_it->size_ == total_remapped) {
         *gap_it = std::move(free_block);
       } else {
@@ -648,8 +648,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       it->type_ = BlockType::kFree;
       it->parts_.clear();
       for (size_t i = 0; i < to_fill; ++i) {
-        chunk_metas[i]->base = dst + i * handle_size;
-        it->parts_.push_back(BlockPartV2{chunk_metas[i], 0, handle_size});
+        it->parts_.push_back(BlockPartV2{chunk_layout[i], 0, handle_size});
       }
 
       if (filled_bytes < it->size_) {

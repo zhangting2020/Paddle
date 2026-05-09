@@ -96,15 +96,19 @@ PHI_DEFINE_EXPORTED_bool(
 PHI_DEFINE_EXPORTED_bool(use_virtual_memory_auto_growth,
                          false,
                          "Use VirtualMemoryAutoGrowthBestFitAllocator.");
-PHI_DEFINE_EXPORTED_bool(
-    use_vmm_auto_growth_best_fit_allocator_v2,
-    false,
-    "Use VMMAutoGrowthBestFitAllocatorV2.");
+PHI_DEFINE_EXPORTED_bool(use_vmm_auto_growth_best_fit_allocator_v2,
+                         false,
+                         "Use VMMAutoGrowthBestFitAllocatorV2.");
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_remap_on_oom,
     true,
     "Whether RetryAllocator should try VMM V2 remap before running the OOM "
     "offload callback.");
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_compact_all,
+    false,
+    "When true, VMM V2 compact remaps ALL releasable handles instead of "
+    "stopping once requested_size is satisfied (bounded compact).");
 
 // NOTE(Ruibiao): This FLAGS is just to be compatible with
 // the old single-stream CUDA allocator. It will be removed
@@ -1013,8 +1017,9 @@ class AllocatorFacadePrivate {
   }
 
   std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>
-  CreateVMMAutoGrowthBestFitPoolAllocatorV2(
-      GPUPlace p, size_t handle_size, PoolType pool_type) {
+  CreateVMMAutoGrowthBestFitPoolAllocatorV2(GPUPlace p,
+                                            size_t handle_size,
+                                            PoolType pool_type) {
 #ifdef PADDLE_WITH_CUDA
     auto cuda_allocator =
         std::make_shared<CUDAVirtualMemAllocatorV2>(p, handle_size, pool_type);
@@ -1026,8 +1031,7 @@ class AllocatorFacadePrivate {
 #endif
   }
 
-  std::shared_ptr<Allocator> CreateVMMAutoGrowthBestFitAllocatorV2(
-      GPUPlace p) {
+  std::shared_ptr<Allocator> CreateVMMAutoGrowthBestFitAllocatorV2(GPUPlace p) {
     auto transient_small_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(
         p, kVMMV2TransientHandleSize, PoolType::kSmall);
     auto transient_large_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(

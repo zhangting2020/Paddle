@@ -21,6 +21,9 @@
 #include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
 #include "paddle/phi/core/memory/allocation/free_block_remap_compactor.h"
+
+COMMON_DECLARE_bool(vmm_v2_compact_all);
+
 namespace paddle {
 namespace memory {
 namespace allocation {
@@ -280,14 +283,25 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   // negatives in the pre-check (e.g. event completes between pre-check and
   // compactor execution).
   size_t releasable_handles = 0;
+  size_t remapped_count = 0, partial_count = 0, active_count = 0;
+  size_t total_parts_in_free = 0;
   for (const auto& blk : all_blocks_) {
     if (blk.type_ != BlockType::kFree) continue;
     for (const auto& part : blk.parts_) {
-      if (part.handle->remapped) continue;
-      if (part.handle_rel_off == 0 && part.len == part.handle->size &&
-          active_handles.find(part.handle.get()) == active_handles.end()) {
-        ++releasable_handles;
+      ++total_parts_in_free;
+      if (part.handle->remapped) {
+        ++remapped_count;
+        continue;
       }
+      if (!(part.handle_rel_off == 0 && part.len == part.handle->size)) {
+        ++partial_count;
+        continue;
+      }
+      if (active_handles.find(part.handle.get()) != active_handles.end()) {
+        ++active_count;
+        continue;
+      }
+      ++releasable_handles;
     }
   }
 
@@ -295,7 +309,38 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
     VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
             << " compact skip: no releasable handles"
             << " (total_free=" << total_free << " max_free=" << max_free
-            << " requested=" << requested_size << ")";
+            << " requested=" << requested_size
+            << " parts_in_free=" << total_parts_in_free
+            << " remapped=" << remapped_count << " partial=" << partial_count
+            << " active=" << active_count << ")";
+    // Dump the largest free block's parts for debugging.
+    size_t largest_free_size = 0;
+    const BlockV2* largest_free = nullptr;
+    for (const auto& blk : all_blocks_) {
+      if (blk.type_ == BlockType::kFree && blk.size_ > largest_free_size) {
+        largest_free_size = blk.size_;
+        largest_free = &blk;
+      }
+    }
+    if (largest_free) {
+      VLOG(4) << "  Largest free block: ptr=" << largest_free->ptr_
+              << " size=" << largest_free->size_
+              << " num_parts=" << largest_free->parts_.size();
+      size_t logged = 0;
+      for (const auto& part : largest_free->parts_) {
+        if (logged >= 8) {
+          VLOG(4) << "  ... (" << (largest_free->parts_.size() - logged)
+                  << " more parts)";
+          break;
+        }
+        VLOG(4) << "  part[" << logged << "]: handle_base="
+                << reinterpret_cast<void*>(part.handle->base)
+                << " handle_size=" << part.handle->size
+                << " rel_off=" << part.handle_rel_off << " len=" << part.len
+                << " remapped=" << part.handle->remapped;
+        ++logged;
+      }
+    }
     return 0;
   }
 
@@ -307,7 +352,8 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
 
   FreeBlockRemapCompactor compactor(
       underlying_allocator_, pool_type_, &underlying_allocations_);
-  const size_t remapped = compactor.Compact(&all_blocks_, requested_size);
+  const size_t compact_target = FLAGS_vmm_v2_compact_all ? 0 : requested_size;
+  const size_t remapped = compactor.Compact(&all_blocks_, compact_target);
   if (remapped > 0) {
     RebuildFreeBlockIndex();
   }
