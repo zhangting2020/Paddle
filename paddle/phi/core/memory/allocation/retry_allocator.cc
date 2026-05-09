@@ -84,21 +84,18 @@ phi::Allocation* RetryAllocator::AllocateImpl(size_t size) {
   // In fact, we can unify the code of allocation success and failure
   // But it would add lock even when allocation success at the first time
   try {
-    // StreamSafeCUDAAllocator reclaims cross-stream pending frees on first
-    // OOM.  If that retry also fails, BadAlloc propagates here.  We then
-    // try compact (remap) and offload before giving up.
+    // StreamSafeCUDAAllocator handles the base OOM path first:
+    // reclaim cross-stream pending frees, retry once, and compact on
+    // fragmentation if applicable. If BadAlloc still propagates here,
+    // RetryAllocator acts as the outer recovery layer:
+    //   1. optional offload callback
+    //   2. retry allocation
+    //   3. if offload happened and allocation still fails, try one more
+    //      compact(remap) against the post-offload allocator state
+    //   4. wait-based retry (cv_wait) if enabled
     try {
       return alloc_func();
     } catch (BadAlloc&) {
-    }
-
-    // Try compact (remap) unconditionally first — this defragments VA
-    // without releasing physical memory or needing offload.
-    if (try_remap()) {
-      try {
-        return alloc_func();
-      } catch (BadAlloc&) {
-      }
     }
 
     if (FLAGS_offload_retry_times > 0 && g_oom_callback != nullptr) {
@@ -110,7 +107,22 @@ phi::Allocation* RetryAllocator::AllocateImpl(size_t size) {
           VLOG(10) << "Allocation " << size << " on " << place_
                    << " failed, try offload on retry " << i;
           has_offloaded = (g_oom_callback(place_, size) > 0);
-          if (has_offloaded && try_remap()) {
+
+          if (!has_offloaded) {
+            continue;
+          }
+
+          // Offload may already have created a large enough free block.
+          // Retry allocation first. Only if it still fails do we attempt one
+          // more compact(remap), whose internal pre-checks verify whether the
+          // post-offload state is fragmented (total_free >= requested &&
+          // max_free < requested).
+          try {
+            return alloc_func();
+          } catch (BadAlloc&) {
+          }
+
+          if (try_remap()) {
             try {
               return alloc_func();
             } catch (BadAlloc&) {

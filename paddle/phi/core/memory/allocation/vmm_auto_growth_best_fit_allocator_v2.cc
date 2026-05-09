@@ -134,6 +134,14 @@ void AppendPartsTail(std::vector<BlockPartV2>* dst,
 }
 
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+bool CanMergeRemapRuntimeState(const BlockV2& lhs, const BlockV2& rhs) {
+  // Preserve remap-safe granularity: only merge FREE blocks when their
+  // outstanding-event state is identical. Merging a safe block with a
+  // not-yet-safe block would force the merged result to inherit the stricter
+  // event and unnecessarily block later compaction of the already-safe range.
+  return lhs.remap_safe_event_.get() == rhs.remap_safe_event_.get();
+}
+
 void MergeRemapRuntimeState(BlockV2* keep, BlockV2* remove) {
   if (!remove->remap_safe_event_) {
     return;
@@ -352,7 +360,12 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
 
   FreeBlockRemapCompactor compactor(
       underlying_allocator_, pool_type_, &underlying_allocations_);
-  const size_t compact_target = FLAGS_vmm_v2_compact_all ? 0 : requested_size;
+  size_t compact_target = 0;
+  if (!FLAGS_vmm_v2_compact_all && requested_size > 0) {
+    // Only compact the missing contiguous "gap".  Example: if max_free=3G and
+    // requested=8G, we only need ~5G of additional contiguous space.
+    compact_target = requested_size > max_free ? requested_size - max_free : 0;
+  }
   const size_t remapped = compactor.Compact(&all_blocks_, compact_target);
   if (remapped > 0) {
     RebuildFreeBlockIndex();
@@ -502,6 +515,9 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it) {
   if (it != all_blocks_.begin()) {
     auto prev = std::prev(it);
     if (prev->type_ == BlockType::kFree &&
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+        CanMergeRemapRuntimeState(*prev, *it) &&
+#endif
         reinterpret_cast<uint8_t*>(prev->ptr_) + prev->size_ ==
             reinterpret_cast<uint8_t*>(it->ptr_)) {
       EraseFreeBlock(prev);
@@ -517,6 +533,9 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it) {
 
   auto next = std::next(it);
   if (next != all_blocks_.end() && next->type_ == BlockType::kFree &&
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+      CanMergeRemapRuntimeState(*it, *next) &&
+#endif
       reinterpret_cast<uint8_t*>(it->ptr_) + it->size_ ==
           reinterpret_cast<uint8_t*>(next->ptr_)) {
     EraseFreeBlock(next);

@@ -257,7 +257,8 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
     underlying_allocation = underlying_allocator_->Allocate(size);
   } catch (BadAlloc&) {
     VLOG(4) << "Allocation failed when allocating " << size << " bytes";
-    // Step 1: reclaim cross-stream pending frees.
+    // Base OOM path for all configurations (including retry_time == 0):
+    // Step 1 reclaims cross-stream pending frees before retrying.
     {
       std::lock_guard<SpinLock> lock_guard(allocator_map_lock_);
       for (auto* alloc : allocator_map_[place_]) {
@@ -267,8 +268,14 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
     try {
       underlying_allocation = underlying_allocator_->Allocate(size);
     } catch (BadAlloc&) {
-      // Step 2: smart dispatch — remap for fragmentation only.
-      // During training, NEVER release physical memory in OOM retry path.
+      // Step 2 handles allocator-internal fragmentation only.
+      // If total free bytes are sufficient but the largest free block is too
+      // small, compact(remap) tries to reorganize VA without releasing
+      // physical memory.  More expensive recovery actions such as offload
+      // (and post-offload compact) are coordinated by RetryAllocator when it
+      // is enabled.
+      //
+      // During training, NEVER release physical memory in this base OOM path.
       auto* vmm = GetVmmV2MultiPoolAllocator(underlying_allocator_);
       if (vmm) {
         size_t total_free = 0, max_free = 0;
@@ -352,8 +359,9 @@ size_t StreamSafeCUDAAllocator::CompactImpl(const Place& place,
   std::lock_guard<SpinLock> lock_guard(allocator_map_lock_);
   std::vector<StreamSafeCUDAAllocator*>& allocators = allocator_map_[place];
 
-  // Reclaim cross-stream pending frees so that more blocks become FREE
-  // and eligible for remap.
+  // Execution layer for compact(remap): first reclaim cross-stream pending
+  // frees so that more blocks become FREE and eligible for remap, then
+  // forward the bounded compact request to each underlying allocator.
   for (StreamSafeCUDAAllocator* allocator : allocators) {
     allocator->ProcessUnfreedAllocations();
   }
