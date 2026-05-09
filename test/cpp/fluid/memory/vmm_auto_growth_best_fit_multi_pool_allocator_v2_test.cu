@@ -74,15 +74,16 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, SetBlockRemapEventRoutesByPtr) {
   gpuEvent_t event = nullptr;
   ASSERT_EQ(cudaEventCreateWithFlags(&event, cudaEventDisableTiming),
             cudaSuccess);
+  auto guard = std::make_shared<CudaEventGuard>(event);
   auto* ptr = allocation->ptr();
-  ASSERT_TRUE(allocator->SetBlockRemapEvent(ptr, nullptr, event));
+  ASSERT_TRUE(allocator->SetBlockRemapEvent(ptr, nullptr, guard));
 
   auto it = allocator->small_allocator_->allocated_blocks_.find(ptr);
   ASSERT_NE(it, allocator->small_allocator_->allocated_blocks_.end());
-  EXPECT_EQ(it->second->remap_safe_event_, event);
+  ASSERT_FALSE(it->second->parts_.empty());
+  EXPECT_EQ(it->second->parts_[0].handle->remap_safe_event, guard);
 
   allocation.reset();
-  ASSERT_EQ(cudaEventDestroy(event), cudaSuccess);
 }
 
 // --- P1: FreeImpl release path ---

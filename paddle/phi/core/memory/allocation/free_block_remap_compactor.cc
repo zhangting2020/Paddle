@@ -14,6 +14,7 @@
 
 #include "paddle/phi/core/memory/allocation/free_block_remap_compactor.h"
 
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -41,12 +42,7 @@ void AppendGapOrFreeSegment(std::vector<BlockV2>* segments,
                             size_t size,
                             const BlockPartV2* part,
                             void* ptr,
-                            PoolType pool_type,
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-                            gpuStream_t last_use_stream,
-                            std::shared_ptr<CudaEventGuard> remap_safe_event
-#endif
-) {
+                            PoolType pool_type) {
   if (size == 0) {
     return;
   }
@@ -67,49 +63,57 @@ void AppendGapOrFreeSegment(std::vector<BlockV2>* segments,
   if (part != nullptr) {
     segment.parts_.push_back(*part);
   }
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-  segment.last_use_stream_ = last_use_stream;
-  segment.remap_safe_event_ = remap_safe_event;
-#endif
   segments->push_back(std::move(segment));
 }
 
-bool IsFullyCoveredHandle(const BlockPartV2& part) {
+using EventReadyCache =
+    std::map<std::shared_ptr<CudaEventGuard>,
+             bool,
+             std::owner_less<std::shared_ptr<CudaEventGuard>>>;
+
+bool IsFullyCoveredHandle(const BlockPartV2& part, EventReadyCache* cache) {
   // Skip handles that were already remapped by a previous compact — their
   // physical memory is owned by a synthetic allocation at a different VA.
   // Attempting to remap them again would use a stale or released handle.
   if (part.handle->remapped) {
     return false;
   }
-  return part.handle_rel_off == 0 && part.len == part.handle->size;
-}
-
-bool IsRemapSafe(BlockV2* block) {
-  if (block->type_ != BlockType::kFree || block->ipc_exported_) {
+  if (part.handle_rel_off != 0 || part.len != part.handle->size) {
     return false;
   }
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-  // Per-event query: no cudaDeviceSynchronize needed.
-  // If the block has a remap_safe_event_, query whether the GPU work
-  // that last used this memory has completed.  Only remap blocks whose
-  // events are done; skip those still in flight.
-  if (block->remap_safe_event_) {
-#ifdef PADDLE_WITH_CUDA
-    gpuError_t err = cudaEventQuery(block->remap_safe_event_->event);
-#else
-    gpuError_t err = hipEventQuery(block->remap_safe_event_->event);
-#endif
-    if (err == gpuSuccess) {
-      // Event completed — release the shared_ptr (may destroy the event
-      // if this was the last holder).
-      block->remap_safe_event_.reset();
+  if (part.handle->remap_safe_event) {
+    auto event = part.handle->remap_safe_event;
+    auto it = cache->find(event);
+    bool ready = false;
+    if (it != cache->end()) {
+      ready = it->second;
     } else {
-      // GPU work still pending on this block's memory — not safe to remap.
+#ifdef PADDLE_WITH_CUDA
+      gpuError_t err = cudaEventQuery(event->event);
+      if (err != gpuSuccess && err != cudaErrorNotReady) {
+        PADDLE_ENFORCE_GPU_SUCCESS(err);
+      }
+#else
+      gpuError_t err = hipEventQuery(event->event);
+      if (err != gpuSuccess && err != hipErrorNotReady) {
+        PADDLE_ENFORCE_GPU_SUCCESS(err);
+      }
+#endif
+      ready = (err == gpuSuccess);
+      cache->emplace(event, ready);
+    }
+    if (!ready) {
       return false;
     }
+    part.handle->remap_safe_event.reset();
   }
 #endif
   return true;
+}
+
+bool IsRemapSafe(const BlockV2& block) {
+  return block.type_ == BlockType::kFree && !block.ipc_exported_;
 }
 
 void MergeAdjacentGaps(std::list<BlockV2>* blocks) {
@@ -256,10 +260,12 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
               << "fully-covered handles";
     size_t free_block_count = 0, safe_block_count = 0;
     size_t fully_covered_count = 0, partial_count = 0;
+    size_t event_blocked_count = 0;
+    EventReadyCache event_ready_cache;
     for (auto it = blocks->begin(); it != blocks->end();) {
       auto current = it++;
       if (current->type_ == BlockType::kFree) free_block_count++;
-      if (!IsRemapSafe(&(*current))) {
+      if (!IsRemapSafe(*current)) {
         continue;
       }
       safe_block_count++;
@@ -271,7 +277,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
         void* part_ptr =
             reinterpret_cast<uint8_t*>(current->ptr_) + block_offset;
         block_offset += part.len;
-        if (IsFullyCoveredHandle(part)) {
+        if (IsFullyCoveredHandle(part, &event_ready_cache)) {
           fully_covered_count++;
           if (!logged_first_candidate) {
             VLOG(0) << "First remap candidate pool="
@@ -295,13 +301,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
                                    part.len,
                                    &part,
                                    part_ptr,
-                                   pool_type_
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-                                   ,
-                                   current->last_use_stream_,
-                                   current->remap_safe_event_
-#endif
-            );
+                                   pool_type_);
             continue;
           }
           // Mark the handle as remapped so that FreeImpl (called when
@@ -316,14 +316,11 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
                                  part.len,
                                  nullptr,
                                  part_ptr,
-                                 pool_type_
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-                                 ,
-                                 nullptr,
-                                 nullptr
-#endif
-          );
+                                 pool_type_);
           continue;
+        }
+        if (part.handle->remap_safe_event) {
+          event_blocked_count++;
         } else {
           partial_count++;
         }
@@ -333,13 +330,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
                                part.len,
                                &part,
                                part_ptr,
-                               pool_type_
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-                               ,
-                               current->last_use_stream_,
-                               current->remap_safe_event_
-#endif
-        );
+                               pool_type_);
       }
 
       if (remapped_handles.size() == remapped_count_before) {
@@ -369,13 +360,6 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     // A handle is "fully covered" when a single part spans the entire
     // handle (off=0, len=handle->size).  Partial handles are split
     // between ACTIVE and FREE blocks — the ACTIVE portion prevents remap.
-    size_t event_blocked_count = 0;
-    for (auto& block : *blocks) {
-      if (block.type_ == BlockType::kFree && !block.ipc_exported_ &&
-          block.remap_safe_event_) {
-        event_blocked_count++;
-      }
-    }
     LOG(INFO) << "VMM V2 compactor pool=" << static_cast<int>(pool_type_)
               << " Phase 1 stats: free_blocks=" << free_block_count
               << " safe_blocks=" << safe_block_count
@@ -388,7 +372,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       for (auto& block : *blocks) {
         if (block.type_ != BlockType::kFree || logged >= 5) break;
         for (const auto& part : block.parts_) {
-          if (!IsFullyCoveredHandle(part) && logged < 5) {
+          if (!IsFullyCoveredHandle(part, &event_ready_cache) && logged < 5) {
             LOG(INFO) << "  partial part: block_ptr=" << block.ptr_
                       << " block_size=" << block.size_ << " handle_base="
                       << reinterpret_cast<void*>(part.handle->base)

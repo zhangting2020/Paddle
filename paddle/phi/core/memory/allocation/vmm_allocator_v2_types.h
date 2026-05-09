@@ -81,6 +81,13 @@ struct VmmHandleMeta {
   // skip cuMemUnmap+cuMemRelease for remapped handles — their
   // lifetime is now managed by the block that received them.
   bool remapped{false};
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+  // Remap safety is tracked per handle instead of per block. A single handle
+  // may be split across ACTIVE/FREE blocks; the last GPU use point belongs to
+  // the physical handle, not to any particular logical block view.
+  gpuStream_t last_use_stream{nullptr};
+  std::shared_ptr<CudaEventGuard> remap_safe_event;
+#endif
 };
 
 // HandleLayout is a lightweight allocation-level handle list returned by the
@@ -130,10 +137,6 @@ struct BlockV2 {
   PoolType pool_type_{PoolType::kLarge};
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
   gpuStream_t owning_stream_{nullptr};
-  gpuStream_t last_use_stream_{nullptr};
-  // Shared ownership: split blocks share the same event; the event is
-  // only destroyed when all blocks drop their reference.
-  std::shared_ptr<CudaEventGuard> remap_safe_event_;
 #endif
   bool ipc_exported_{false};
 };

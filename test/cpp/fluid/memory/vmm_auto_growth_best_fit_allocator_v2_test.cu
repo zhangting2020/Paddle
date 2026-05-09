@@ -194,8 +194,9 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, SplitGrowBlockStartsWithEmptyRemapState) {
     }
     ++free_count;
     EXPECT_EQ(block.owning_stream_, nullptr);
-    EXPECT_EQ(block.last_use_stream_, nullptr);
-    EXPECT_EQ(block.remap_safe_event_, nullptr);
+    ASSERT_FALSE(block.parts_.empty());
+    EXPECT_EQ(block.parts_[0].handle->last_use_stream, nullptr);
+    EXPECT_EQ(block.parts_[0].handle->remap_safe_event, nullptr);
   }
   EXPECT_EQ(free_count, 1UL);
 }
@@ -277,7 +278,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, NonAdjacentFreeBlocksDoNotMerge) {
   EXPECT_EQ(allocator.free_blocks_.size(), 2UL);
 }
 
-TEST(VMMAutoGrowthBestFitAllocatorV2, SplitFreeBlockInheritsRemapEvent) {
+TEST(VMMAutoGrowthBestFitAllocatorV2, SplitFreeBlockPreservesHandleRemapEvent) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
       underlying, 256, phi::GPUPlace(), PoolType::kLarge);
@@ -289,19 +290,19 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, SplitFreeBlockInheritsRemapEvent) {
   gpuEvent_t event = nullptr;
   ASSERT_EQ(cudaEventCreateWithFlags(&event, cudaEventDisableTiming),
             cudaSuccess);
+  auto guard = std::make_shared<CudaEventGuard>(event);
   auto* ptr = allocation->ptr();
   gpuStream_t fake_stream = reinterpret_cast<gpuStream_t>(0x1);
-  ASSERT_TRUE(allocator.SetBlockRemapEvent(ptr, fake_stream, event));
+  ASSERT_TRUE(allocator.SetBlockRemapEvent(ptr, fake_stream, guard));
   auto active_it = allocator.allocated_blocks_.find(ptr);
   ASSERT_NE(active_it, allocator.allocated_blocks_.end());
   active_it->second->owning_stream_ = fake_stream;
 
   allocation.reset();
 
-  // Reuse with a smaller size triggers split. The remaining FREE block must
-  // inherit last_use_stream_ / remap_safe_event_ from the original block so
-  // that the Compactor knows the old kernel may still be touching this memory
-  // (fast-GC same-stream reuse does not wait on the event).
+  // Reuse with a smaller size triggers split. The remaining FREE block keeps
+  // the same handle metadata, so remap safety follows the physical handle
+  // instead of being copied as block-level state.
   auto reused = allocator.Allocate(256UL);
   ASSERT_NE(reused, nullptr);
 
@@ -314,15 +315,13 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, SplitFreeBlockInheritsRemapEvent) {
     ++free_count;
     // owning_stream_ is cleared — nobody "owns" a free fragment.
     EXPECT_EQ(block.owning_stream_, nullptr);
-    // last_use_stream_ and remap_safe_event_ are inherited — the old kernel
-    // may still be accessing this region until the event completes.
-    EXPECT_EQ(block.last_use_stream_, fake_stream);
-    EXPECT_EQ(block.remap_safe_event_, event);
+    ASSERT_FALSE(block.parts_.empty());
+    EXPECT_EQ(block.parts_[0].handle->last_use_stream, fake_stream);
+    EXPECT_EQ(block.parts_[0].handle->remap_safe_event, guard);
   }
   EXPECT_EQ(free_count, 1UL);
 
   reused.reset();
-  ASSERT_EQ(cudaEventDestroy(event), cudaSuccess);
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2, SetBlockRemapEventStoresRuntimeState) {
@@ -336,16 +335,17 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, SetBlockRemapEventStoresRuntimeState) {
   gpuEvent_t event = nullptr;
   ASSERT_EQ(cudaEventCreateWithFlags(&event, cudaEventDisableTiming),
             cudaSuccess);
+  auto guard = std::make_shared<CudaEventGuard>(event);
   auto* ptr = allocation->ptr();
-  ASSERT_TRUE(allocator.SetBlockRemapEvent(ptr, nullptr, event));
+  ASSERT_TRUE(allocator.SetBlockRemapEvent(ptr, nullptr, guard));
 
   auto it = allocator.allocated_blocks_.find(ptr);
   ASSERT_NE(it, allocator.allocated_blocks_.end());
-  EXPECT_EQ(it->second->last_use_stream_, nullptr);
-  EXPECT_EQ(it->second->remap_safe_event_, event);
+  ASSERT_FALSE(it->second->parts_.empty());
+  EXPECT_EQ(it->second->parts_[0].handle->last_use_stream, nullptr);
+  EXPECT_EQ(it->second->parts_[0].handle->remap_safe_event, guard);
 
   allocation.reset();
-  ASSERT_EQ(cudaEventDestroy(event), cudaSuccess);
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2, SetBlockRemapEventRejectsUnknownPtr) {

@@ -133,25 +133,6 @@ void AppendPartsTail(std::vector<BlockPartV2>* dst,
               std::make_move_iterator(src->end()));
 }
 
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-void MergeRemapRuntimeState(BlockV2* keep, BlockV2* remove) {
-  if (!remove->remap_safe_event_) {
-    return;
-  }
-  if (!keep->remap_safe_event_) {
-    keep->last_use_stream_ = remove->last_use_stream_;
-    keep->remap_safe_event_ = std::move(remove->remap_safe_event_);
-    return;
-  }
-  // Both have events.  If they share the same underlying event (from a
-  // prior split), just drop one reference.  Otherwise, keep the "keep"
-  // block's event and release the "remove" block's — shared_ptr handles
-  // destruction when the last holder drops its reference, so no
-  // double-destroy is possible.
-  remove->remap_safe_event_.reset();
-}
-#endif
-
 }  // namespace
 
 VMMAutoGrowthBestFitAllocatorV2::VMMAutoGrowthBestFitAllocatorV2(
@@ -278,10 +259,10 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
 
   // Count potentially releasable handles.  Use only static (non-timing)
   // conditions here: handle not already remapped, fully covered, not active.
-  // Runtime checks (ipc_exported_, remap_safe_event_) are left to the
-  // compactor's IsRemapSafe — they depend on timing and would cause false
-  // negatives in the pre-check (e.g. event completes between pre-check and
-  // compactor execution).
+  // Runtime checks (ipc_exported_, per-handle remap_safe_event) are left to
+  // the compactor — they depend on timing and would cause false negatives in
+  // the pre-check (e.g. event completes between pre-check and compactor
+  // execution).
   size_t releasable_handles = 0;
   size_t remapped_count = 0, partial_count = 0, active_count = 0;
   size_t total_parts_in_free = 0;
@@ -408,8 +389,15 @@ bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
     return false;
   }
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-  it->second->last_use_stream_ = stream;
-  it->second->remap_safe_event_ = std::move(event);
+  std::unordered_set<VmmHandleMeta*> seen;
+  for (auto& part : it->second->parts_) {
+    auto* handle = part.handle.get();
+    if (!seen.insert(handle).second) {
+      continue;
+    }
+    handle->last_use_stream = stream;
+    handle->remap_safe_event = event;
+  }
 #else
   (void)stream;
   (void)event;
@@ -437,29 +425,10 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
         SlicePartsForRange(block_it->parts_, size, remaining_size);
     remaining_block.pool_type_ = block_it->pool_type_;
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-    // Inherit last_use_stream_ and remap_safe_event_ from the original block.
-    //
-    // Under fast-GC (same-stream reuse), StreamSafeCUDAAllocator hands this
-    // FREE block back without waiting on the recorded event — CUDA stream
-    // ordering alone guarantees that the NEW kernel (using the ACTIVE portion)
-    // runs after the old one.  However, the REMAINING free portion is still
-    // physically backed by memory the old kernel may still be touching.  If
-    // the Compactor saw remap_safe_event_ == nullptr it would assume "never
-    // used, safe to unmap" and cuMemUnmap while the old kernel is still
-    // reading — causing a GPU fault.
-    //
-    // Inheriting the event is correct because the event was recorded AFTER the
-    // last kernel that accessed the ENTIRE original block; the remaining
-    // portion is a subset, so the same event guards it.
-    //
-    // For grow-split (AllocateImpl), the remaining block comes from freshly
-    // allocated memory that was never used, so its event is naturally nullptr
-    // — which correctly means "safe to remap".
-    //
-    // owning_stream_ is cleared: nobody "owns" a free fragment.
+    // owning_stream_ is cleared: nobody "owns" a free fragment. Remap safety
+    // lives on each handle meta, so the remaining fragment observes the same
+    // event state naturally through its sliced parts.
     remaining_block.owning_stream_ = nullptr;
-    remaining_block.last_use_stream_ = block_it->last_use_stream_;
-    remaining_block.remap_safe_event_ = block_it->remap_safe_event_;
 #endif
 
     block_it->size_ = size;
@@ -505,9 +474,6 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it) {
         reinterpret_cast<uint8_t*>(prev->ptr_) + prev->size_ ==
             reinterpret_cast<uint8_t*>(it->ptr_)) {
       EraseFreeBlock(prev);
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-      MergeRemapRuntimeState(&(*prev), &(*it));
-#endif
       AppendPartsTail(&prev->parts_, &it->parts_);
       prev->size_ += it->size_;
       all_blocks_.erase(it);
@@ -520,9 +486,6 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it) {
       reinterpret_cast<uint8_t*>(it->ptr_) + it->size_ ==
           reinterpret_cast<uint8_t*>(next->ptr_)) {
     EraseFreeBlock(next);
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-    MergeRemapRuntimeState(&(*it), &(*next));
-#endif
     AppendPartsTail(&it->parts_, &next->parts_);
     it->size_ += next->size_;
     all_blocks_.erase(next);
@@ -671,8 +634,6 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndRemoveRange(uint8_t* base,
         right.pool_type_ = it->pool_type_;
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
         right.owning_stream_ = nullptr;
-        right.last_use_stream_ = it->last_use_stream_;
-        right.remap_safe_event_ = it->remap_safe_event_;
 #endif
         auto right_it = all_blocks_.insert(std::next(it), std::move(right));
         InsertFreeBlock(right_it);
