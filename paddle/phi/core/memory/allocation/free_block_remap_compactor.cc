@@ -261,6 +261,9 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     size_t free_block_count = 0, safe_block_count = 0;
     size_t fully_covered_count = 0, partial_count = 0;
     size_t event_blocked_count = 0;
+    size_t fully_covered_bytes = 0, partial_bytes = 0;
+    size_t event_blocked_bytes = 0;
+    size_t remapped_blocked_count = 0, remapped_blocked_bytes = 0;
     EventReadyCache event_ready_cache;
     for (auto it = blocks->begin(); it != blocks->end();) {
       auto current = it++;
@@ -279,6 +282,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
         block_offset += part.len;
         if (IsFullyCoveredHandle(part, &event_ready_cache)) {
           fully_covered_count++;
+          fully_covered_bytes += part.len;
           if (!logged_first_candidate) {
             VLOG(0) << "First remap candidate pool="
                     << static_cast<int>(pool_type_)
@@ -319,10 +323,16 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
                                  pool_type_);
           continue;
         }
+        if (part.handle->remapped) {
+          remapped_blocked_count++;
+          remapped_blocked_bytes += part.len;
+        }
         if (part.handle->remap_safe_event) {
           event_blocked_count++;
+          event_blocked_bytes += part.len;
         } else {
           partial_count++;
+          partial_bytes += part.len;
         }
 
         AppendGapOrFreeSegment(&replacement_segments,
@@ -364,8 +374,13 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
               << " Phase 1 stats: free_blocks=" << free_block_count
               << " safe_blocks=" << safe_block_count
               << " event_blocked=" << event_blocked_count
+              << " event_blocked_bytes=" << event_blocked_bytes
               << " fully_covered_parts=" << fully_covered_count
-              << " partial_parts=" << partial_count;
+              << " fully_covered_bytes=" << fully_covered_bytes
+              << " partial_parts=" << partial_count
+              << " partial_bytes=" << partial_bytes
+              << " remapped_blocked=" << remapped_blocked_count
+              << " remapped_blocked_bytes=" << remapped_blocked_bytes;
     // Log details of first few partial parts for debugging.
     if (partial_count > 0 && fully_covered_count == 0) {
       size_t logged = 0;
@@ -373,6 +388,14 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
         if (block.type_ != BlockType::kFree || logged >= 5) break;
         for (const auto& part : block.parts_) {
           if (!IsFullyCoveredHandle(part, &event_ready_cache) && logged < 5) {
+            const bool is_partial =
+                !(part.handle_rel_off == 0 && part.len == part.handle->size);
+            const char* reason = part.handle->remapped
+                                     ? "remapped"
+                                     : (part.handle->remap_safe_event
+                                            ? "event_blocked"
+                                            : (is_partial ? "partial"
+                                                          : "other"));
             LOG(INFO) << "  partial part: block_ptr=" << block.ptr_
                       << " block_size=" << block.size_ << " handle_base="
                       << reinterpret_cast<void*>(part.handle->base)
@@ -380,7 +403,9 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
                       << " part_off=" << part.handle_rel_off
                       << " part_len=" << part.len
                       << " coverage=" << (part.len * 100 / part.handle->size)
-                      << "%";
+                      << "% reason=" << reason
+                      << " has_event=" << (part.handle->remap_safe_event != nullptr)
+                      << " remapped=" << part.handle->remapped;
             logged++;
           }
         }

@@ -265,6 +265,8 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   // execution).
   size_t releasable_handles = 0;
   size_t remapped_count = 0, partial_count = 0, active_count = 0;
+  size_t releasable_bytes = 0;
+  size_t remapped_bytes = 0, partial_bytes = 0, active_bytes = 0;
   size_t total_parts_in_free = 0;
   for (const auto& blk : all_blocks_) {
     if (blk.type_ != BlockType::kFree) continue;
@@ -272,17 +274,21 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
       ++total_parts_in_free;
       if (part.handle->remapped) {
         ++remapped_count;
+        remapped_bytes += part.len;
         continue;
       }
       if (!(part.handle_rel_off == 0 && part.len == part.handle->size)) {
         ++partial_count;
+        partial_bytes += part.len;
         continue;
       }
       if (active_handles.find(part.handle.get()) != active_handles.end()) {
         ++active_count;
+        active_bytes += part.len;
         continue;
       }
       ++releasable_handles;
+      releasable_bytes += part.len;
     }
   }
 
@@ -292,8 +298,13 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
             << " (total_free=" << total_free << " max_free=" << max_free
             << " requested=" << requested_size
             << " parts_in_free=" << total_parts_in_free
-            << " remapped=" << remapped_count << " partial=" << partial_count
-            << " active=" << active_count << ")";
+            << " releasable_handles=" << releasable_handles
+            << " releasable_bytes=" << releasable_bytes
+            << " remapped=" << remapped_count
+            << " remapped_bytes=" << remapped_bytes
+            << " partial=" << partial_count
+            << " partial_bytes=" << partial_bytes << " active=" << active_count
+            << " active_bytes=" << active_bytes << ")";
     // Dump the largest free block's parts for debugging.
     size_t largest_free_size = 0;
     const BlockV2* largest_free = nullptr;
@@ -304,9 +315,42 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
       }
     }
     if (largest_free) {
+      size_t largest_full_count = 0, largest_partial_count = 0;
+      size_t largest_remapped_count = 0, largest_active_count = 0;
+      size_t largest_full_bytes = 0, largest_partial_bytes = 0;
+      size_t largest_remapped_bytes = 0, largest_active_bytes = 0;
+      for (const auto& part : largest_free->parts_) {
+        if (part.handle->remapped) {
+          ++largest_remapped_count;
+          largest_remapped_bytes += part.len;
+          continue;
+        }
+        const bool fully_covered =
+            part.handle_rel_off == 0 && part.len == part.handle->size;
+        if (!fully_covered) {
+          ++largest_partial_count;
+          largest_partial_bytes += part.len;
+          continue;
+        }
+        if (active_handles.find(part.handle.get()) != active_handles.end()) {
+          ++largest_active_count;
+          largest_active_bytes += part.len;
+          continue;
+        }
+        ++largest_full_count;
+        largest_full_bytes += part.len;
+      }
       VLOG(4) << "  Largest free block: ptr=" << largest_free->ptr_
               << " size=" << largest_free->size_
-              << " num_parts=" << largest_free->parts_.size();
+              << " num_parts=" << largest_free->parts_.size()
+              << " fully_covered_handles=" << largest_full_count
+              << " fully_covered_bytes=" << largest_full_bytes
+              << " partial_handles=" << largest_partial_count
+              << " partial_bytes=" << largest_partial_bytes
+              << " active_overlap_handles=" << largest_active_count
+              << " active_overlap_bytes=" << largest_active_bytes
+              << " remapped_handles=" << largest_remapped_count
+              << " remapped_bytes=" << largest_remapped_bytes;
       size_t logged = 0;
       for (const auto& part : largest_free->parts_) {
         if (logged >= 8) {
@@ -329,6 +373,13 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
           << " compact: total_free=" << total_free << " max_free=" << max_free
           << " requested=" << requested_size
           << " releasable_handles=" << releasable_handles
+          << " releasable_bytes=" << releasable_bytes
+          << " partial_handles=" << partial_count
+          << " partial_bytes=" << partial_bytes
+          << " active_overlap_handles=" << active_count
+          << " active_overlap_bytes=" << active_bytes
+          << " remapped_handles=" << remapped_count
+          << " remapped_bytes=" << remapped_bytes
           << ", proceeding with compaction";
 
   FreeBlockRemapCompactor compactor(
