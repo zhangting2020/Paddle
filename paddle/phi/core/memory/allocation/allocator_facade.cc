@@ -142,7 +142,6 @@ namespace paddle::memory::allocation {
 namespace {
 
 constexpr size_t kVMMV2TransientHandleSize = 2UL << 20;
-constexpr size_t kVMMV2TransientSmallThreshold = 2UL << 20;
 
 }  // namespace
 
@@ -1032,6 +1031,9 @@ class AllocatorFacadePrivate {
   }
 
   std::shared_ptr<Allocator> CreateVMMAutoGrowthBestFitAllocatorV2(GPUPlace p) {
+    const size_t small_threshold = FLAGS_vmm_small_pool_size_in_mb
+                                       ? (FLAGS_vmm_small_pool_size_in_mb << 20)
+                                       : kVMMV2TransientHandleSize;
     auto transient_small_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(
         p, kVMMV2TransientHandleSize, PoolType::kSmall);
     auto transient_large_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(
@@ -1039,7 +1041,7 @@ class AllocatorFacadePrivate {
     return std::make_shared<VMMAutoGrowthBestFitMultiPoolAllocatorV2>(
         transient_small_allocator,
         transient_large_allocator,
-        kVMMV2TransientSmallThreshold,
+        small_threshold,
         p);
   }
 

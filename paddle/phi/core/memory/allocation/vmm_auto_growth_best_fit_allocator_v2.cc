@@ -152,41 +152,90 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
     return allocation;
   }
 
+  // Tail reuse: if the last block in the address space is FREE, detach it
+  // and only request the difference from the underlying allocator. The
+  // underlying VMM provider maps new handles at a monotonically increasing
+  // VA cursor, so the new allocation is guaranteed to be contiguous with
+  // the tail FREE block.
+  size_t tail_reuse_size = 0;
+  std::vector<BlockPartV2> tail_parts;
+  if (!all_blocks_.empty()) {
+    auto tail_it = std::prev(all_blocks_.end());
+    if (tail_it->type_ == BlockType::kFree) {
+      tail_reuse_size = tail_it->size_;
+      tail_parts = std::move(tail_it->parts_);
+      EraseFreeBlock(tail_it);
+      all_blocks_.erase(tail_it);
+    }
+  }
+
+  const size_t grow_size = (requested_size > tail_reuse_size)
+                               ? (requested_size - tail_reuse_size)
+                               : 0;
+
   // Grow: obtain a new raw allocation from the bottom VMM provider.
   // If cuMemCreate fails due to physical memory exhaustion (CU error 2),
   // the driver-level allocator throws EnforceNotMet.  Convert it to BadAlloc
   // so that RetryAllocator can catch it and trigger try_remap / offload.
   AllocationPtr raw_alloc;
-  try {
-    raw_alloc = underlying_allocator_->Allocate(requested_size);
-  } catch (...) {
-    PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
-        "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes.",
-        static_cast<int>(pool_type_),
-        requested_size));
+  if (grow_size > 0) {
+    try {
+      raw_alloc = underlying_allocator_->Allocate(grow_size);
+    } catch (...) {
+      // Grow failed — restore the tail FREE block before propagating.
+      if (tail_reuse_size > 0) {
+        BlockV2 restored;
+        restored.ptr_ = reinterpret_cast<uint8_t*>(
+            all_blocks_.empty()
+                ? nullptr
+                : reinterpret_cast<uint8_t*>(all_blocks_.back().ptr_) +
+                      all_blocks_.back().size_);
+        restored.size_ = tail_reuse_size;
+        restored.type_ = BlockType::kFree;
+        restored.parts_ = std::move(tail_parts);
+        restored.pool_type_ = pool_type_;
+        auto restored_it =
+            all_blocks_.insert(all_blocks_.end(), std::move(restored));
+        InsertFreeBlock(restored_it);
+      }
+      PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+          "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes.",
+          static_cast<int>(pool_type_),
+          grow_size));
+    }
   }
-  auto allocation = static_unique_ptr_cast<Allocation>(std::move(raw_alloc));
-  HandleLayout layout;
-  PADDLE_ENFORCE_EQ(underlying_allocator_->CollectAllocationHandleLayout(
-                        allocation->ptr(), &layout),
-                    true,
-                    common::errors::NotFound(
-                        "Can not collect VMM handle layout for allocation %p.",
-                        allocation->ptr()));
-  auto parts = BuildBlockPartsFromHandleLayout(layout);
-  auto* raw_allocation = allocation.get();
-  underlying_allocations_.emplace_back(std::move(allocation));
-  const size_t raw_size = raw_allocation->size();
-  // Grow first obtains one raw allocation from the bottom VMM provider, then
-  // immediately converts it into block state. If the raw allocation is larger
-  // than the requested size (for example due to handle-size rounding), split
-  // it right away so the remainder becomes a reusable FREE block instead of
-  // being hidden inside one oversized ACTIVE block.
-  auto active_parts = SlicePartsForRange(parts, 0, requested_size);
-  const size_t remaining_size = raw_size - requested_size;
+
+  // Build combined parts: tail_parts + new_parts
+  std::vector<BlockPartV2> combined_parts = std::move(tail_parts);
+  size_t total_new_size = tail_reuse_size;
+
+  if (raw_alloc) {
+    auto allocation = static_unique_ptr_cast<Allocation>(std::move(raw_alloc));
+    HandleLayout layout;
+    PADDLE_ENFORCE_EQ(
+        underlying_allocator_->CollectAllocationHandleLayout(allocation->ptr(),
+                                                             &layout),
+        true,
+        common::errors::NotFound(
+            "Can not collect VMM handle layout for allocation %p.",
+            allocation->ptr()));
+    auto new_parts = BuildBlockPartsFromHandleLayout(layout);
+    total_new_size += allocation->size();
+    underlying_allocations_.emplace_back(std::move(allocation));
+    AppendPartsTail(&combined_parts, &new_parts);
+  }
+
+  // The active block starts at the beginning of the combined region.
+  uint8_t* combined_ptr =
+      combined_parts.empty()
+          ? nullptr
+          : reinterpret_cast<uint8_t*>(combined_parts.front().handle->base) +
+                combined_parts.front().handle_rel_off;
+  auto active_parts = SlicePartsForRange(combined_parts, 0, requested_size);
+  const size_t remaining_size = total_new_size - requested_size;
 
   BlockV2 block;
-  block.ptr_ = raw_allocation->ptr();
+  block.ptr_ = combined_ptr;
   block.size_ = requested_size;
   block.type_ = BlockType::kActive;
   block.parts_ = std::move(active_parts);
@@ -196,12 +245,11 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
 
   if (remaining_size > 0) {
     BlockV2 remaining_block;
-    remaining_block.ptr_ =
-        reinterpret_cast<uint8_t*>(raw_allocation->ptr()) + requested_size;
+    remaining_block.ptr_ = combined_ptr + requested_size;
     remaining_block.size_ = remaining_size;
     remaining_block.type_ = BlockType::kFree;
     remaining_block.parts_ =
-        SlicePartsForRange(parts, requested_size, remaining_size);
+        SlicePartsForRange(combined_parts, requested_size, remaining_size);
     remaining_block.pool_type_ = pool_type_;
     auto remain_it =
         all_blocks_.insert(std::next(it), std::move(remaining_block));
