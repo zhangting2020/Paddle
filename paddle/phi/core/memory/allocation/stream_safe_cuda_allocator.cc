@@ -279,7 +279,7 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
       auto* vmm = GetVmmV2MultiPoolAllocator(underlying_allocator_);
       if (vmm) {
         size_t total_free = 0, max_free = 0;
-        vmm->GetFreeBlockStats(&total_free, &max_free);
+        vmm->GetFreeBlockStats(&total_free, &max_free, size);
         VLOG(3) << "OOM dispatch: requested=" << size
                 << " total_free=" << total_free << " max_free=" << max_free;
         if (total_free >= size && max_free < size) {

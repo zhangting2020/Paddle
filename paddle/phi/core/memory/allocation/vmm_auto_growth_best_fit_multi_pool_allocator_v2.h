@@ -37,8 +37,12 @@ class VMMAutoGrowthBestFitMultiPoolAllocatorV2 : public Allocator {
   bool IsAllocThreadSafe() const override { return true; }
   void Accept(AllocatorVisitor* visitor) override { visitor->Visit(this); }
 
-  // Aggregate free-block stats across both pools.
-  void GetFreeBlockStats(size_t* total_free, size_t* max_free);
+  // Query free-block stats. When alloc_size > 0, returns stats for the
+  // target pool only (the pool that would serve an allocation of that size).
+  // When alloc_size == 0, aggregates across both pools (legacy behavior).
+  void GetFreeBlockStats(size_t* total_free,
+                         size_t* max_free,
+                         size_t alloc_size = 0);
 
   bool SetBlockRemapEvent(void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
