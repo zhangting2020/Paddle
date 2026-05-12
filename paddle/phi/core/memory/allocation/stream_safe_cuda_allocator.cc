@@ -272,22 +272,21 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
       underlying_allocation = underlying_allocator_->Allocate(size);
     } catch (BadAlloc&) {
       // Step 2 handles allocator-internal fragmentation only.
-      // If total free bytes are sufficient but the largest free block is too
-      // small, compact(remap) tries to reorganize VA without releasing
-      // physical memory.  More expensive recovery actions such as offload
-      // (and post-offload compact) are coordinated by RetryAllocator when it
-      // is enabled.
+      // CompactImpl performs all VMM V2 pre-checks internally:
+      //   - total_free / max_free coarse filtering
+      //   - releasable handle scanning
+      //   - actual compact(remap) when worthwhile
+      // StreamSafe should not duplicate those checks here. More expensive
+      // recovery actions such as offload (and post-offload compact) are
+      // coordinated by RetryAllocator when it is enabled.
       //
       // During training, NEVER release physical memory in this base OOM path.
       auto* vmm = GetVmmV2MultiPoolAllocator(underlying_allocator_);
       if (vmm && FLAGS_vmm_v2_remap_on_oom) {
-        size_t total_free = 0, max_free = 0;
-        vmm->GetFreeBlockStats(&total_free, &max_free, size);
+        size_t compacted = CompactImpl(place_, size);
         VLOG(3) << "OOM dispatch: requested=" << size
-                << " total_free=" << total_free << " max_free=" << max_free;
-        if (total_free >= size && max_free < size) {
-          VLOG(3) << "OOM dispatch: fragmentation detected, trying compact";
-          size_t compacted = CompactImpl(place_, size);
+                << " compact returned " << compacted << " bytes";
+        if (compacted > 0) {
           VLOG(3) << "OOM retry: compact returned " << compacted << " bytes";
           try {
             underlying_allocation = underlying_allocator_->Allocate(size);
@@ -300,11 +299,9 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
           }
         } else {
           PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
-              "Allocation of %zu bytes failed. "
-              "total_free=%zu, max_free=%zu.",
-              size,
-              total_free,
-              max_free));
+              "Allocation of %zu bytes failed after VMM V2 compact pre-check "
+              "found no useful remap work.",
+              size));
         }
       } else {
         PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
