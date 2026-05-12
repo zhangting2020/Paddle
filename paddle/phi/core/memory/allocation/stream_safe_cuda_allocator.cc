@@ -16,11 +16,14 @@
 #include <thread>
 #include "glog/logging.h"
 
+#include "paddle/common/flags.h"
 #include "paddle/phi/api/profiler/event_tracing.h"
 #include "paddle/phi/backends/gpu/gpu_info.h"
 #include "paddle/phi/core/memory/allocation/retry_allocator.h"
 #include "paddle/phi/core/memory/allocation/stat_allocator.h"
 #include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_multi_pool_allocator_v2.h"
+
+COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
 
 #if defined(PADDLE_WITH_CUDA)
 #include "paddle/phi/backends/gpu/cuda/cuda_graph.h"
@@ -277,7 +280,7 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
       //
       // During training, NEVER release physical memory in this base OOM path.
       auto* vmm = GetVmmV2MultiPoolAllocator(underlying_allocator_);
-      if (vmm) {
+      if (vmm && FLAGS_vmm_v2_remap_on_oom) {
         size_t total_free = 0, max_free = 0;
         vmm->GetFreeBlockStats(&total_free, &max_free, size);
         VLOG(3) << "OOM dispatch: requested=" << size

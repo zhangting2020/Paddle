@@ -434,9 +434,10 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
       underlying_allocator_, pool_type_, &underlying_allocations_);
   const size_t compact_target = FLAGS_vmm_v2_compact_all ? 0 : requested_size;
   const size_t remapped = compactor.Compact(&all_blocks_, compact_target);
-  if (remapped > 0) {
-    RebuildFreeBlockIndex();
-  }
+  // Always rebuild: Phase 1 may have replaced FREE blocks with GAP/FREE
+  // segments before Phase 2 fails.  Without rebuild, free_blocks_ holds
+  // stale iterators to erased list nodes → use-after-free on next alloc.
+  RebuildFreeBlockIndex();
   return remapped;
 }
 
