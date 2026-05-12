@@ -102,8 +102,9 @@ PHI_DEFINE_EXPORTED_bool(use_vmm_auto_growth_best_fit_allocator_v2,
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_remap_on_oom,
     true,
-    "Whether RetryAllocator should try VMM V2 remap before running the OOM "
-    "offload callback.");
+    "Whether VMM V2 compact/remap recovery is enabled on OOM. When true, "
+    "StreamSafeCUDAAllocator may run the base fragmentation compact path, "
+    "and RetryAllocator may run one additional post-offload compact.");
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_compact_all,
     false,
