@@ -626,11 +626,6 @@ uint64_t VMMAutoGrowthBestFitAllocatorV2::FreeIdleChunks() {
     released += alloc_size;
     VLOG(5) << "VMM V2 pool " << static_cast<int>(pool_type_)
             << " released idle chunk: " << alloc_size << " bytes";
-    // Erasing the DecoratedAllocationPtr triggers its deleter, which calls
-    // CUDAVirtualMemAllocatorV2::FreeImpl → cuMemUnmap + cuMemRelease.
-    // FreeImpl already skips handles with remapped==true (their physical
-    // memory is owned by the compactor's destination block), so it is
-    // safe to erase even when the allocation contains remapped handles.
     alloc_it = underlying_allocations_.erase(alloc_it);
   }
 
@@ -640,22 +635,22 @@ uint64_t VMMAutoGrowthBestFitAllocatorV2::FreeIdleChunks() {
 bool VMMAutoGrowthBestFitAllocatorV2::IsRangeEntirelyFree(uint8_t* base,
                                                           size_t size) const {
   auto* end = base + size;
-  size_t covered = 0;
   for (const auto& block : all_blocks_) {
     auto* bptr = reinterpret_cast<uint8_t*>(block.ptr_);
     auto* bend = bptr + block.size_;
     if (bend <= base) continue;
     if (bptr >= end) break;
-    // Accept both FREE and GAP: GAP blocks represent VA ranges whose
-    // physical memory was remapped elsewhere by the compactor.  The
-    // original allocation can still be released because FreeImpl skips
-    // handles marked remapped==true.
-    if (block.type_ != BlockType::kFree && block.type_ != BlockType::kGap) {
+    if (block.type_ == BlockType::kActive) {
       return false;
     }
-    covered += static_cast<size_t>(std::min(bend, end) - std::max(bptr, base));
   }
-  return covered == size;
+  // Returns true when the range contains only FREE/GAP blocks or when
+  // blocks have already been removed by a prior FreeIdleChunks pass
+  // (gap-scatter/gap-path case: the original allocation's cleanup removes
+  // blocks in the overlapping VA range before the synthetic allocation
+  // is processed).  FreeImpl handles this safely: original allocation
+  // skips remapped handles; synthetic allocation unmaps+releases its own.
+  return true;
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::SplitAndRemoveRange(uint8_t* base,

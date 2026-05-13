@@ -22,6 +22,7 @@
 
 #include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
+#include "paddle/phi/core/platform/device/gpu/gpu_info.h"
 
 namespace paddle {
 namespace memory {
@@ -150,66 +151,7 @@ BlockV2 CreateTailFreeBlock(
   return free_block;
 }
 
-// Rollback helper: remap handles back into their original GAP positions
-// and convert those GAPs back to FREE blocks.  Called when Phase 2 fails
-// so that the block list stays consistent for subsequent allocator ops.
-void RollbackUnmappedHandles(
-    std::list<BlockV2>* blocks,
-    const std::vector<VmmAllocHandle>& handles,
-    const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
-    CUDAVirtualMemAllocatorV2* vmm_allocator,
-    size_t handle_size) {
-  size_t handle_idx = 0;
-  for (auto it = blocks->begin();
-       it != blocks->end() && handle_idx < handles.size();
-       ++it) {
-    if (it->type_ != BlockType::kGap) continue;
-
-    const size_t gap_capacity = it->size_ / handle_size;
-    const size_t remaining = handles.size() - handle_idx;
-    const size_t to_fill = std::min(gap_capacity, remaining);
-    if (to_fill == 0) continue;
-
-    const VmmDevicePtr dst = reinterpret_cast<VmmDevicePtr>(it->ptr_);
-    std::vector<VmmAllocHandle> chunk(handles.begin() + handle_idx,
-                                      handles.begin() + handle_idx + to_fill);
-    std::vector<std::shared_ptr<VmmHandleMeta>> chunk_metas(
-        metas.begin() + handle_idx, metas.begin() + handle_idx + to_fill);
-
-    // Best-effort remap back. If this also fails, we log and continue.
-    try {
-      vmm_allocator->MapHandlesToVA(dst, chunk, &chunk_metas);
-    } catch (...) {
-      VLOG(0) << "VMM V2 compactor rollback: MapHandlesToVA failed for "
-              << to_fill << " handles at gap VA "
-              << reinterpret_cast<void*>(dst) << ", some memory may be leaked";
-      handle_idx += to_fill;
-      continue;
-    }
-
-    // Convert the filled gap portion back to FREE.
-    const size_t filled_bytes = to_fill * handle_size;
-    it->type_ = BlockType::kFree;
-    it->parts_.clear();
-    for (size_t i = 0; i < to_fill; ++i) {
-      chunk_metas[i]->base = dst + i * handle_size;
-      chunk_metas[i]->remapped = false;  // Undo the remapped flag
-      it->parts_.push_back(BlockPartV2{chunk_metas[i], 0, handle_size});
-    }
-
-    if (filled_bytes < it->size_) {
-      BlockV2 leftover_gap;
-      leftover_gap.ptr_ = reinterpret_cast<void*>(dst + filled_bytes);
-      leftover_gap.size_ = it->size_ - filled_bytes;
-      leftover_gap.type_ = BlockType::kGap;
-      leftover_gap.pool_type_ = it->pool_type_;
-      it->size_ = filled_bytes;
-      blocks->insert(std::next(it), std::move(leftover_gap));
-    }
-    handle_idx += to_fill;
-  }
-
-  // Merge adjacent FREE blocks created by rollback
+void MergeAdjacentFreeBlocks(std::list<BlockV2>* blocks) {
   for (auto it = blocks->begin(); it != blocks->end();) {
     if (it->type_ != BlockType::kFree) {
       ++it;
@@ -228,6 +170,110 @@ void RollbackUnmappedHandles(
     }
     ++it;
   }
+}
+
+void UnmapPartialDestination(CUDAVirtualMemAllocatorV2* vmm_allocator,
+                             VmmDevicePtr dst_base,
+                             size_t handle_count,
+                             size_t handle_size) {
+  for (size_t i = 0; i < handle_count; ++i) {
+    vmm_allocator->TryUnmapHandle(dst_base + i * handle_size, handle_size);
+  }
+}
+
+void RestoreGapToFree(std::list<BlockV2>* blocks,
+                      VmmDevicePtr va,
+                      size_t size,
+                      const std::shared_ptr<VmmHandleMeta>& meta) {
+  for (auto it = blocks->begin(); it != blocks->end(); ++it) {
+    if (it->type_ != BlockType::kGap) continue;
+    auto blk_start = reinterpret_cast<VmmDevicePtr>(it->ptr_);
+    auto blk_end = blk_start + it->size_;
+    if (va < blk_start || va >= blk_end) continue;
+
+    size_t prefix = va - blk_start;
+    size_t suffix = blk_end - (va + size);
+
+    if (prefix > 0) {
+      BlockV2 prefix_gap;
+      prefix_gap.ptr_ = it->ptr_;
+      prefix_gap.size_ = prefix;
+      prefix_gap.type_ = BlockType::kGap;
+      prefix_gap.pool_type_ = it->pool_type_;
+      blocks->insert(it, std::move(prefix_gap));
+    }
+
+    it->ptr_ = reinterpret_cast<void*>(va);
+    it->size_ = size;
+    it->type_ = BlockType::kFree;
+    it->parts_.clear();
+    it->parts_.push_back(BlockPartV2{meta, 0, size});
+
+    if (suffix > 0) {
+      BlockV2 suffix_gap;
+      suffix_gap.ptr_ = reinterpret_cast<void*>(va + size);
+      suffix_gap.size_ = suffix;
+      suffix_gap.type_ = BlockType::kGap;
+      suffix_gap.pool_type_ = it->pool_type_;
+      blocks->insert(std::next(it), std::move(suffix_gap));
+    }
+    return;
+  }
+  VLOG(0) << "RestoreGapToFree: GAP not found for VA "
+          << reinterpret_cast<void*>(va) << " — force-release will follow";
+}
+
+// Maps each handle back to its original VA (meta->base) and restores
+// the corresponding GAP block to FREE in the block list.
+// Invariant: meta->base was unmapped in Phase 1 and is currently a GAP.
+void RollbackToOriginalVA(
+    std::list<BlockV2>* blocks,
+    const std::vector<VmmAllocHandle>& handles,
+    const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
+    CUDAVirtualMemAllocatorV2* vmm_allocator,
+    size_t handle_size) {
+  size_t restored = 0, force_released = 0;
+  for (size_t i = 0; i < handles.size(); ++i) {
+    if (!metas[i]->remapped) continue;
+    VmmDevicePtr original_va = metas[i]->base;
+
+    auto map_status =
+        phi::dynload::cuMemMap(original_va, handle_size, 0, handles[i], 0);
+    if (map_status != CUDA_SUCCESS) {
+      VLOG(0) << "RollbackToOriginalVA: cuMemMap(" << std::hex << original_va
+              << std::dec << ") failed status=" << map_status
+              << ", force-releasing handle";
+      platform::RecordedGpuMemRelease(
+          handles[i], handle_size, vmm_allocator->place().device);
+      metas[i]->remapped = false;
+      force_released++;
+      continue;
+    }
+    // Set access permissions.
+    CUmemAccessDesc access_desc;
+    access_desc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    access_desc.location.id = vmm_allocator->place().device;
+    access_desc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    auto access_status =
+        phi::dynload::cuMemSetAccess(original_va, handle_size, &access_desc, 1);
+    if (access_status != CUDA_SUCCESS) {
+      VLOG(0) << "RollbackToOriginalVA: cuMemSetAccess failed for VA "
+              << std::hex << original_va << std::dec
+              << " status=" << access_status;
+      phi::dynload::cuMemUnmap(original_va, handle_size);
+      platform::RecordedGpuMemRelease(
+          handles[i], handle_size, vmm_allocator->place().device);
+      metas[i]->remapped = false;
+      force_released++;
+      continue;
+    }
+    metas[i]->remapped = false;
+    RestoreGapToFree(blocks, original_va, handle_size, metas[i]);
+    restored++;
+  }
+  MergeAdjacentFreeBlocks(blocks);
+  VLOG(3) << "RollbackToOriginalVA: restored=" << restored
+          << " force_released=" << force_released;
 }
 
 }  // namespace
@@ -390,12 +436,12 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
           if (!IsFullyCoveredHandle(part, &event_ready_cache) && logged < 5) {
             const bool is_partial =
                 !(part.handle_rel_off == 0 && part.len == part.handle->size);
-            const char* reason = part.handle->remapped
-                                     ? "remapped"
-                                     : (part.handle->remap_safe_event
-                                            ? "event_blocked"
-                                            : (is_partial ? "partial"
-                                                          : "other"));
+            const char* reason =
+                part.handle->remapped
+                    ? "remapped"
+                    : (part.handle->remap_safe_event
+                           ? "event_blocked"
+                           : (is_partial ? "partial" : "other"));
             LOG(INFO) << "  partial part: block_ptr=" << block.ptr_
                       << " block_size=" << block.size_ << " handle_base="
                       << reinterpret_cast<void*>(part.handle->base)
@@ -403,8 +449,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
                       << " part_off=" << part.handle_rel_off
                       << " part_len=" << part.len
                       << " coverage=" << (part.len * 100 / part.handle->size)
-                      << "% reason=" << reason
-                      << " has_event=" << (part.handle->remap_safe_event != nullptr)
+                      << "% reason=" << reason << " has_event="
+                      << (part.handle->remap_safe_event != nullptr)
                       << " remapped=" << part.handle->remapped;
             logged++;
           }
@@ -444,17 +490,20 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
 
     // -------------------------------------------------------------------
     // Phase 2: Remap handles to destination VA.
-    // Wrapped in try-catch: if remap fails, rollback by gap-scattering
-    // handles back into their original GAP positions.
+    // If remap fails, map each handle back to its original VA (meta->base).
     // -------------------------------------------------------------------
-    auto rollback = [&]() {
+    auto rollback = [&](VmmDevicePtr failed_dst) {
       VLOG(0) << "VMM V2 compactor Phase 2 failed, rolling back "
-              << remapped_handles.size() << " handles via gap-scatter";
-      RollbackUnmappedHandles(blocks,
-                              remapped_handles,
-                              remapped_metas,
-                              vmm_allocator_.get(),
+              << remapped_handles.size() << " handles to original VA";
+      UnmapPartialDestination(vmm_allocator_.get(),
+                              failed_dst,
+                              remapped_handles.size(),
                               handle_size);
+      RollbackToOriginalVA(blocks,
+                           remapped_handles,
+                           remapped_metas,
+                           vmm_allocator_.get(),
+                           handle_size);
     };
 
     bool tail_usable = (tail_va + total_remapped <= va_limit);
@@ -487,17 +536,13 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
             tail_va, remapped_handles, &remapped_metas);
       } catch (...) {
         VLOG(0) << "VMM V2 compactor: tail MapHandlesToVA failed";
-        rollback();
+        rollback(tail_va);
         return 0;
       }
       vmm_allocator_->AdvanceTailOffset(total_remapped);
 
       // Register a synthetic allocation so FreeIdleChunks can release
       // these handles when the tail block becomes entirely free.
-      // Creates NEW VmmHandleMeta objects with the new VA as base and
-      // remapped=false, so that FreeImpl correctly unmaps+releases them.
-      // The original allocation's layout retains the old metas with
-      // remapped=true (set in Phase 1), so FreeImpl skips them.
       HandleLayout tail_layout;
       for (size_t i = 0; i < remapped_metas.size(); ++i) {
         tail_layout.push_back(std::make_shared<VmmHandleMeta>(
@@ -548,7 +593,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
             gap_va, remapped_handles, &remapped_metas);
       } catch (...) {
         VLOG(0) << "VMM V2 compactor: gap MapHandlesToVA failed";
-        rollback();
+        rollback(gap_va);
         return 0;
       }
 
@@ -609,99 +654,132 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       return total_remapped;
     }
 
-    // ---- Path 3: gap-scatter fallback ----
+    // ---- Path 3: gap-scatter (two-phase commit) ----
     VLOG(3) << "VMM V2 compactor: tail unavailable and no single gap >= "
             << total_remapped << " bytes, falling back to gap-scatter remap";
+
+    // Capacity precheck: verify total GAP can hold all handles.
+    size_t total_gap_capacity = 0;
+    for (const auto& blk : *blocks) {
+      if (blk.type_ == BlockType::kGap) total_gap_capacity += blk.size_;
+    }
+    if (total_gap_capacity < total_remapped) {
+      VLOG(0) << "VMM V2 compactor: gap capacity " << total_gap_capacity
+              << " < total_remapped " << total_remapped
+              << ", rolling back to original VA";
+      RollbackToOriginalVA(blocks,
+                           remapped_handles,
+                           remapped_metas,
+                           vmm_allocator_.get(),
+                           handle_size);
+      return 0;
+    }
+
+    // Phase 3a: tentative placement (cuMemMap only, no bookkeeping).
+    struct GapPlacement {
+      std::list<BlockV2>::iterator gap_it;
+      VmmDevicePtr dst;
+      size_t handle_start_idx;
+      size_t count;
+    };
+    std::vector<GapPlacement> placements;
     size_t handle_idx = 0;
+
     for (auto it = blocks->begin();
          it != blocks->end() && handle_idx < remapped_handles.size();
          ++it) {
       if (it->type_ != BlockType::kGap) continue;
-
-      const size_t gap_capacity = it->size_ / handle_size;
-      const size_t remaining = remapped_handles.size() - handle_idx;
-      const size_t to_fill = std::min(gap_capacity, remaining);
+      size_t gap_cap = it->size_ / handle_size;
+      size_t to_fill = std::min(gap_cap, remapped_handles.size() - handle_idx);
       if (to_fill == 0) continue;
 
-      const VmmDevicePtr dst = reinterpret_cast<VmmDevicePtr>(it->ptr_);
+      VmmDevicePtr dst = reinterpret_cast<VmmDevicePtr>(it->ptr_);
       std::vector<VmmAllocHandle> chunk(
           remapped_handles.begin() + handle_idx,
           remapped_handles.begin() + handle_idx + to_fill);
       std::vector<std::shared_ptr<VmmHandleMeta>> chunk_metas(
           remapped_metas.begin() + handle_idx,
           remapped_metas.begin() + handle_idx + to_fill);
+
       try {
         vmm_allocator_->MapHandlesToVA(dst, chunk, &chunk_metas);
       } catch (...) {
-        // Gap-scatter IS the rollback path. If even this fails, we have
-        // orphaned handles. Log and return 0 to indicate no useful work.
         VLOG(0) << "VMM V2 compactor: gap-scatter MapHandlesToVA failed at "
-                << "handle_idx=" << handle_idx << "/" << remapped_handles.size()
-                << ", some handles are orphaned (memory leak)";
+                << "handle_idx=" << handle_idx << "/"
+                << remapped_handles.size();
+        // Unmap this failed batch (partial mapping).
+        UnmapPartialDestination(
+            vmm_allocator_.get(), dst, to_fill, handle_size);
+        // Unmap all prior successful placements.
+        for (auto& p : placements) {
+          UnmapPartialDestination(
+              vmm_allocator_.get(), p.dst, p.count, handle_size);
+        }
+        // All-or-nothing: roll back everything to original VA.
+        RollbackToOriginalVA(blocks,
+                             remapped_handles,
+                             remapped_metas,
+                             vmm_allocator_.get(),
+                             handle_size);
         return 0;
       }
 
-      // Register synthetic allocation for this gap chunk.
+      placements.push_back({it, dst, handle_idx, to_fill});
+      handle_idx += to_fill;
+    }
+
+    // Defensive: capacity precheck should prevent this.
+    if (handle_idx != remapped_handles.size()) {
+      VLOG(0) << "VMM V2 compactor gap-scatter: placed " << handle_idx << " of "
+              << remapped_handles.size()
+              << " handles despite precheck; rolling back";
+      for (auto& p : placements) {
+        UnmapPartialDestination(
+            vmm_allocator_.get(), p.dst, p.count, handle_size);
+      }
+      RollbackToOriginalVA(blocks,
+                           remapped_handles,
+                           remapped_metas,
+                           vmm_allocator_.get(),
+                           handle_size);
+      return 0;
+    }
+
+    // Phase 3b: commit — all handles mapped successfully.
+    for (auto& p : placements) {
+      auto it = p.gap_it;
+      size_t filled_bytes = p.count * handle_size;
+
       HandleLayout chunk_layout;
-      for (size_t i = 0; i < to_fill; ++i) {
+      for (size_t i = 0; i < p.count; ++i) {
         chunk_layout.push_back(std::make_shared<VmmHandleMeta>(
-            VmmHandleMeta{dst + i * handle_size,
+            VmmHandleMeta{p.dst + i * handle_size,
                           handle_size,
-                          chunk[i],
+                          remapped_handles[p.handle_start_idx + i],
                           vmm_allocator_->place().device}));
       }
-      const size_t filled_bytes = to_fill * handle_size;
       auto synth = vmm_allocator_->CreateSyntheticAllocation(
-          dst, filled_bytes, chunk_layout);
+          p.dst, filled_bytes, chunk_layout);
       underlying_allocations_->emplace_back(std::move(synth));
+
       it->type_ = BlockType::kFree;
       it->parts_.clear();
-      for (size_t i = 0; i < to_fill; ++i) {
+      for (size_t i = 0; i < p.count; ++i) {
         it->parts_.push_back(BlockPartV2{chunk_layout[i], 0, handle_size});
       }
 
       if (filled_bytes < it->size_) {
         BlockV2 leftover_gap;
-        leftover_gap.ptr_ = reinterpret_cast<void*>(dst + filled_bytes);
+        leftover_gap.ptr_ = reinterpret_cast<void*>(p.dst + filled_bytes);
         leftover_gap.size_ = it->size_ - filled_bytes;
         leftover_gap.type_ = BlockType::kGap;
         leftover_gap.pool_type_ = pool_type_;
         it->size_ = filled_bytes;
         blocks->insert(std::next(it), std::move(leftover_gap));
       }
-
-      handle_idx += to_fill;
     }
 
-    if (handle_idx != remapped_handles.size()) {
-      VLOG(0) << "VMM V2 compactor gap-scatter: placed " << handle_idx << " of "
-              << remapped_handles.size()
-              << " handles; not enough gap space in pool "
-              << static_cast<int>(pool_type_);
-      // Don't crash — return 0 to indicate partial/failed compaction.
-      return 0;
-    }
-
-    // Merge adjacent FREE blocks
-    for (auto it = blocks->begin(); it != blocks->end();) {
-      if (it->type_ != BlockType::kFree) {
-        ++it;
-        continue;
-      }
-      auto next = std::next(it);
-      if (next != blocks->end() && next->type_ == BlockType::kFree &&
-          reinterpret_cast<uint8_t*>(it->ptr_) + it->size_ ==
-              reinterpret_cast<uint8_t*>(next->ptr_)) {
-        it->size_ += next->size_;
-        for (const auto& part : next->parts_) {
-          TryAppendPart(&it->parts_, part);
-        }
-        blocks->erase(next);
-        continue;
-      }
-      ++it;
-    }
-
+    MergeAdjacentFreeBlocks(blocks);
     MergeAdjacentGaps(blocks);
     return total_remapped;
   } catch (...) {
@@ -709,11 +787,11 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
         << "VMM V2 compactor: exception caught during Compact, rolling back "
         << remapped_handles.size() << " unmapped handles";
     if (!remapped_handles.empty()) {
-      RollbackUnmappedHandles(blocks,
-                              remapped_handles,
-                              remapped_metas,
-                              vmm_allocator_.get(),
-                              handle_size);
+      RollbackToOriginalVA(blocks,
+                           remapped_handles,
+                           remapped_metas,
+                           vmm_allocator_.get(),
+                           handle_size);
     }
     return 0;
   }
