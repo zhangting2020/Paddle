@@ -22,6 +22,7 @@
 
 #include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
+#include "paddle/phi/core/platform/cuda_device_guard.h"
 #include "paddle/phi/core/platform/device/gpu/gpu_info.h"
 
 namespace paddle {
@@ -181,7 +182,7 @@ void UnmapPartialDestination(CUDAVirtualMemAllocatorV2* vmm_allocator,
   }
 }
 
-void RestoreGapToFree(std::list<BlockV2>* blocks,
+bool RestoreGapToFree(std::list<BlockV2>* blocks,
                       VmmDevicePtr va,
                       size_t size,
                       const std::shared_ptr<VmmHandleMeta>& meta) {
@@ -217,10 +218,11 @@ void RestoreGapToFree(std::list<BlockV2>* blocks,
       suffix_gap.pool_type_ = it->pool_type_;
       blocks->insert(std::next(it), std::move(suffix_gap));
     }
-    return;
+    return true;
   }
   VLOG(0) << "RestoreGapToFree: GAP not found for VA "
           << reinterpret_cast<void*>(va) << " — force-release will follow";
+  return false;
 }
 
 // Maps each handle back to its original VA (meta->base) and restores
@@ -232,6 +234,7 @@ void RollbackToOriginalVA(
     const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
     CUDAVirtualMemAllocatorV2* vmm_allocator,
     size_t handle_size) {
+  platform::CUDADeviceGuard guard(vmm_allocator->place().device);
   size_t restored = 0, force_released = 0;
   for (size_t i = 0; i < handles.size(); ++i) {
     if (!metas[i]->remapped) continue;
@@ -245,7 +248,7 @@ void RollbackToOriginalVA(
               << ", force-releasing handle";
       platform::RecordedGpuMemRelease(
           handles[i], handle_size, vmm_allocator->place().device);
-      metas[i]->remapped = false;
+      // Keep remapped=true so FreeImpl skips this already-released handle.
       force_released++;
       continue;
     }
@@ -263,13 +266,20 @@ void RollbackToOriginalVA(
       phi::dynload::cuMemUnmap(original_va, handle_size);
       platform::RecordedGpuMemRelease(
           handles[i], handle_size, vmm_allocator->place().device);
-      metas[i]->remapped = false;
+      // Keep remapped=true so FreeImpl skips this already-released handle.
       force_released++;
       continue;
     }
-    metas[i]->remapped = false;
-    RestoreGapToFree(blocks, original_va, handle_size, metas[i]);
-    restored++;
+    if (RestoreGapToFree(blocks, original_va, handle_size, metas[i])) {
+      metas[i]->remapped = false;
+      restored++;
+    } else {
+      phi::dynload::cuMemUnmap(original_va, handle_size);
+      platform::RecordedGpuMemRelease(
+          handles[i], handle_size, vmm_allocator->place().device);
+      // Keep remapped=true so FreeImpl skips this handle.
+      force_released++;
+    }
   }
   MergeAdjacentFreeBlocks(blocks);
   VLOG(3) << "RollbackToOriginalVA: restored=" << restored
@@ -661,7 +671,9 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     // Capacity precheck: verify total GAP can hold all handles.
     size_t total_gap_capacity = 0;
     for (const auto& blk : *blocks) {
-      if (blk.type_ == BlockType::kGap) total_gap_capacity += blk.size_;
+      if (blk.type_ == BlockType::kGap) {
+        total_gap_capacity += (blk.size_ / handle_size) * handle_size;
+      }
     }
     if (total_gap_capacity < total_remapped) {
       VLOG(0) << "VMM V2 compactor: gap capacity " << total_gap_capacity
