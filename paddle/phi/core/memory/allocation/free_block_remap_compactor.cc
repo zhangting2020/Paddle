@@ -191,6 +191,13 @@ bool RestoreGapToFree(std::list<BlockV2>* blocks,
     auto blk_start = reinterpret_cast<VmmDevicePtr>(it->ptr_);
     auto blk_end = blk_start + it->size_;
     if (va < blk_start || va >= blk_end) continue;
+    if (size > blk_end - va) {
+      VLOG(0) << "RestoreGapToFree: range exceeds GAP, va="
+              << reinterpret_cast<void*>(va) << " size=" << size
+              << " gap_start=" << reinterpret_cast<void*>(blk_start)
+              << " gap_size=" << it->size_;
+      return false;
+    }
 
     size_t prefix = va - blk_start;
     size_t suffix = blk_end - (va + size);
@@ -246,8 +253,12 @@ void RollbackToOriginalVA(
       VLOG(0) << "RollbackToOriginalVA: cuMemMap(" << std::hex << original_va
               << std::dec << ") failed status=" << map_status
               << ", force-releasing handle";
-      platform::RecordedGpuMemRelease(
+      auto release_status = platform::RecordedGpuMemRelease(
           handles[i], handle_size, vmm_allocator->place().device);
+      if (release_status != CUDA_SUCCESS) {
+        VLOG(0) << "RollbackToOriginalVA: force-release after cuMemMap "
+                << "failure returned status=" << release_status;
+      }
       // Keep remapped=true so FreeImpl skips this already-released handle.
       force_released++;
       continue;
@@ -264,8 +275,12 @@ void RollbackToOriginalVA(
               << std::hex << original_va << std::dec
               << " status=" << access_status;
       phi::dynload::cuMemUnmap(original_va, handle_size);
-      platform::RecordedGpuMemRelease(
+      auto release_status = platform::RecordedGpuMemRelease(
           handles[i], handle_size, vmm_allocator->place().device);
+      if (release_status != CUDA_SUCCESS) {
+        VLOG(0) << "RollbackToOriginalVA: force-release after cuMemSetAccess "
+                << "failure returned status=" << release_status;
+      }
       // Keep remapped=true so FreeImpl skips this already-released handle.
       force_released++;
       continue;
@@ -275,8 +290,12 @@ void RollbackToOriginalVA(
       restored++;
     } else {
       phi::dynload::cuMemUnmap(original_va, handle_size);
-      platform::RecordedGpuMemRelease(
+      auto release_status = platform::RecordedGpuMemRelease(
           handles[i], handle_size, vmm_allocator->place().device);
+      if (release_status != CUDA_SUCCESS) {
+        VLOG(0) << "RollbackToOriginalVA: force-release after block restore "
+                << "failure returned status=" << release_status;
+      }
       // Keep remapped=true so FreeImpl skips this handle.
       force_released++;
     }
