@@ -182,6 +182,25 @@ void UnmapPartialDestination(CUDAVirtualMemAllocatorV2* vmm_allocator,
   }
 }
 
+struct PendingMappedRange {
+  VmmDevicePtr dst;
+  size_t handle_count;
+};
+
+void UnmapPendingMappedRanges(
+    CUDAVirtualMemAllocatorV2* vmm_allocator,
+    std::vector<PendingMappedRange>* pending_ranges,
+    size_t handle_size) {
+  for (auto it = pending_ranges->rbegin(); it != pending_ranges->rend(); ++it) {
+    VLOG(0) << "VMM V2 compactor: unmapping pending dst range "
+            << reinterpret_cast<void*>(it->dst)
+            << " handles=" << it->handle_count;
+    UnmapPartialDestination(
+        vmm_allocator, it->dst, it->handle_count, handle_size);
+  }
+  pending_ranges->clear();
+}
+
 bool RestoreGapToFree(std::list<BlockV2>* blocks,
                       VmmDevicePtr va,
                       size_t size,
@@ -311,6 +330,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
                                         size_t requested_size) {
   std::vector<VmmAllocHandle> remapped_handles;
   std::vector<std::shared_ptr<VmmHandleMeta>> remapped_metas;
+  std::vector<PendingMappedRange> pending_mapped_ranges;
   bool logged_first_candidate = false;
   const size_t handle_size = vmm_allocator_->handle_size();
 
@@ -521,13 +541,15 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     // Phase 2: Remap handles to destination VA.
     // If remap fails, map each handle back to its original VA (meta->base).
     // -------------------------------------------------------------------
-    auto rollback = [&](VmmDevicePtr failed_dst) {
+    auto rollback = [&](VmmDevicePtr failed_dst, size_t failed_count) {
       VLOG(0) << "VMM V2 compactor Phase 2 failed, rolling back "
               << remapped_handles.size() << " handles to original VA";
       UnmapPartialDestination(vmm_allocator_.get(),
                               failed_dst,
-                              remapped_handles.size(),
+                              failed_count,
                               handle_size);
+      UnmapPendingMappedRanges(
+          vmm_allocator_.get(), &pending_mapped_ranges, handle_size);
       RollbackToOriginalVA(blocks,
                            remapped_handles,
                            remapped_metas,
@@ -565,10 +587,10 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
             tail_va, remapped_handles, &remapped_metas);
       } catch (...) {
         VLOG(0) << "VMM V2 compactor: tail MapHandlesToVA failed";
-        rollback(tail_va);
+        rollback(tail_va, remapped_handles.size());
         return 0;
       }
-      vmm_allocator_->AdvanceTailOffset(total_remapped);
+      pending_mapped_ranges.push_back({tail_va, remapped_handles.size()});
 
       // Register a synthetic allocation so FreeIdleChunks can release
       // these handles when the tail block becomes entirely free.
@@ -596,10 +618,14 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
           for (const auto& part : tail_free.parts_) {
             TryAppendPart(&last->parts_, part);
           }
+          vmm_allocator_->AdvanceTailOffset(total_remapped);
+          pending_mapped_ranges.clear();
           return total_remapped;
         }
       }
       blocks->push_back(std::move(tail_free));
+      vmm_allocator_->AdvanceTailOffset(total_remapped);
+      pending_mapped_ranges.clear();
       return total_remapped;
     }
 
@@ -622,9 +648,10 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
             gap_va, remapped_handles, &remapped_metas);
       } catch (...) {
         VLOG(0) << "VMM V2 compactor: gap MapHandlesToVA failed";
-        rollback(gap_va);
+        rollback(gap_va, remapped_handles.size());
         return 0;
       }
+      pending_mapped_ranges.push_back({gap_va, remapped_handles.size()});
 
       // Register synthetic allocation for gap-remapped handles.
       HandleLayout gap_layout;
@@ -680,6 +707,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
         }
       }
       MergeAdjacentGaps(blocks);
+      pending_mapped_ranges.clear();
       return total_remapped;
     }
 
@@ -742,10 +770,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
         UnmapPartialDestination(
             vmm_allocator_.get(), dst, to_fill, handle_size);
         // Unmap all prior successful placements.
-        for (auto& p : placements) {
-          UnmapPartialDestination(
-              vmm_allocator_.get(), p.dst, p.count, handle_size);
-        }
+        UnmapPendingMappedRanges(
+            vmm_allocator_.get(), &pending_mapped_ranges, handle_size);
         // All-or-nothing: roll back everything to original VA.
         RollbackToOriginalVA(blocks,
                              remapped_handles,
@@ -756,6 +782,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       }
 
       placements.push_back({it, dst, handle_idx, to_fill});
+      pending_mapped_ranges.push_back({dst, to_fill});
       handle_idx += to_fill;
     }
 
@@ -764,10 +791,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       VLOG(0) << "VMM V2 compactor gap-scatter: placed " << handle_idx << " of "
               << remapped_handles.size()
               << " handles despite precheck; rolling back";
-      for (auto& p : placements) {
-        UnmapPartialDestination(
-            vmm_allocator_.get(), p.dst, p.count, handle_size);
-      }
+      UnmapPendingMappedRanges(
+          vmm_allocator_.get(), &pending_mapped_ranges, handle_size);
       RollbackToOriginalVA(blocks,
                            remapped_handles,
                            remapped_metas,
@@ -812,11 +837,14 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
 
     MergeAdjacentFreeBlocks(blocks);
     MergeAdjacentGaps(blocks);
+    pending_mapped_ranges.clear();
     return total_remapped;
   } catch (...) {
     VLOG(0)
         << "VMM V2 compactor: exception caught during Compact, rolling back "
         << remapped_handles.size() << " unmapped handles";
+    UnmapPendingMappedRanges(
+        vmm_allocator_.get(), &pending_mapped_ranges, handle_size);
     if (!remapped_handles.empty()) {
       RollbackToOriginalVA(blocks,
                            remapped_handles,
