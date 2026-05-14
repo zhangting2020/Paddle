@@ -72,6 +72,14 @@ enum class PoolType : uint8_t {
 // may later reference these handles from block-level views, remap metadata, or
 // IPC export state.
 struct VmmHandleMeta {
+  VmmHandleMeta() = default;
+
+  VmmHandleMeta(VmmDevicePtr base,
+                size_t size,
+                VmmAllocHandle handle,
+                int device)
+      : base(base), size(size), handle(handle), device(device) {}
+
   VmmDevicePtr base;
   size_t size;
   VmmAllocHandle handle;
