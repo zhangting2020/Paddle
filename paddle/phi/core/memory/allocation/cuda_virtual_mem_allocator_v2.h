@@ -24,6 +24,7 @@
 #include "paddle/phi/core/memory/allocation/allocator.h"
 #include "paddle/phi/core/memory/allocation/spin_lock.h"
 #include "paddle/phi/core/memory/allocation/vmm_allocator_v2_types.h"
+#include "paddle/phi/core/memory/allocation/vmm_backing_map.h"
 
 namespace paddle {
 namespace memory {
@@ -82,6 +83,16 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
                                                    size_t size,
                                                    const HandleLayout& layout);
 
+  // Phase-1 BackingMap mirror hooks for driver operations that still happen
+  // outside the bottom allocator (e.g. compactor rollback).
+  void MarkBackingMapped(VmmDevicePtr ptr, VmmAllocHandle handle, size_t size);
+  void MarkBackingUnmapped(VmmDevicePtr ptr, size_t size);
+  void MarkBackingReleased(VmmDevicePtr ptr,
+                           VmmAllocHandle handle,
+                           size_t size);
+  bool ValidateBackingLayout(const HandleLayout& layout,
+                             const char* context) const;
+
  protected:
   phi::Allocation* AllocateImpl(size_t size) override;
   void FreeImpl(phi::Allocation* allocation) override;
@@ -104,6 +115,7 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
 
   mutable std::unordered_map<void*, HandleLayout> allocation_layout_map_;
   mutable SpinLock allocation_layout_mu_;
+  VmmBackingMap backing_map_;
 };
 
 }  // namespace allocation

@@ -274,6 +274,10 @@ void RollbackToOriginalVA(
               << ", force-releasing handle";
       auto release_status = platform::RecordedGpuMemRelease(
           handles[i], handle_size, vmm_allocator->place().device);
+      if (release_status == CUDA_SUCCESS) {
+        vmm_allocator->MarkBackingReleased(
+            original_va, handles[i], handle_size);
+      }
       if (release_status != CUDA_SUCCESS) {
         VLOG(0) << "RollbackToOriginalVA: force-release after cuMemMap "
                 << "failure returned status=" << release_status;
@@ -296,6 +300,10 @@ void RollbackToOriginalVA(
       phi::dynload::cuMemUnmap(original_va, handle_size);
       auto release_status = platform::RecordedGpuMemRelease(
           handles[i], handle_size, vmm_allocator->place().device);
+      if (release_status == CUDA_SUCCESS) {
+        vmm_allocator->MarkBackingReleased(
+            original_va, handles[i], handle_size);
+      }
       if (release_status != CUDA_SUCCESS) {
         VLOG(0) << "RollbackToOriginalVA: force-release after cuMemSetAccess "
                 << "failure returned status=" << release_status;
@@ -304,13 +312,19 @@ void RollbackToOriginalVA(
       force_released++;
       continue;
     }
+    vmm_allocator->MarkBackingMapped(original_va, handles[i], handle_size);
     if (RestoreGapToFree(blocks, original_va, handle_size, metas[i])) {
       metas[i]->remapped = false;
       restored++;
     } else {
       phi::dynload::cuMemUnmap(original_va, handle_size);
+      vmm_allocator->MarkBackingUnmapped(original_va, handle_size);
       auto release_status = platform::RecordedGpuMemRelease(
           handles[i], handle_size, vmm_allocator->place().device);
+      if (release_status == CUDA_SUCCESS) {
+        vmm_allocator->MarkBackingReleased(
+            original_va, handles[i], handle_size);
+      }
       if (release_status != CUDA_SUCCESS) {
         VLOG(0) << "RollbackToOriginalVA: force-release after block restore "
                 << "failure returned status=" << release_status;

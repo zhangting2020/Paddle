@@ -96,6 +96,8 @@ void CUDAVirtualMemAllocatorV2::InitOnce() {
     virtual_mem_size_ = AlignedSize(actual_total * va_multiplier, granularity_);
     PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cuMemAddressReserve(
         &virtual_mem_base_, virtual_mem_size_, 0, 0, 0));
+    backing_map_.Configure(
+        virtual_mem_base_, virtual_mem_size_, handle_size_, place_.device);
     CUmemAccessDesc self = {};
     self.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
     self.location.id = place_.device;
@@ -162,6 +164,9 @@ phi::Allocation* CUDAVirtualMemAllocatorV2::AllocateImpl(size_t size) {
     PADDLE_ENFORCE_GPU_SUCCESS(access_status);
   }
 
+  for (const auto& m : layout) {
+    backing_map_.MarkMapped(m->base, m->handle, m->size);
+  }
   RegisterHandleLayout(reinterpret_cast<void*>(ptr), layout);
   AdvanceTailOffset(aligned);
   return new Allocation(reinterpret_cast<void*>(ptr), aligned, place_);
@@ -191,6 +196,7 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
     }
     PADDLE_ENFORCE_GPU_SUCCESS(
         phi::dynload::cuMemUnmap(handle->base, handle->size));
+    backing_map_.MarkUnmapped(handle->base, handle->size);
     // Use non-throwing release: if the handle was already released by a
     // subsequent compactor remap (which created a new synthetic allocation
     // for the same physical handle), cuMemRelease returns
@@ -203,6 +209,8 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
       VLOG(3) << "FreeImpl: cuMemRelease returned " << release_status
               << " for handle " << handle->handle
               << " (likely already released by re-remap), skipping";
+    } else {
+      backing_map_.MarkReleased(handle->base, handle->handle, handle->size);
     }
   }
 
@@ -213,6 +221,7 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
 void CUDAVirtualMemAllocatorV2::UnmapHandle(VmmDevicePtr ptr, size_t size) {
   platform::CUDADeviceGuard guard(place_.device);
   PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cuMemUnmap(ptr, size));
+  backing_map_.MarkUnmapped(ptr, size);
 }
 
 bool CUDAVirtualMemAllocatorV2::TryUnmapHandle(VmmDevicePtr ptr, size_t size) {
@@ -224,6 +233,7 @@ bool CUDAVirtualMemAllocatorV2::TryUnmapHandle(VmmDevicePtr ptr, size_t size) {
             << " status=" << status;
     return false;
   }
+  backing_map_.MarkUnmapped(ptr, size);
   return true;
 }
 
@@ -261,6 +271,7 @@ void CUDAVirtualMemAllocatorV2::MapHandlesToVA(
       }
     }
     PADDLE_ENFORCE_GPU_SUCCESS(status);
+    backing_map_.MarkMapped(dst, hs[i], handle_size_);
   }
   auto status = phi::dynload::cuMemSetAccess(
       ptr, hs.size() * handle_size_, access_desc_.data(), access_desc_.size());
@@ -290,6 +301,10 @@ void CUDAVirtualMemAllocatorV2::RegisterHandleLayout(
   std::lock_guard<SpinLock> guard(allocation_layout_mu_);
   EmplaceOrEnforce(
       &allocation_layout_map_, ptr, layout, "allocation_layout_map_");
+  if (!backing_map_.ValidateLayout(layout, "RegisterHandleLayout")) {
+    VLOG(0) << "VMM V2 BackingMap validation failed while registering layout "
+            << ptr;
+  }
 }
 
 void CUDAVirtualMemAllocatorV2::UnregisterHandleLayout(void* ptr) {
@@ -308,6 +323,28 @@ DecoratedAllocationPtr CUDAVirtualMemAllocatorV2::CreateSyntheticAllocation(
   return DecoratedAllocationPtr(alloc, [self](phi::Allocation* a) {
     self->FreeImpl(static_cast<Allocation*>(a));
   });
+}
+
+void CUDAVirtualMemAllocatorV2::MarkBackingMapped(VmmDevicePtr ptr,
+                                                  VmmAllocHandle handle,
+                                                  size_t size) {
+  backing_map_.MarkMapped(ptr, handle, size);
+}
+
+void CUDAVirtualMemAllocatorV2::MarkBackingUnmapped(VmmDevicePtr ptr,
+                                                    size_t size) {
+  backing_map_.MarkUnmapped(ptr, size);
+}
+
+void CUDAVirtualMemAllocatorV2::MarkBackingReleased(VmmDevicePtr ptr,
+                                                    VmmAllocHandle handle,
+                                                    size_t size) {
+  backing_map_.MarkReleased(ptr, handle, size);
+}
+
+bool CUDAVirtualMemAllocatorV2::ValidateBackingLayout(
+    const HandleLayout& layout, const char* context) const {
+  return backing_map_.ValidateLayout(layout, context);
 }
 
 }  // namespace allocation
