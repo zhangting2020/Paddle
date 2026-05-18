@@ -71,7 +71,11 @@ phi::Allocation* VMMAutoGrowthBestFitMultiPoolAllocatorV2::AllocateImpl(
 
 size_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::CompactImpl(
     const Place& place, size_t requested_size) {
-  // place is forwarded to each sub-pool which validates independently.
+  if (requested_size > 0) {
+    const auto route = RouteAllocation(requested_size);
+    return route.allocator->Compact(place, requested_size);
+  }
+  // Unbounded compact is an explicit maintenance/diagnostic request.
   return small_allocator_->Compact(place, requested_size) +
          large_allocator_->Compact(place, requested_size);
 }

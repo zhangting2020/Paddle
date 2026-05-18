@@ -152,8 +152,15 @@ phi::Allocation* CUDAVirtualMemAllocatorV2::AllocateImpl(size_t size) {
     layout.push_back(std::make_shared<VmmHandleMeta>(VmmHandleMeta{
         ptr + i * handle_size_, handle_size_, handle, place_.device}));
   }
-  PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cuMemSetAccess(
-      ptr, aligned, access_desc_.data(), access_desc_.size()));
+  auto access_status = phi::dynload::cuMemSetAccess(
+      ptr, aligned, access_desc_.data(), access_desc_.size());
+  if (access_status != CUDA_SUCCESS) {
+    for (const auto& m : layout) {
+      phi::dynload::cuMemUnmap(m->base, m->size);
+      platform::RecordedGpuMemRelease(m->handle, m->size, place_.device);
+    }
+    PADDLE_ENFORCE_GPU_SUCCESS(access_status);
+  }
 
   RegisterHandleLayout(reinterpret_cast<void*>(ptr), layout);
   AdvanceTailOffset(aligned);

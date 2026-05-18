@@ -158,11 +158,13 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   // VA cursor, so the new allocation is guaranteed to be contiguous with
   // the tail FREE block.
   size_t tail_reuse_size = 0;
+  void* tail_reuse_ptr = nullptr;
   std::vector<BlockPartV2> tail_parts;
   if (!all_blocks_.empty()) {
     auto tail_it = std::prev(all_blocks_.end());
     if (tail_it->type_ == BlockType::kFree) {
       tail_reuse_size = tail_it->size_;
+      tail_reuse_ptr = tail_it->ptr_;
       tail_parts = std::move(tail_it->parts_);
       EraseFreeBlock(tail_it);
       all_blocks_.erase(tail_it);
@@ -185,11 +187,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
       // Grow failed — restore the tail FREE block before propagating.
       if (tail_reuse_size > 0) {
         BlockV2 restored;
-        restored.ptr_ = reinterpret_cast<uint8_t*>(
-            all_blocks_.empty()
-                ? nullptr
-                : reinterpret_cast<uint8_t*>(all_blocks_.back().ptr_) +
-                      all_blocks_.back().size_);
+        restored.ptr_ = tail_reuse_ptr;
         restored.size_ = tail_reuse_size;
         restored.type_ = BlockType::kFree;
         restored.parts_ = std::move(tail_parts);
@@ -629,6 +627,15 @@ uint64_t VMMAutoGrowthBestFitAllocatorV2::FreeIdleChunks() {
     alloc_it = underlying_allocations_.erase(alloc_it);
   }
 
+  const size_t tail_offset =
+      all_blocks_.empty()
+          ? 0
+          : static_cast<size_t>(
+                reinterpret_cast<VmmDevicePtr>(
+                    reinterpret_cast<uint8_t*>(all_blocks_.back().ptr_) +
+                    all_blocks_.back().size_) -
+                underlying_allocator_->virtual_mem_base());
+  underlying_allocator_->SetTailOffset(tail_offset);
   return released;
 }
 
