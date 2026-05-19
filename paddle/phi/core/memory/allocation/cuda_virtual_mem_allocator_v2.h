@@ -67,6 +67,9 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
       VmmDevicePtr ptr,
       const std::vector<VmmAllocHandle>& hs,
       const std::vector<std::shared_ptr<VmmHandleMeta>>* metas = nullptr);
+  // Create fresh physical backing and map it at an existing reserved VA range.
+  // This is used by upper layers to reuse FREE+UNMAPPED gap space in place.
+  DecoratedAllocationPtr AllocateAtVA(VmmDevicePtr ptr, size_t size);
   // Exposes the allocation-level handle list for IPC/export queries. The key
   // is the raw allocation ptr returned by this allocator.
   bool CollectAllocationHandleLayout(void* ptr, HandleLayout* layout) const;

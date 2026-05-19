@@ -151,6 +151,9 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   if (auto* allocation = AllocFromFreeBlocks(requested_size)) {
     return allocation;
   }
+  if (auto* allocation = AllocFromGapBlocks(requested_size)) {
+    return allocation;
+  }
 
   // Tail reuse: if the last block in the address space is FREE, detach it
   // and only request the difference from the underlying allocator. The
@@ -541,6 +544,81 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
       &allocated_blocks_, block_it->ptr_, block_it, "allocated_blocks_");
   return new Allocation(
       block_it->ptr_, block_it->ptr_, block_it->size_, place_);
+}
+
+phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromGapBlocks(
+    size_t size) {
+  const size_t backing_size =
+      AlignedSize(size, underlying_allocator_->handle_size());
+  BlockListIt best = all_blocks_.end();
+  for (auto it = all_blocks_.begin(); it != all_blocks_.end(); ++it) {
+    if (it->type_ != BlockType::kGap || it->size_ < backing_size) {
+      continue;
+    }
+    if (best == all_blocks_.end() || it->size_ < best->size_) {
+      best = it;
+    }
+  }
+  if (best == all_blocks_.end()) {
+    return nullptr;
+  }
+
+  const auto gap_ptr = reinterpret_cast<VmmDevicePtr>(best->ptr_);
+  DecoratedAllocationPtr raw_alloc;
+  try {
+    raw_alloc = underlying_allocator_->AllocateAtVA(gap_ptr, backing_size);
+  } catch (...) {
+    // Do not mutate the allocation view if backing cannot be created in this
+    // gap. The normal grow path will surface the allocation failure if needed.
+    return nullptr;
+  }
+
+  HandleLayout layout;
+  PADDLE_ENFORCE_EQ(
+      underlying_allocator_->CollectAllocationHandleLayout(raw_alloc->ptr(),
+                                                           &layout),
+      true,
+      common::errors::NotFound(
+          "Can not collect VMM handle layout for gap allocation %p.",
+          raw_alloc->ptr()));
+  auto parts = BuildBlockPartsFromHandleLayout(layout);
+  underlying_allocations_.emplace_back(std::move(raw_alloc));
+
+  const size_t original_gap_size = best->size_;
+  const PoolType original_pool_type = best->pool_type_;
+
+  best->type_ = BlockType::kActive;
+  best->size_ = size;
+  best->parts_ = SlicePartsForRange(parts, 0, size);
+  best->pool_type_ = original_pool_type;
+  EmplaceOrEnforce(&allocated_blocks_, best->ptr_, best, "allocated_blocks_");
+
+  auto insert_pos = std::next(best);
+  if (backing_size > size) {
+    BlockV2 mapped_remain;
+    mapped_remain.ptr_ = reinterpret_cast<uint8_t*>(best->ptr_) + size;
+    mapped_remain.size_ = backing_size - size;
+    mapped_remain.type_ = BlockType::kFree;
+    mapped_remain.parts_ = SlicePartsForRange(parts, size, backing_size - size);
+    mapped_remain.pool_type_ = original_pool_type;
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+    mapped_remain.owning_stream_ = nullptr;
+#endif
+    auto free_it = all_blocks_.insert(insert_pos, std::move(mapped_remain));
+    InsertFreeBlock(free_it);
+    insert_pos = std::next(free_it);
+  }
+
+  if (original_gap_size > backing_size) {
+    BlockV2 tail_gap;
+    tail_gap.ptr_ = reinterpret_cast<uint8_t*>(best->ptr_) + backing_size;
+    tail_gap.size_ = original_gap_size - backing_size;
+    tail_gap.type_ = BlockType::kGap;
+    tail_gap.pool_type_ = original_pool_type;
+    all_blocks_.insert(insert_pos, std::move(tail_gap));
+  }
+
+  return new Allocation(best->ptr_, best->ptr_, best->size_, place_);
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::InsertFreeBlock(BlockListIt it) {

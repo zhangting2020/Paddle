@@ -563,6 +563,36 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactRemapsWholeFreeHandleToTail) {
   EXPECT_EQ(allocator.free_blocks_.size(), 1UL);
 }
 
+TEST(VMMAutoGrowthBestFitAllocatorV2, AllocateReusesGapBeforeTailGrow) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
+
+  auto first = allocator.Allocate(underlying->handle_size());
+  auto middle = allocator.Allocate(underlying->handle_size());
+  auto last = allocator.Allocate(underlying->handle_size());
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(middle, nullptr);
+  ASSERT_NE(last, nullptr);
+
+  auto* middle_ptr = middle->ptr();
+  middle.reset();
+
+  ASSERT_EQ(allocator.Compact(phi::GPUPlace()), underlying->handle_size());
+  ASSERT_EQ(allocator.free_blocks_.size(), 1UL);
+
+  auto tail_reuse = allocator.Allocate(underlying->handle_size());
+  ASSERT_NE(tail_reuse, nullptr);
+  EXPECT_NE(tail_reuse->ptr(), middle_ptr);
+  EXPECT_TRUE(allocator.free_blocks_.empty());
+
+  const size_t tail_before_gap_reuse = underlying->tail_offset();
+  auto gap_reuse = allocator.Allocate(underlying->handle_size());
+  ASSERT_NE(gap_reuse, nullptr);
+  EXPECT_EQ(gap_reuse->ptr(), middle_ptr);
+  EXPECT_EQ(underlying->tail_offset(), tail_before_gap_reuse);
+}
+
 TEST(VMMAutoGrowthBestFitAllocatorV2, CompactSkipsPartialFreeHandle) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(

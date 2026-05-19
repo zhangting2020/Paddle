@@ -70,6 +70,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
 
  private:
   phi::Allocation* AllocFromFreeBlocks(size_t size);
+  phi::Allocation* AllocFromGapBlocks(size_t size);
   void InsertFreeBlock(BlockListIt it);
   void EraseFreeBlock(BlockListIt it);
   void RebuildFreeBlockIndex();

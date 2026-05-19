@@ -172,6 +172,94 @@ phi::Allocation* CUDAVirtualMemAllocatorV2::AllocateImpl(size_t size) {
   return new Allocation(reinterpret_cast<void*>(ptr), aligned, place_);
 }
 
+DecoratedAllocationPtr CUDAVirtualMemAllocatorV2::AllocateAtVA(
+    VmmDevicePtr ptr, size_t size) {
+  InitOnce();
+  const size_t aligned = AlignedSize(size, handle_size_);
+  const size_t num_handles = aligned / handle_size_;
+  PADDLE_ENFORCE_GE(
+      ptr,
+      virtual_mem_base_,
+      common::errors::InvalidArgument(
+          "VMMAllocatorV2 AllocateAtVA ptr is before reserved VA range."));
+  PADDLE_ENFORCE_LE(
+      ptr,
+      virtual_mem_base_ + virtual_mem_size_,
+      common::errors::InvalidArgument(
+          "VMMAllocatorV2 AllocateAtVA ptr is outside reserved VA range."));
+  PADDLE_ENFORCE_EQ(
+      (ptr - virtual_mem_base_) % handle_size_,
+      0UL,
+      common::errors::InvalidArgument(
+          "VMMAllocatorV2 AllocateAtVA requires handle-aligned VA, ptr=%p.",
+          reinterpret_cast<void*>(ptr)));
+  PADDLE_ENFORCE_LE(
+      aligned,
+      virtual_mem_base_ + virtual_mem_size_ - ptr,
+      common::errors::ResourceExhausted(
+          "VMMAllocatorV2 AllocateAtVA range exceeds reserved VA space."));
+
+  platform::CUDADeviceGuard guard(place_.device);
+  HandleLayout layout;
+  layout.reserve(num_handles);
+  for (size_t i = 0; i < num_handles; ++i) {
+    VmmAllocHandle handle;
+    auto ce = platform::RecordedGpuMemCreate(
+        &handle, handle_size_, &prop_, 0, place_.device);
+    if (ce != gpuSuccess) {
+      for (const auto& m : layout) {
+        phi::dynload::cuMemUnmap(m->base, m->size);
+        platform::RecordedGpuMemRelease(m->handle, m->size, place_.device);
+      }
+      if (ce == CUDA_ERROR_OUT_OF_MEMORY) {
+        PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+            "cuMemCreate failed in AllocateAtVA: out of GPU memory at "
+            "handle %zu/%zu (handle_size=%zu).",
+            i,
+            num_handles,
+            handle_size_));
+      }
+      PADDLE_ENFORCE_GPU_SUCCESS(ce);
+    }
+
+    const VmmDevicePtr dst = ptr + i * handle_size_;
+    auto me = phi::dynload::cuMemMap(dst, handle_size_, 0, handle, 0);
+    if (me != CUDA_SUCCESS) {
+      platform::RecordedGpuMemRelease(handle, handle_size_, place_.device);
+      for (const auto& m : layout) {
+        phi::dynload::cuMemUnmap(m->base, m->size);
+        platform::RecordedGpuMemRelease(m->handle, m->size, place_.device);
+      }
+      PADDLE_THROW(common::errors::External(
+          "cuMemMap failed in AllocateAtVA at handle %zu/%zu.",
+          i,
+          num_handles));
+    }
+    layout.push_back(std::make_shared<VmmHandleMeta>(
+        VmmHandleMeta{dst, handle_size_, handle, place_.device}));
+  }
+
+  auto access_status = phi::dynload::cuMemSetAccess(
+      ptr, aligned, access_desc_.data(), access_desc_.size());
+  if (access_status != CUDA_SUCCESS) {
+    for (const auto& m : layout) {
+      phi::dynload::cuMemUnmap(m->base, m->size);
+      platform::RecordedGpuMemRelease(m->handle, m->size, place_.device);
+    }
+    PADDLE_ENFORCE_GPU_SUCCESS(access_status);
+  }
+
+  for (const auto& m : layout) {
+    backing_map_.MarkMapped(m->base, m->handle, m->size);
+  }
+  RegisterHandleLayout(reinterpret_cast<void*>(ptr), layout);
+  auto* alloc = new Allocation(reinterpret_cast<void*>(ptr), aligned, place_);
+  CUDAVirtualMemAllocatorV2* self = this;
+  return DecoratedAllocationPtr(alloc, [self](phi::Allocation* a) {
+    self->FreeImpl(static_cast<Allocation*>(a));
+  });
+}
+
 void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   auto* ptr = allocation->ptr();
   HandleLayout layout;
