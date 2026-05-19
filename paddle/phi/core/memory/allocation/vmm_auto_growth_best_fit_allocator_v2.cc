@@ -564,6 +564,11 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromGapBlocks(
   }
 
   const auto gap_ptr = reinterpret_cast<VmmDevicePtr>(best->ptr_);
+  VLOG(3) << "VMM V2 AllocFromGapBlocks gap_ptr="
+          << reinterpret_cast<void*>(gap_ptr) << " requested=" << size
+          << " backing_size=" << backing_size
+          << " original_gap_size=" << best->size_
+          << " tail_offset=" << underlying_allocator_->tail_offset();
   DecoratedAllocationPtr raw_alloc;
   try {
     raw_alloc = underlying_allocator_->AllocateAtVA(gap_ptr, backing_size);
