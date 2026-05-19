@@ -604,7 +604,8 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactWaitsForRemapSafeEvent) {
   ASSERT_EQ(cudaEventCreateWithFlags(&event, cudaEventDisableTiming),
             cudaSuccess);
   ASSERT_EQ(cudaEventRecord(event, stream), cudaSuccess);
-  ASSERT_TRUE(allocator.SetBlockRemapEvent(allocation->ptr(), stream, event));
+  auto guard = std::make_shared<CudaEventGuard>(event);
+  ASSERT_TRUE(allocator.SetBlockRemapEvent(allocation->ptr(), stream, guard));
 
   allocation.reset();
   EXPECT_EQ(allocator.Compact(phi::GPUPlace()), 0UL);
