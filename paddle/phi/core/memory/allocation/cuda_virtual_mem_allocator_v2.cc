@@ -125,7 +125,7 @@ phi::Allocation* CUDAVirtualMemAllocatorV2::AllocateImpl(size_t size) {
     VmmAllocHandle handle;
     auto ce = platform::RecordedGpuMemCreate(
         &handle, handle_size_, &prop_, 0, place_.device);
-    if (ce != gpuSuccess) {
+    if (ce != CUDA_SUCCESS) {
       for (const auto& m : layout) {
         phi::dynload::cuMemUnmap(m->base, m->size);
         platform::RecordedGpuMemRelease(m->handle, m->size, place_.device);
@@ -210,7 +210,7 @@ DecoratedAllocationPtr CUDAVirtualMemAllocatorV2::AllocateAtVA(
     VmmAllocHandle handle;
     auto ce = platform::RecordedGpuMemCreate(
         &handle, handle_size_, &prop_, 0, place_.device);
-    if (ce != gpuSuccess) {
+    if (ce != CUDA_SUCCESS) {
       for (const auto& m : layout) {
         phi::dynload::cuMemUnmap(m->base, m->size);
         platform::RecordedGpuMemRelease(m->handle, m->size, place_.device);
