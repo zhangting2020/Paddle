@@ -555,6 +555,12 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromGapBlocks(
     if (it->type_ != BlockType::kGap || it->size_ < backing_size) {
       continue;
     }
+    if (RangeOverlapsUnderlyingAllocation(it->ptr_, backing_size)) {
+      VLOG(6) << "VMM V2 AllocFromGapBlocks skip ownership-overlapped gap ptr="
+              << it->ptr_ << " backing_size=" << backing_size
+              << " gap_size=" << it->size_;
+      continue;
+    }
     if (best == all_blocks_.end() || it->size_ < best->size_) {
       best = it;
     }
@@ -564,7 +570,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromGapBlocks(
   }
 
   const auto gap_ptr = reinterpret_cast<VmmDevicePtr>(best->ptr_);
-  VLOG(3) << "VMM V2 AllocFromGapBlocks gap_ptr="
+  VLOG(6) << "VMM V2 AllocFromGapBlocks gap_ptr="
           << reinterpret_cast<void*>(gap_ptr) << " requested=" << size
           << " backing_size=" << backing_size
           << " original_gap_size=" << best->size_
@@ -624,6 +630,22 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromGapBlocks(
   }
 
   return new Allocation(best->ptr_, best->ptr_, best->size_, place_);
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::RangeOverlapsUnderlyingAllocation(
+    void* ptr, size_t size) const {
+  const auto* begin = reinterpret_cast<const uint8_t*>(ptr);
+  const auto* end = begin + size;
+  for (const auto& allocation : underlying_allocations_) {
+    const auto* alloc_begin =
+        reinterpret_cast<const uint8_t*>(allocation->ptr());
+    const auto* alloc_end = alloc_begin + allocation->size();
+    if (alloc_end <= begin || alloc_begin >= end) {
+      continue;
+    }
+    return true;
+  }
+  return false;
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::InsertFreeBlock(BlockListIt it) {

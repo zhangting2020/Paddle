@@ -200,7 +200,7 @@ DecoratedAllocationPtr CUDAVirtualMemAllocatorV2::AllocateAtVA(
           "VMMAllocatorV2 AllocateAtVA range exceeds reserved VA space."));
 
   platform::CUDADeviceGuard guard(place_.device);
-  VLOG(3) << "VMM V2 AllocateAtVA ptr=" << reinterpret_cast<void*>(ptr)
+  VLOG(6) << "VMM V2 AllocateAtVA ptr=" << reinterpret_cast<void*>(ptr)
           << " requested=" << size << " aligned=" << aligned
           << " handle_count=" << num_handles
           << " tail_offset=" << virtual_mem_alloced_offset_;

@@ -563,7 +563,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactRemapsWholeFreeHandleToTail) {
   EXPECT_EQ(allocator.free_blocks_.size(), 1UL);
 }
 
-TEST(VMMAutoGrowthBestFitAllocatorV2, AllocateReusesGapBeforeTailGrow) {
+TEST(VMMAutoGrowthBestFitAllocatorV2, AllocateSkipsOwnershipOverlappedGap) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
       underlying, 256, phi::GPUPlace(), PoolType::kLarge);
@@ -589,7 +589,32 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, AllocateReusesGapBeforeTailGrow) {
   const size_t tail_before_gap_reuse = underlying->tail_offset();
   auto gap_reuse = allocator.Allocate(underlying->handle_size());
   ASSERT_NE(gap_reuse, nullptr);
-  EXPECT_EQ(gap_reuse->ptr(), middle_ptr);
+  EXPECT_NE(gap_reuse->ptr(), middle_ptr);
+  EXPECT_GT(underlying->tail_offset(), tail_before_gap_reuse);
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2, AllocateReusesNonOwnedGapBeforeTailGrow) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
+
+  auto first = allocator.Allocate(underlying->handle_size());
+  ASSERT_NE(first, nullptr);
+
+  auto* gap_ptr = reinterpret_cast<uint8_t*>(underlying->virtual_mem_base()) +
+                  underlying->tail_offset();
+  BlockV2 gap;
+  gap.ptr_ = gap_ptr;
+  gap.size_ = underlying->handle_size();
+  gap.type_ = BlockType::kGap;
+  gap.pool_type_ = PoolType::kLarge;
+  allocator.all_blocks_.insert(allocator.all_blocks_.end(), std::move(gap));
+  underlying->AdvanceTailOffset(underlying->handle_size());
+
+  const size_t tail_before_gap_reuse = underlying->tail_offset();
+  auto gap_reuse = allocator.Allocate(underlying->handle_size());
+  ASSERT_NE(gap_reuse, nullptr);
+  EXPECT_EQ(gap_reuse->ptr(), gap_ptr);
   EXPECT_EQ(underlying->tail_offset(), tail_before_gap_reuse);
 }
 

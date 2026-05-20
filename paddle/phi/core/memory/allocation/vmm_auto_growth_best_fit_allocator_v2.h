@@ -71,6 +71,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
  private:
   phi::Allocation* AllocFromFreeBlocks(size_t size);
   phi::Allocation* AllocFromGapBlocks(size_t size);
+  bool RangeOverlapsUnderlyingAllocation(void* ptr, size_t size) const;
   void InsertFreeBlock(BlockListIt it);
   void EraseFreeBlock(BlockListIt it);
   void RebuildFreeBlockIndex();
