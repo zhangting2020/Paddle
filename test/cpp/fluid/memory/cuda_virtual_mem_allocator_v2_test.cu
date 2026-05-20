@@ -15,10 +15,43 @@
 #include "gtest/gtest.h"
 
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator_v2.h"
+#include "paddle/phi/core/memory/allocation/vmm_backing_map.h"
 
 namespace paddle {
 namespace memory {
 namespace allocation {
+
+TEST(VmmBackingMap, TracksMappedAndUnmappedRanges) {
+  VmmBackingMap map;
+  const VmmDevicePtr base = 0x10000000;
+  const size_t page_size = 2UL << 20;
+  map.Configure(base, page_size * 4, page_size, 0);
+
+  EXPECT_TRUE(map.IsRangeUnmapped(base, page_size * 4));
+  EXPECT_FALSE(map.IsRangeMapped(base, page_size));
+  EXPECT_EQ(map.TotalMappedBytes(), 0UL);
+
+  const VmmAllocHandle first_handle = static_cast<VmmAllocHandle>(0x101);
+  const VmmAllocHandle second_handle = static_cast<VmmAllocHandle>(0x102);
+  map.MarkMapped(base, first_handle, page_size);
+  map.MarkMapped(base + page_size, second_handle, page_size);
+
+  EXPECT_TRUE(map.IsRangeMapped(base, page_size * 2));
+  EXPECT_FALSE(map.IsRangeMapped(base, page_size * 3));
+  EXPECT_FALSE(map.IsRangeUnmapped(base, page_size));
+  EXPECT_TRUE(map.IsRangeUnmapped(base + page_size * 2, page_size * 2));
+  EXPECT_EQ(map.TotalMappedBytes(), page_size * 2);
+
+  map.MarkUnmapped(base, page_size);
+  EXPECT_FALSE(map.IsRangeMapped(base, page_size * 2));
+  EXPECT_TRUE(map.IsRangeUnmapped(base, page_size));
+  EXPECT_TRUE(map.IsRangeMapped(base + page_size, page_size));
+  EXPECT_EQ(map.TotalMappedBytes(), page_size);
+
+  map.MarkReleased(base + page_size, second_handle, page_size);
+  EXPECT_TRUE(map.IsRangeUnmapped(base, page_size * 4));
+  EXPECT_EQ(map.TotalMappedBytes(), 0UL);
+}
 
 TEST(CUDAVirtualMemAllocatorV2, HandleSizeAligned) {
   CUDAVirtualMemAllocatorV2 allocator(phi::GPUPlace(), 1, PoolType::kLarge);

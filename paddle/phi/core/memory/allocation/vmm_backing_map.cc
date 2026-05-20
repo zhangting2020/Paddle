@@ -174,6 +174,36 @@ bool VmmBackingMap::ValidateLayout(const HandleLayout& layout,
   return ok;
 }
 
+bool VmmBackingMap::IsRangeMapped(VmmDevicePtr va, size_t size) const {
+  std::lock_guard<SpinLock> guard(mu_);
+  size_t start = 0;
+  size_t count = 0;
+  if (!CheckRangeLocked(va, size, "IsRangeMapped", &start, &count)) {
+    return false;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (!pages_[start + i].mapped) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool VmmBackingMap::IsRangeUnmapped(VmmDevicePtr va, size_t size) const {
+  std::lock_guard<SpinLock> guard(mu_);
+  size_t start = 0;
+  size_t count = 0;
+  if (!CheckRangeLocked(va, size, "IsRangeUnmapped", &start, &count)) {
+    return false;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (pages_[start + i].mapped) {
+      return false;
+    }
+  }
+  return true;
+}
+
 size_t VmmBackingMap::TotalMappedBytes() const {
   std::lock_guard<SpinLock> guard(mu_);
   size_t mapped_pages = 0;

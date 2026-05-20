@@ -43,6 +43,8 @@ class VmmBackingMap {
 
   bool ValidateLayout(const HandleLayout& layout, const char* context) const;
 
+  bool IsRangeMapped(VmmDevicePtr va, size_t size) const;
+  bool IsRangeUnmapped(VmmDevicePtr va, size_t size) const;
   size_t TotalMappedBytes() const;
 
  private:
