@@ -65,6 +65,8 @@ class VmmBackingMap {
   std::vector<MappedPage> CollectMappedPages(
       const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
       size_t target_bytes) const;
+  bool ValidateMappedPages(const std::vector<MappedPage>& pages,
+                           const char* context) const;
   size_t TotalMappedBytes() const;
 
  private:

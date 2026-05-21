@@ -277,6 +277,56 @@ std::vector<VmmBackingMap::MappedPage> VmmBackingMap::CollectMappedPages(
   return mapped_pages;
 }
 
+bool VmmBackingMap::ValidateMappedPages(
+    const std::vector<MappedPage>& mapped_pages, const char* context) const {
+  std::lock_guard<SpinLock> guard(mu_);
+  bool ok = true;
+  for (const auto& mapped_page : mapped_pages) {
+    size_t start = 0;
+    size_t count = 0;
+    if (!CheckRangeLocked(
+            mapped_page.va, page_size_, context, &start, &count)) {
+      ok = false;
+      continue;
+    }
+    if (count != 1) {
+      VLOG(0) << "VMM V2 BackingMap invalid mapped page count in " << context
+              << ": va=" << reinterpret_cast<void*>(mapped_page.va)
+              << " count=" << count;
+      ok = false;
+      continue;
+    }
+
+    const auto& page = pages_[start];
+    if (!page.mapped) {
+      VLOG(0) << "VMM V2 BackingMap mapped page became unmapped in "
+              << context << ": va="
+              << reinterpret_cast<void*>(mapped_page.va)
+              << " snapshot_epoch=" << mapped_page.epoch
+              << " current_epoch=" << page.epoch;
+      ok = false;
+      continue;
+    }
+    if (page.handle != mapped_page.handle) {
+      VLOG(0) << "VMM V2 BackingMap mapped page handle changed in "
+              << context << ": va="
+              << reinterpret_cast<void*>(mapped_page.va)
+              << " snapshot_handle="
+              << reinterpret_cast<void*>(mapped_page.handle)
+              << " current_handle=" << reinterpret_cast<void*>(page.handle);
+      ok = false;
+    }
+    if (page.epoch != mapped_page.epoch) {
+      VLOG(0) << "VMM V2 BackingMap mapped page epoch changed in " << context
+              << ": va=" << reinterpret_cast<void*>(mapped_page.va)
+              << " snapshot_epoch=" << mapped_page.epoch
+              << " current_epoch=" << page.epoch;
+      ok = false;
+    }
+  }
+  return ok;
+}
+
 std::vector<std::pair<VmmDevicePtr, size_t>>
 VmmBackingMap::CollectRangesLocked(VmmDevicePtr va,
                                    size_t size,
