@@ -62,6 +62,9 @@ class VmmBackingMap {
       const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const;
   std::vector<MappedPage> CollectMappedPages(
       const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const;
+  std::vector<MappedPage> CollectMappedPages(
+      const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
+      size_t target_bytes) const;
   size_t TotalMappedBytes() const;
 
  private:
@@ -87,6 +90,7 @@ class VmmBackingMap {
   void AppendMappedPagesLocked(VmmDevicePtr va,
                                size_t size,
                                const char* context,
+                               size_t max_pages,
                                std::vector<MappedPage>* pages) const;
 
   VmmDevicePtr base_{0};

@@ -249,7 +249,30 @@ std::vector<VmmBackingMap::MappedPage> VmmBackingMap::CollectMappedPages(
   std::vector<MappedPage> mapped_pages;
   for (const auto& range : ranges) {
     AppendMappedPagesLocked(
-        range.first, range.second, "CollectMappedPages", &mapped_pages);
+        range.first, range.second, "CollectMappedPages", 0, &mapped_pages);
+  }
+  return mapped_pages;
+}
+
+std::vector<VmmBackingMap::MappedPage> VmmBackingMap::CollectMappedPages(
+    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
+    size_t target_bytes) const {
+  std::lock_guard<SpinLock> guard(mu_);
+  std::vector<MappedPage> mapped_pages;
+  if (target_bytes == 0 || page_size_ == 0) {
+    return mapped_pages;
+  }
+
+  const size_t target_pages = (target_bytes + page_size_ - 1) / page_size_;
+  for (const auto& range : ranges) {
+    AppendMappedPagesLocked(range.first,
+                            range.second,
+                            "CollectMappedPages",
+                            target_pages,
+                            &mapped_pages);
+    if (mapped_pages.size() >= target_pages) {
+      break;
+    }
   }
   return mapped_pages;
 }
@@ -316,6 +339,7 @@ void VmmBackingMap::AppendMappedPagesLocked(
     VmmDevicePtr va,
     size_t size,
     const char* context,
+    size_t max_pages,
     std::vector<MappedPage>* mapped_pages) const {
   size_t start = 0;
   size_t count = 0;
@@ -324,6 +348,9 @@ void VmmBackingMap::AppendMappedPagesLocked(
   }
 
   for (size_t i = 0; i < count; ++i) {
+    if (max_pages != 0 && mapped_pages->size() >= max_pages) {
+      break;
+    }
     const auto& page = pages_[start + i];
     if (!page.mapped) {
       continue;
