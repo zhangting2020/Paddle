@@ -39,6 +39,10 @@ class VmmBackingMap {
     VmmAllocHandle handle{0};
     uint64_t epoch{0};
   };
+  struct UnmappedPage {
+    VmmDevicePtr va{0};
+    uint64_t epoch{0};
+  };
 
   void Configure(VmmDevicePtr base, size_t size, size_t page_size, int device);
 
@@ -70,8 +74,15 @@ class VmmBackingMap {
   std::vector<MappedPage> CollectMappedPagesFullyCoveredBy(
       const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
       size_t target_bytes) const;
+  std::vector<UnmappedPage> CollectUnmappedPagesFullyCoveredBy(
+      const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const;
+  std::vector<UnmappedPage> CollectUnmappedPagesFullyCoveredBy(
+      const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
+      size_t target_bytes) const;
   bool ValidateMappedPages(const std::vector<MappedPage>& pages,
                            const char* context) const;
+  bool ValidateUnmappedPages(const std::vector<UnmappedPage>& pages,
+                             const char* context) const;
   size_t TotalMappedBytes() const;
 
  private:
@@ -105,6 +116,12 @@ class VmmBackingMap {
       const char* context,
       size_t max_pages,
       std::vector<MappedPage>* pages) const;
+  void AppendUnmappedPagesFullyCoveredByLocked(
+      VmmDevicePtr va,
+      size_t size,
+      const char* context,
+      size_t max_pages,
+      std::vector<UnmappedPage>* pages) const;
 
   VmmDevicePtr base_{0};
   size_t size_{0};

@@ -316,6 +316,47 @@ VmmBackingMap::CollectMappedPagesFullyCoveredBy(
   return mapped_pages;
 }
 
+std::vector<VmmBackingMap::UnmappedPage>
+VmmBackingMap::CollectUnmappedPagesFullyCoveredBy(
+    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const {
+  std::lock_guard<SpinLock> guard(mu_);
+  std::vector<UnmappedPage> unmapped_pages;
+  for (const auto& range : ranges) {
+    AppendUnmappedPagesFullyCoveredByLocked(
+        range.first,
+        range.second,
+        "CollectUnmappedPagesFullyCoveredBy",
+        0,
+        &unmapped_pages);
+  }
+  return unmapped_pages;
+}
+
+std::vector<VmmBackingMap::UnmappedPage>
+VmmBackingMap::CollectUnmappedPagesFullyCoveredBy(
+    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
+    size_t target_bytes) const {
+  std::lock_guard<SpinLock> guard(mu_);
+  std::vector<UnmappedPage> unmapped_pages;
+  if (target_bytes == 0 || page_size_ == 0) {
+    return unmapped_pages;
+  }
+
+  const size_t target_pages = (target_bytes + page_size_ - 1) / page_size_;
+  for (const auto& range : ranges) {
+    AppendUnmappedPagesFullyCoveredByLocked(
+        range.first,
+        range.second,
+        "CollectUnmappedPagesFullyCoveredBy",
+        target_pages,
+        &unmapped_pages);
+    if (unmapped_pages.size() >= target_pages) {
+      break;
+    }
+  }
+  return unmapped_pages;
+}
+
 bool VmmBackingMap::ValidateMappedPages(
     const std::vector<MappedPage>& mapped_pages, const char* context) const {
   std::lock_guard<SpinLock> guard(mu_);
@@ -359,6 +400,49 @@ bool VmmBackingMap::ValidateMappedPages(
       VLOG(0) << "VMM V2 BackingMap mapped page epoch changed in " << context
               << ": va=" << reinterpret_cast<void*>(mapped_page.va)
               << " snapshot_epoch=" << mapped_page.epoch
+              << " current_epoch=" << page.epoch;
+      ok = false;
+    }
+  }
+  return ok;
+}
+
+bool VmmBackingMap::ValidateUnmappedPages(
+    const std::vector<UnmappedPage>& unmapped_pages, const char* context) const {
+  std::lock_guard<SpinLock> guard(mu_);
+  bool ok = true;
+  for (const auto& unmapped_page : unmapped_pages) {
+    size_t start = 0;
+    size_t count = 0;
+    if (!CheckRangeLocked(
+            unmapped_page.va, page_size_, context, &start, &count)) {
+      ok = false;
+      continue;
+    }
+    if (count != 1) {
+      VLOG(0) << "VMM V2 BackingMap invalid unmapped page count in "
+              << context << ": va="
+              << reinterpret_cast<void*>(unmapped_page.va)
+              << " count=" << count;
+      ok = false;
+      continue;
+    }
+
+    const auto& page = pages_[start];
+    if (page.mapped) {
+      VLOG(0) << "VMM V2 BackingMap unmapped page became mapped in "
+              << context << ": va="
+              << reinterpret_cast<void*>(unmapped_page.va)
+              << " snapshot_epoch=" << unmapped_page.epoch
+              << " current_epoch=" << page.epoch;
+      ok = false;
+      continue;
+    }
+    if (page.epoch != unmapped_page.epoch) {
+      VLOG(0) << "VMM V2 BackingMap unmapped page epoch changed in "
+              << context << ": va="
+              << reinterpret_cast<void*>(unmapped_page.va)
+              << " snapshot_epoch=" << unmapped_page.epoch
               << " current_epoch=" << page.epoch;
       ok = false;
     }
@@ -490,6 +574,49 @@ void VmmBackingMap::AppendMappedPagesFullyCoveredByLocked(
     }
     mapped_pages->push_back(
         MappedPage{base_ + page_idx * page_size_, page.handle, page.epoch});
+  }
+}
+
+void VmmBackingMap::AppendUnmappedPagesFullyCoveredByLocked(
+    VmmDevicePtr va,
+    size_t size,
+    const char* context,
+    size_t max_pages,
+    std::vector<UnmappedPage>* unmapped_pages) const {
+  if (!configured_) {
+    VLOG(0) << "VMM V2 BackingMap " << context
+            << " before Configure, va=" << reinterpret_cast<void*>(va)
+            << " size=" << size;
+    return;
+  }
+  if (size == 0 || page_size_ == 0 || va < base_ || va + size < va ||
+      va + size > base_ + size_) {
+    VLOG(0) << "VMM V2 BackingMap invalid range in " << context
+            << ": va=" << reinterpret_cast<void*>(va) << " size=" << size
+            << " base=" << reinterpret_cast<void*>(base_)
+            << " backing_size=" << size_ << " page_size=" << page_size_;
+    return;
+  }
+
+  const VmmDevicePtr range_end = va + size;
+  const size_t start_offset = va - base_;
+  const size_t end_offset = range_end - base_;
+  const size_t first_page = (start_offset + page_size_ - 1) / page_size_;
+  const size_t end_page = end_offset / page_size_;
+  if (first_page >= end_page) {
+    return;
+  }
+
+  for (size_t page_idx = first_page; page_idx < end_page; ++page_idx) {
+    if (max_pages != 0 && unmapped_pages->size() >= max_pages) {
+      break;
+    }
+    const auto& page = pages_[page_idx];
+    if (page.mapped) {
+      continue;
+    }
+    unmapped_pages->push_back(
+        UnmappedPage{base_ + page_idx * page_size_, page.epoch});
   }
 }
 

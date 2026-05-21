@@ -115,6 +115,15 @@ TEST(VmmBackingMap, TracksMappedAndUnmappedRanges) {
       map.CollectMappedPagesFullyCoveredBy(unaligned_free_ranges, page_size);
   ASSERT_EQ(mapped_pages.size(), 1UL);
   EXPECT_EQ(mapped_pages[0].va, base + page_size);
+  auto unmapped_pages =
+      map.CollectUnmappedPagesFullyCoveredBy(unaligned_free_ranges);
+  ASSERT_EQ(unmapped_pages.size(), 1UL);
+  EXPECT_EQ(unmapped_pages[0].va, base + page_size * 2);
+  EXPECT_TRUE(map.ValidateUnmappedPages(unmapped_pages, "unit_test_unmapped"));
+  unmapped_pages =
+      map.CollectUnmappedPagesFullyCoveredBy(unaligned_free_ranges, page_size);
+  ASSERT_EQ(unmapped_pages.size(), 1UL);
+  EXPECT_EQ(unmapped_pages[0].va, base + page_size * 2);
 
   EXPECT_FALSE(map.IsRangeMapped(base, page_size * 2));
   EXPECT_TRUE(map.IsRangeUnmapped(base, page_size));
@@ -124,6 +133,17 @@ TEST(VmmBackingMap, TracksMappedAndUnmappedRanges) {
   map.MarkReleased(base + page_size, second_handle, page_size);
   EXPECT_TRUE(map.IsRangeUnmapped(base, page_size * 4));
   EXPECT_EQ(map.TotalMappedBytes(), 0UL);
+  std::vector<std::pair<VmmDevicePtr, size_t>> all_ranges = {
+      {base, page_size * 4}};
+  auto all_unmapped_pages =
+      map.CollectUnmappedPagesFullyCoveredBy(all_ranges, page_size * 2);
+  ASSERT_EQ(all_unmapped_pages.size(), 2UL);
+  EXPECT_TRUE(
+      map.ValidateUnmappedPages(all_unmapped_pages, "unit_test_all_unmapped"));
+  const VmmAllocHandle third_handle = static_cast<VmmAllocHandle>(0x103);
+  map.MarkMapped(base, third_handle, page_size);
+  EXPECT_FALSE(
+      map.ValidateUnmappedPages(all_unmapped_pages, "unit_test_unmapped_stale"));
 }
 
 TEST(CUDAVirtualMemAllocatorV2, HandleSizeAligned) {

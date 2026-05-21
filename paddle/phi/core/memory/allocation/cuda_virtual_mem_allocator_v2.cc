@@ -449,10 +449,26 @@ CUDAVirtualMemAllocatorV2::CollectMappedBackingPagesFullyCoveredBy(
   return backing_map_.CollectMappedPagesFullyCoveredBy(ranges, target_bytes);
 }
 
+std::vector<VmmBackingMap::UnmappedPage>
+CUDAVirtualMemAllocatorV2::CollectUnmappedBackingPagesFullyCoveredBy(
+    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
+    size_t target_bytes) const {
+  if (target_bytes == 0) {
+    return backing_map_.CollectUnmappedPagesFullyCoveredBy(ranges);
+  }
+  return backing_map_.CollectUnmappedPagesFullyCoveredBy(ranges, target_bytes);
+}
+
 bool CUDAVirtualMemAllocatorV2::ValidateMappedBackingPages(
     const std::vector<VmmBackingMap::MappedPage>& pages,
     const char* context) const {
   return backing_map_.ValidateMappedPages(pages, context);
+}
+
+bool CUDAVirtualMemAllocatorV2::ValidateUnmappedBackingPages(
+    const std::vector<VmmBackingMap::UnmappedPage>& pages,
+    const char* context) const {
+  return backing_map_.ValidateUnmappedPages(pages, context);
 }
 
 }  // namespace allocation
