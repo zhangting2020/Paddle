@@ -204,6 +204,57 @@ bool VmmBackingMap::IsRangeUnmapped(VmmDevicePtr va, size_t size) const {
   return true;
 }
 
+std::vector<std::pair<VmmDevicePtr, size_t>>
+VmmBackingMap::CollectMappedRanges(VmmDevicePtr va, size_t size) const {
+  std::lock_guard<SpinLock> guard(mu_);
+  return CollectRangesLocked(va, size, true, "CollectMappedRanges");
+}
+
+std::vector<std::pair<VmmDevicePtr, size_t>>
+VmmBackingMap::CollectUnmappedRanges(VmmDevicePtr va, size_t size) const {
+  std::lock_guard<SpinLock> guard(mu_);
+  return CollectRangesLocked(va, size, false, "CollectUnmappedRanges");
+}
+
+std::vector<std::pair<VmmDevicePtr, size_t>>
+VmmBackingMap::CollectRangesLocked(VmmDevicePtr va,
+                                   size_t size,
+                                   bool mapped,
+                                   const char* context) const {
+  std::vector<std::pair<VmmDevicePtr, size_t>> ranges;
+  size_t start = 0;
+  size_t count = 0;
+  if (!CheckRangeLocked(va, size, context, &start, &count)) {
+    return ranges;
+  }
+
+  bool in_range = false;
+  VmmDevicePtr range_begin = 0;
+  size_t range_size = 0;
+  for (size_t i = 0; i < count; ++i) {
+    const bool selected = pages_[start + i].mapped == mapped;
+    const VmmDevicePtr page_va = va + i * page_size_;
+    if (selected) {
+      if (!in_range) {
+        in_range = true;
+        range_begin = page_va;
+        range_size = 0;
+      }
+      range_size += page_size_;
+      continue;
+    }
+
+    if (in_range) {
+      ranges.emplace_back(range_begin, range_size);
+      in_range = false;
+    }
+  }
+  if (in_range) {
+    ranges.emplace_back(range_begin, range_size);
+  }
+  return ranges;
+}
+
 size_t VmmBackingMap::TotalMappedBytes() const {
   std::lock_guard<SpinLock> guard(mu_);
   size_t mapped_pages = 0;

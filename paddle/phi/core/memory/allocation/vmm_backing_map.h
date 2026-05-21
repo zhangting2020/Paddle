@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "paddle/phi/core/memory/allocation/spin_lock.h"
@@ -45,6 +46,10 @@ class VmmBackingMap {
 
   bool IsRangeMapped(VmmDevicePtr va, size_t size) const;
   bool IsRangeUnmapped(VmmDevicePtr va, size_t size) const;
+  std::vector<std::pair<VmmDevicePtr, size_t>> CollectMappedRanges(
+      VmmDevicePtr va, size_t size) const;
+  std::vector<std::pair<VmmDevicePtr, size_t>> CollectUnmappedRanges(
+      VmmDevicePtr va, size_t size) const;
   size_t TotalMappedBytes() const;
 
  private:
@@ -59,6 +64,8 @@ class VmmBackingMap {
                         const char* context,
                         size_t* start,
                         size_t* count) const;
+  std::vector<std::pair<VmmDevicePtr, size_t>> CollectRangesLocked(
+      VmmDevicePtr va, size_t size, bool mapped, const char* context) const;
 
   VmmDevicePtr base_{0};
   size_t size_{0};

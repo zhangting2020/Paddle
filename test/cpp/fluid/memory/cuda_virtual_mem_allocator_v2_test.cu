@@ -36,6 +36,15 @@ TEST(VmmBackingMap, TracksMappedAndUnmappedRanges) {
   map.MarkMapped(base, first_handle, page_size);
   map.MarkMapped(base + page_size, second_handle, page_size);
 
+  auto mapped_ranges = map.CollectMappedRanges(base, page_size * 4);
+  ASSERT_EQ(mapped_ranges.size(), 1UL);
+  EXPECT_EQ(mapped_ranges[0].first, base);
+  EXPECT_EQ(mapped_ranges[0].second, page_size * 2);
+  auto unmapped_ranges = map.CollectUnmappedRanges(base, page_size * 4);
+  ASSERT_EQ(unmapped_ranges.size(), 1UL);
+  EXPECT_EQ(unmapped_ranges[0].first, base + page_size * 2);
+  EXPECT_EQ(unmapped_ranges[0].second, page_size * 2);
+
   EXPECT_TRUE(map.IsRangeMapped(base, page_size * 2));
   EXPECT_FALSE(map.IsRangeMapped(base, page_size * 3));
   EXPECT_FALSE(map.IsRangeUnmapped(base, page_size));
@@ -43,6 +52,17 @@ TEST(VmmBackingMap, TracksMappedAndUnmappedRanges) {
   EXPECT_EQ(map.TotalMappedBytes(), page_size * 2);
 
   map.MarkUnmapped(base, page_size);
+  mapped_ranges = map.CollectMappedRanges(base, page_size * 4);
+  ASSERT_EQ(mapped_ranges.size(), 1UL);
+  EXPECT_EQ(mapped_ranges[0].first, base + page_size);
+  EXPECT_EQ(mapped_ranges[0].second, page_size);
+  unmapped_ranges = map.CollectUnmappedRanges(base, page_size * 4);
+  ASSERT_EQ(unmapped_ranges.size(), 2UL);
+  EXPECT_EQ(unmapped_ranges[0].first, base);
+  EXPECT_EQ(unmapped_ranges[0].second, page_size);
+  EXPECT_EQ(unmapped_ranges[1].first, base + page_size * 2);
+  EXPECT_EQ(unmapped_ranges[1].second, page_size * 2);
+
   EXPECT_FALSE(map.IsRangeMapped(base, page_size * 2));
   EXPECT_TRUE(map.IsRangeUnmapped(base, page_size));
   EXPECT_TRUE(map.IsRangeMapped(base + page_size, page_size));
