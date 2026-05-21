@@ -34,6 +34,12 @@ namespace allocation {
 // allocation behavior.
 class VmmBackingMap {
  public:
+  struct MappedPage {
+    VmmDevicePtr va{0};
+    VmmAllocHandle handle{0};
+    uint64_t epoch{0};
+  };
+
   void Configure(VmmDevicePtr base, size_t size, size_t page_size, int device);
 
   bool configured() const { return configured_; }
@@ -53,6 +59,8 @@ class VmmBackingMap {
   std::vector<std::pair<VmmDevicePtr, size_t>> CollectMappedRanges(
       const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const;
   std::vector<std::pair<VmmDevicePtr, size_t>> CollectUnmappedRanges(
+      const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const;
+  std::vector<MappedPage> CollectMappedPages(
       const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const;
   size_t TotalMappedBytes() const;
 
@@ -76,6 +84,10 @@ class VmmBackingMap {
                           const char* context,
                           std::vector<std::pair<VmmDevicePtr, size_t>>*
                               ranges) const;
+  void AppendMappedPagesLocked(VmmDevicePtr va,
+                               size_t size,
+                               const char* context,
+                               std::vector<MappedPage>* pages) const;
 
   VmmDevicePtr base_{0};
   size_t size_{0};

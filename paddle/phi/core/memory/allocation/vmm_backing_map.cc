@@ -243,6 +243,17 @@ VmmBackingMap::CollectUnmappedRanges(
   return unmapped_ranges;
 }
 
+std::vector<VmmBackingMap::MappedPage> VmmBackingMap::CollectMappedPages(
+    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const {
+  std::lock_guard<SpinLock> guard(mu_);
+  std::vector<MappedPage> mapped_pages;
+  for (const auto& range : ranges) {
+    AppendMappedPagesLocked(
+        range.first, range.second, "CollectMappedPages", &mapped_pages);
+  }
+  return mapped_pages;
+}
+
 std::vector<std::pair<VmmDevicePtr, size_t>>
 VmmBackingMap::CollectRangesLocked(VmmDevicePtr va,
                                    size_t size,
@@ -298,6 +309,27 @@ void VmmBackingMap::AppendRangesLocked(
     } else {
       ranges->emplace_back(range_begin, range_size);
     }
+  }
+}
+
+void VmmBackingMap::AppendMappedPagesLocked(
+    VmmDevicePtr va,
+    size_t size,
+    const char* context,
+    std::vector<MappedPage>* mapped_pages) const {
+  size_t start = 0;
+  size_t count = 0;
+  if (!CheckRangeLocked(va, size, context, &start, &count)) {
+    return;
+  }
+
+  for (size_t i = 0; i < count; ++i) {
+    const auto& page = pages_[start + i];
+    if (!page.mapped) {
+      continue;
+    }
+    mapped_pages->push_back(
+        MappedPage{va + i * page_size_, page.handle, page.epoch});
   }
 }
 
