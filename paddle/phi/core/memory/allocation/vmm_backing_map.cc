@@ -217,15 +217,52 @@ VmmBackingMap::CollectUnmappedRanges(VmmDevicePtr va, size_t size) const {
 }
 
 std::vector<std::pair<VmmDevicePtr, size_t>>
+VmmBackingMap::CollectMappedRanges(
+    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const {
+  std::lock_guard<SpinLock> guard(mu_);
+  std::vector<std::pair<VmmDevicePtr, size_t>> mapped_ranges;
+  for (const auto& range : ranges) {
+    AppendRangesLocked(
+        range.first, range.second, true, "CollectMappedRanges", &mapped_ranges);
+  }
+  return mapped_ranges;
+}
+
+std::vector<std::pair<VmmDevicePtr, size_t>>
+VmmBackingMap::CollectUnmappedRanges(
+    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const {
+  std::lock_guard<SpinLock> guard(mu_);
+  std::vector<std::pair<VmmDevicePtr, size_t>> unmapped_ranges;
+  for (const auto& range : ranges) {
+    AppendRangesLocked(range.first,
+                       range.second,
+                       false,
+                       "CollectUnmappedRanges",
+                       &unmapped_ranges);
+  }
+  return unmapped_ranges;
+}
+
+std::vector<std::pair<VmmDevicePtr, size_t>>
 VmmBackingMap::CollectRangesLocked(VmmDevicePtr va,
                                    size_t size,
                                    bool mapped,
                                    const char* context) const {
   std::vector<std::pair<VmmDevicePtr, size_t>> ranges;
+  AppendRangesLocked(va, size, mapped, context, &ranges);
+  return ranges;
+}
+
+void VmmBackingMap::AppendRangesLocked(
+    VmmDevicePtr va,
+    size_t size,
+    bool mapped,
+    const char* context,
+    std::vector<std::pair<VmmDevicePtr, size_t>>* ranges) const {
   size_t start = 0;
   size_t count = 0;
   if (!CheckRangeLocked(va, size, context, &start, &count)) {
-    return ranges;
+    return;
   }
 
   bool in_range = false;
@@ -245,14 +282,23 @@ VmmBackingMap::CollectRangesLocked(VmmDevicePtr va,
     }
 
     if (in_range) {
-      ranges.emplace_back(range_begin, range_size);
+      if (!ranges->empty() &&
+          ranges->back().first + ranges->back().second == range_begin) {
+        ranges->back().second += range_size;
+      } else {
+        ranges->emplace_back(range_begin, range_size);
+      }
       in_range = false;
     }
   }
   if (in_range) {
-    ranges.emplace_back(range_begin, range_size);
+    if (!ranges->empty() &&
+        ranges->back().first + ranges->back().second == range_begin) {
+      ranges->back().second += range_size;
+    } else {
+      ranges->emplace_back(range_begin, range_size);
+    }
   }
-  return ranges;
 }
 
 size_t VmmBackingMap::TotalMappedBytes() const {

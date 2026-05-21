@@ -14,6 +14,9 @@
 
 #include "gtest/gtest.h"
 
+#include <utility>
+#include <vector>
+
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator_v2.h"
 #include "paddle/phi/core/memory/allocation/vmm_backing_map.h"
 
@@ -44,6 +47,16 @@ TEST(VmmBackingMap, TracksMappedAndUnmappedRanges) {
   ASSERT_EQ(unmapped_ranges.size(), 1UL);
   EXPECT_EQ(unmapped_ranges[0].first, base + page_size * 2);
   EXPECT_EQ(unmapped_ranges[0].second, page_size * 2);
+  std::vector<std::pair<VmmDevicePtr, size_t>> free_ranges = {
+      {base, page_size}, {base + page_size, page_size * 3}};
+  mapped_ranges = map.CollectMappedRanges(free_ranges);
+  ASSERT_EQ(mapped_ranges.size(), 1UL);
+  EXPECT_EQ(mapped_ranges[0].first, base);
+  EXPECT_EQ(mapped_ranges[0].second, page_size * 2);
+  unmapped_ranges = map.CollectUnmappedRanges(free_ranges);
+  ASSERT_EQ(unmapped_ranges.size(), 1UL);
+  EXPECT_EQ(unmapped_ranges[0].first, base + page_size * 2);
+  EXPECT_EQ(unmapped_ranges[0].second, page_size * 2);
 
   EXPECT_TRUE(map.IsRangeMapped(base, page_size * 2));
   EXPECT_FALSE(map.IsRangeMapped(base, page_size * 3));
@@ -57,6 +70,12 @@ TEST(VmmBackingMap, TracksMappedAndUnmappedRanges) {
   EXPECT_EQ(mapped_ranges[0].first, base + page_size);
   EXPECT_EQ(mapped_ranges[0].second, page_size);
   unmapped_ranges = map.CollectUnmappedRanges(base, page_size * 4);
+  ASSERT_EQ(unmapped_ranges.size(), 2UL);
+  EXPECT_EQ(unmapped_ranges[0].first, base);
+  EXPECT_EQ(unmapped_ranges[0].second, page_size);
+  EXPECT_EQ(unmapped_ranges[1].first, base + page_size * 2);
+  EXPECT_EQ(unmapped_ranges[1].second, page_size * 2);
+  unmapped_ranges = map.CollectUnmappedRanges(free_ranges);
   ASSERT_EQ(unmapped_ranges.size(), 2UL);
   EXPECT_EQ(unmapped_ranges[0].first, base);
   EXPECT_EQ(unmapped_ranges[0].second, page_size);

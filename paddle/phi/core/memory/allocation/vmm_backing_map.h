@@ -50,6 +50,10 @@ class VmmBackingMap {
       VmmDevicePtr va, size_t size) const;
   std::vector<std::pair<VmmDevicePtr, size_t>> CollectUnmappedRanges(
       VmmDevicePtr va, size_t size) const;
+  std::vector<std::pair<VmmDevicePtr, size_t>> CollectMappedRanges(
+      const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const;
+  std::vector<std::pair<VmmDevicePtr, size_t>> CollectUnmappedRanges(
+      const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const;
   size_t TotalMappedBytes() const;
 
  private:
@@ -66,6 +70,12 @@ class VmmBackingMap {
                         size_t* count) const;
   std::vector<std::pair<VmmDevicePtr, size_t>> CollectRangesLocked(
       VmmDevicePtr va, size_t size, bool mapped, const char* context) const;
+  void AppendRangesLocked(VmmDevicePtr va,
+                          size_t size,
+                          bool mapped,
+                          const char* context,
+                          std::vector<std::pair<VmmDevicePtr, size_t>>*
+                              ranges) const;
 
   VmmDevicePtr base_{0};
   size_t size_{0};
