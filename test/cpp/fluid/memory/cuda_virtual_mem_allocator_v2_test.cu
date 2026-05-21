@@ -105,6 +105,16 @@ TEST(VmmBackingMap, TracksMappedAndUnmappedRanges) {
   mapped_pages = map.CollectMappedPages(free_ranges, page_size * 4);
   ASSERT_EQ(mapped_pages.size(), 1UL);
   EXPECT_EQ(mapped_pages[0].va, base + page_size);
+  std::vector<std::pair<VmmDevicePtr, size_t>> unaligned_free_ranges = {
+      {base + page_size / 2, page_size * 3}};
+  mapped_pages = map.CollectMappedPagesFullyCoveredBy(unaligned_free_ranges);
+  ASSERT_EQ(mapped_pages.size(), 1UL);
+  EXPECT_EQ(mapped_pages[0].va, base + page_size);
+  EXPECT_EQ(mapped_pages[0].handle, second_handle);
+  mapped_pages =
+      map.CollectMappedPagesFullyCoveredBy(unaligned_free_ranges, page_size);
+  ASSERT_EQ(mapped_pages.size(), 1UL);
+  EXPECT_EQ(mapped_pages[0].va, base + page_size);
 
   EXPECT_FALSE(map.IsRangeMapped(base, page_size * 2));
   EXPECT_TRUE(map.IsRangeUnmapped(base, page_size));

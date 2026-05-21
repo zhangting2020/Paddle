@@ -133,6 +133,19 @@ void MergeAdjacentGaps(std::list<BlockV2>* blocks) {
   }
 }
 
+std::vector<std::pair<VmmDevicePtr, size_t>> CollectFreeRanges(
+    const std::list<BlockV2>& blocks) {
+  std::vector<std::pair<VmmDevicePtr, size_t>> ranges;
+  for (const auto& block : blocks) {
+    if (block.type_ != BlockType::kFree || block.ipc_exported_) {
+      continue;
+    }
+    ranges.emplace_back(reinterpret_cast<VmmDevicePtr>(block.ptr_),
+                        block.size_);
+  }
+  return ranges;
+}
+
 BlockV2 CreateTailFreeBlock(
     VmmDevicePtr dst_va,
     size_t total_remapped,
@@ -367,6 +380,21 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     // ---- Phase 1: Unmap fully-covered handles from FREE blocks ----
     LOG(INFO) << "VMM V2 compactor: Phase 1 - scanning FREE blocks for "
               << "fully-covered handles";
+    if (VLOG_IS_ON(4)) {
+      const auto free_ranges = CollectFreeRanges(*blocks);
+      const auto backing_pages =
+          vmm_allocator_->CollectMappedBackingPagesFullyCoveredBy(
+              free_ranges, requested_size);
+      const bool snapshot_ok = vmm_allocator_->ValidateMappedBackingPages(
+          backing_pages, "FreeBlockRemapCompactor::pre_phase1");
+      VLOG(4) << "VMM V2 compactor BackingMap pre-scan pool="
+              << static_cast<int>(pool_type_)
+              << " free_ranges=" << free_ranges.size()
+              << " mapped_pages=" << backing_pages.size()
+              << " mapped_bytes=" << backing_pages.size() * handle_size
+              << " requested=" << requested_size
+              << " snapshot_ok=" << snapshot_ok;
+    }
     size_t free_block_count = 0, safe_block_count = 0;
     size_t fully_covered_count = 0, partial_count = 0;
     size_t event_blocked_count = 0;

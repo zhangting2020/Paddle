@@ -95,6 +95,12 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
                            size_t size);
   bool ValidateBackingLayout(const HandleLayout& layout,
                              const char* context) const;
+  std::vector<VmmBackingMap::MappedPage> CollectMappedBackingPagesFullyCoveredBy(
+      const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
+      size_t target_bytes) const;
+  bool ValidateMappedBackingPages(
+      const std::vector<VmmBackingMap::MappedPage>& pages,
+      const char* context) const;
 
  protected:
   phi::Allocation* AllocateImpl(size_t size) override;

@@ -439,6 +439,22 @@ bool CUDAVirtualMemAllocatorV2::ValidateBackingLayout(
   return backing_map_.ValidateLayout(layout, context);
 }
 
+std::vector<VmmBackingMap::MappedPage>
+CUDAVirtualMemAllocatorV2::CollectMappedBackingPagesFullyCoveredBy(
+    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
+    size_t target_bytes) const {
+  if (target_bytes == 0) {
+    return backing_map_.CollectMappedPagesFullyCoveredBy(ranges);
+  }
+  return backing_map_.CollectMappedPagesFullyCoveredBy(ranges, target_bytes);
+}
+
+bool CUDAVirtualMemAllocatorV2::ValidateMappedBackingPages(
+    const std::vector<VmmBackingMap::MappedPage>& pages,
+    const char* context) const {
+  return backing_map_.ValidateMappedPages(pages, context);
+}
+
 }  // namespace allocation
 }  // namespace memory
 }  // namespace paddle
