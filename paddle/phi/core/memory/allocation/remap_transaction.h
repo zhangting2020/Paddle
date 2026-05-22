@@ -25,21 +25,31 @@ namespace allocation {
 
 class RemapTransaction {
  public:
+  using VaRanges = std::vector<std::pair<VmmDevicePtr, size_t>>;
+
   struct PendingMappedRange {
     VmmDevicePtr dst{0};
     size_t handle_count{0};
+  };
+  struct CandidateValidation {
+    bool source_ok{true};
+    bool target_ok{true};
   };
 
   RemapTransaction(CUDAVirtualMemAllocatorV2* vmm_allocator, size_t handle_size)
       : vmm_allocator_(vmm_allocator), handle_size_(handle_size) {}
 
-  void SetCandidates(const VmmBackingMap::CompactCandidates& candidates);
+  void PrepareCandidates(const VaRanges& source_ranges,
+                         const VaRanges& target_ranges,
+                         size_t target_bytes);
   const VmmBackingMap::CompactCandidates& candidates() const {
     return candidates_;
   }
 
   bool ValidateSourcePages(const char* context) const;
   bool ValidateTargetPages(const char* context) const;
+  CandidateValidation ValidateCandidates(const char* source_context,
+                                         const char* target_context) const;
 
   void RecordMappedRange(VmmDevicePtr dst, size_t handle_count);
   void RollbackPendingMappings();

@@ -368,12 +368,10 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     if (VLOG_IS_ON(4)) {
       const auto free_ranges = CollectFreeRanges(*blocks);
       const auto gap_ranges = CollectGapRanges(*blocks);
-      transaction.SetCandidates(vmm_allocator_->CollectBackingCompactCandidates(
-          free_ranges, gap_ranges, requested_size));
+      transaction.PrepareCandidates(free_ranges, gap_ranges, requested_size);
       const auto& candidates = transaction.candidates();
-      const bool snapshot_ok =
-          transaction.ValidateSourcePages("FreeBlockRemapCompactor::pre_phase1");
-      const bool target_snapshot_ok = transaction.ValidateTargetPages(
+      const auto validation = transaction.ValidateCandidates(
+          "FreeBlockRemapCompactor::pre_phase1",
           "FreeBlockRemapCompactor::pre_phase1_target");
       VLOG(4) << "VMM V2 compactor BackingMap pre-scan pool="
               << static_cast<int>(pool_type_)
@@ -386,8 +384,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
               << " target_unmapped_bytes="
               << candidates.target_pages.size() * handle_size
               << " requested=" << requested_size
-              << " snapshot_ok=" << snapshot_ok
-              << " target_snapshot_ok=" << target_snapshot_ok;
+              << " snapshot_ok=" << validation.source_ok
+              << " target_snapshot_ok=" << validation.target_ok;
     }
     size_t free_block_count = 0, safe_block_count = 0;
     size_t fully_covered_count = 0, partial_count = 0;

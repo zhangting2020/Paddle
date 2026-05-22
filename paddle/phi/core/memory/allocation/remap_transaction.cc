@@ -20,9 +20,11 @@ namespace paddle {
 namespace memory {
 namespace allocation {
 
-void RemapTransaction::SetCandidates(
-    const VmmBackingMap::CompactCandidates& candidates) {
-  candidates_ = candidates;
+void RemapTransaction::PrepareCandidates(const VaRanges& source_ranges,
+                                         const VaRanges& target_ranges,
+                                         size_t target_bytes) {
+  candidates_ = vmm_allocator_->CollectBackingCompactCandidates(
+      source_ranges, target_ranges, target_bytes);
 }
 
 bool RemapTransaction::ValidateSourcePages(const char* context) const {
@@ -33,6 +35,14 @@ bool RemapTransaction::ValidateSourcePages(const char* context) const {
 bool RemapTransaction::ValidateTargetPages(const char* context) const {
   return vmm_allocator_->ValidateUnmappedBackingPages(candidates_.target_pages,
                                                       context);
+}
+
+RemapTransaction::CandidateValidation RemapTransaction::ValidateCandidates(
+    const char* source_context, const char* target_context) const {
+  CandidateValidation validation;
+  validation.source_ok = ValidateSourcePages(source_context);
+  validation.target_ok = ValidateTargetPages(target_context);
+  return validation;
 }
 
 void RemapTransaction::RecordMappedRange(VmmDevicePtr dst, size_t handle_count) {
