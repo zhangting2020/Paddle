@@ -459,6 +459,15 @@ CUDAVirtualMemAllocatorV2::CollectUnmappedBackingPagesFullyCoveredBy(
   return backing_map_.CollectUnmappedPagesFullyCoveredBy(ranges, target_bytes);
 }
 
+VmmBackingMap::CompactCandidates
+CUDAVirtualMemAllocatorV2::CollectBackingCompactCandidates(
+    const std::vector<std::pair<VmmDevicePtr, size_t>>& source_ranges,
+    const std::vector<std::pair<VmmDevicePtr, size_t>>& target_ranges,
+    size_t target_bytes) const {
+  return backing_map_.CollectCompactCandidates(
+      source_ranges, target_ranges, target_bytes);
+}
+
 bool CUDAVirtualMemAllocatorV2::ValidateMappedBackingPages(
     const std::vector<VmmBackingMap::MappedPage>& pages,
     const char* context) const {

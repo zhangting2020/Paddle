@@ -124,6 +124,14 @@ TEST(VmmBackingMap, TracksMappedAndUnmappedRanges) {
       map.CollectUnmappedPagesFullyCoveredBy(unaligned_free_ranges, page_size);
   ASSERT_EQ(unmapped_pages.size(), 1UL);
   EXPECT_EQ(unmapped_pages[0].va, base + page_size * 2);
+  auto candidates =
+      map.CollectCompactCandidates(unaligned_free_ranges,
+                                   unaligned_free_ranges,
+                                   page_size);
+  ASSERT_EQ(candidates.source_pages.size(), 1UL);
+  ASSERT_EQ(candidates.target_pages.size(), 1UL);
+  EXPECT_EQ(candidates.source_pages[0].va, base + page_size);
+  EXPECT_EQ(candidates.target_pages[0].va, base + page_size * 2);
 
   EXPECT_FALSE(map.IsRangeMapped(base, page_size * 2));
   EXPECT_TRUE(map.IsRangeUnmapped(base, page_size));

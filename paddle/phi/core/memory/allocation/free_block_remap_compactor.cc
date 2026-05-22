@@ -396,25 +396,24 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     if (VLOG_IS_ON(4)) {
       const auto free_ranges = CollectFreeRanges(*blocks);
       const auto gap_ranges = CollectGapRanges(*blocks);
-      const auto backing_pages =
-          vmm_allocator_->CollectMappedBackingPagesFullyCoveredBy(
-              free_ranges, requested_size);
-      const auto target_pages =
-          vmm_allocator_->CollectUnmappedBackingPagesFullyCoveredBy(
-              gap_ranges, requested_size);
+      const auto candidates = vmm_allocator_->CollectBackingCompactCandidates(
+          free_ranges, gap_ranges, requested_size);
       const bool snapshot_ok = vmm_allocator_->ValidateMappedBackingPages(
-          backing_pages, "FreeBlockRemapCompactor::pre_phase1");
+          candidates.source_pages, "FreeBlockRemapCompactor::pre_phase1");
       const bool target_snapshot_ok =
           vmm_allocator_->ValidateUnmappedBackingPages(
-              target_pages, "FreeBlockRemapCompactor::pre_phase1_target");
+              candidates.target_pages,
+              "FreeBlockRemapCompactor::pre_phase1_target");
       VLOG(4) << "VMM V2 compactor BackingMap pre-scan pool="
               << static_cast<int>(pool_type_)
               << " free_ranges=" << free_ranges.size()
               << " gap_ranges=" << gap_ranges.size()
-              << " mapped_pages=" << backing_pages.size()
-              << " mapped_bytes=" << backing_pages.size() * handle_size
-              << " target_unmapped_pages=" << target_pages.size()
-              << " target_unmapped_bytes=" << target_pages.size() * handle_size
+              << " mapped_pages=" << candidates.source_pages.size()
+              << " mapped_bytes="
+              << candidates.source_pages.size() * handle_size
+              << " target_unmapped_pages=" << candidates.target_pages.size()
+              << " target_unmapped_bytes="
+              << candidates.target_pages.size() * handle_size
               << " requested=" << requested_size
               << " snapshot_ok=" << snapshot_ok
               << " target_snapshot_ok=" << target_snapshot_ok;

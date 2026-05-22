@@ -357,6 +357,40 @@ VmmBackingMap::CollectUnmappedPagesFullyCoveredBy(
   return unmapped_pages;
 }
 
+VmmBackingMap::CompactCandidates VmmBackingMap::CollectCompactCandidates(
+    const std::vector<std::pair<VmmDevicePtr, size_t>>& source_ranges,
+    const std::vector<std::pair<VmmDevicePtr, size_t>>& target_ranges,
+    size_t target_bytes) const {
+  std::lock_guard<SpinLock> guard(mu_);
+  CompactCandidates candidates;
+  const size_t max_pages =
+      (target_bytes == 0 || page_size_ == 0)
+          ? 0
+          : (target_bytes + page_size_ - 1) / page_size_;
+
+  for (const auto& range : source_ranges) {
+    AppendMappedPagesFullyCoveredByLocked(range.first,
+                                          range.second,
+                                          "CollectCompactCandidates.source",
+                                          max_pages,
+                                          &candidates.source_pages);
+    if (max_pages != 0 && candidates.source_pages.size() >= max_pages) {
+      break;
+    }
+  }
+  for (const auto& range : target_ranges) {
+    AppendUnmappedPagesFullyCoveredByLocked(range.first,
+                                            range.second,
+                                            "CollectCompactCandidates.target",
+                                            max_pages,
+                                            &candidates.target_pages);
+    if (max_pages != 0 && candidates.target_pages.size() >= max_pages) {
+      break;
+    }
+  }
+  return candidates;
+}
+
 bool VmmBackingMap::ValidateMappedPages(
     const std::vector<MappedPage>& mapped_pages, const char* context) const {
   std::lock_guard<SpinLock> guard(mu_);

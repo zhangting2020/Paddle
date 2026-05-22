@@ -102,6 +102,10 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   CollectUnmappedBackingPagesFullyCoveredBy(
       const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
       size_t target_bytes) const;
+  VmmBackingMap::CompactCandidates CollectBackingCompactCandidates(
+      const std::vector<std::pair<VmmDevicePtr, size_t>>& source_ranges,
+      const std::vector<std::pair<VmmDevicePtr, size_t>>& target_ranges,
+      size_t target_bytes) const;
   bool ValidateMappedBackingPages(
       const std::vector<VmmBackingMap::MappedPage>& pages,
       const char* context) const;

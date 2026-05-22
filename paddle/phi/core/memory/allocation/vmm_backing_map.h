@@ -43,6 +43,10 @@ class VmmBackingMap {
     VmmDevicePtr va{0};
     uint64_t epoch{0};
   };
+  struct CompactCandidates {
+    std::vector<MappedPage> source_pages;
+    std::vector<UnmappedPage> target_pages;
+  };
 
   void Configure(VmmDevicePtr base, size_t size, size_t page_size, int device);
 
@@ -78,6 +82,10 @@ class VmmBackingMap {
       const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const;
   std::vector<UnmappedPage> CollectUnmappedPagesFullyCoveredBy(
       const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
+      size_t target_bytes) const;
+  CompactCandidates CollectCompactCandidates(
+      const std::vector<std::pair<VmmDevicePtr, size_t>>& source_ranges,
+      const std::vector<std::pair<VmmDevicePtr, size_t>>& target_ranges,
       size_t target_bytes) const;
   bool ValidateMappedPages(const std::vector<MappedPage>& pages,
                            const char* context) const;
