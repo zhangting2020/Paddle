@@ -199,34 +199,6 @@ void MergeAdjacentFreeBlocks(std::list<BlockV2>* blocks) {
   }
 }
 
-void UnmapPartialDestination(CUDAVirtualMemAllocatorV2* vmm_allocator,
-                             VmmDevicePtr dst_base,
-                             size_t handle_count,
-                             size_t handle_size) {
-  for (size_t i = 0; i < handle_count; ++i) {
-    vmm_allocator->TryUnmapHandle(dst_base + i * handle_size, handle_size);
-  }
-}
-
-struct PendingMappedRange {
-  VmmDevicePtr dst;
-  size_t handle_count;
-};
-
-void UnmapPendingMappedRanges(
-    CUDAVirtualMemAllocatorV2* vmm_allocator,
-    std::vector<PendingMappedRange>* pending_ranges,
-    size_t handle_size) {
-  for (auto it = pending_ranges->rbegin(); it != pending_ranges->rend(); ++it) {
-    VLOG(0) << "VMM V2 compactor: unmapping pending dst range "
-            << reinterpret_cast<void*>(it->dst)
-            << " handles=" << it->handle_count;
-    UnmapPartialDestination(
-        vmm_allocator, it->dst, it->handle_count, handle_size);
-  }
-  pending_ranges->clear();
-}
-
 bool RestoreGapToFree(std::list<BlockV2>* blocks,
                       VmmDevicePtr va,
                       size_t size,
@@ -370,9 +342,9 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
                                         size_t requested_size) {
   std::vector<VmmAllocHandle> remapped_handles;
   std::vector<std::shared_ptr<VmmHandleMeta>> remapped_metas;
-  std::vector<PendingMappedRange> pending_mapped_ranges;
   bool logged_first_candidate = false;
   const size_t handle_size = vmm_allocator_->handle_size();
+  RemapTransaction transaction(vmm_allocator_.get(), handle_size);
 
   LOG(INFO) << "VMM V2 compactor: entering Compact, blocks=" << blocks->size()
             << " handle_size=" << handle_size;
@@ -396,14 +368,13 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     if (VLOG_IS_ON(4)) {
       const auto free_ranges = CollectFreeRanges(*blocks);
       const auto gap_ranges = CollectGapRanges(*blocks);
-      const auto candidates = vmm_allocator_->CollectBackingCompactCandidates(
-          free_ranges, gap_ranges, requested_size);
-      const bool snapshot_ok = vmm_allocator_->ValidateMappedBackingPages(
-          candidates.source_pages, "FreeBlockRemapCompactor::pre_phase1");
-      const bool target_snapshot_ok =
-          vmm_allocator_->ValidateUnmappedBackingPages(
-              candidates.target_pages,
-              "FreeBlockRemapCompactor::pre_phase1_target");
+      transaction.SetCandidates(vmm_allocator_->CollectBackingCompactCandidates(
+          free_ranges, gap_ranges, requested_size));
+      const auto& candidates = transaction.candidates();
+      const bool snapshot_ok =
+          transaction.ValidateSourcePages("FreeBlockRemapCompactor::pre_phase1");
+      const bool target_snapshot_ok = transaction.ValidateTargetPages(
+          "FreeBlockRemapCompactor::pre_phase1_target");
       VLOG(4) << "VMM V2 compactor BackingMap pre-scan pool="
               << static_cast<int>(pool_type_)
               << " free_ranges=" << free_ranges.size()
@@ -609,12 +580,11 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     auto rollback = [&](VmmDevicePtr failed_dst, size_t failed_count) {
       VLOG(0) << "VMM V2 compactor Phase 2 failed, rolling back "
               << remapped_handles.size() << " handles to original VA";
-      UnmapPartialDestination(vmm_allocator_.get(),
-                              failed_dst,
-                              failed_count,
-                              handle_size);
-      UnmapPendingMappedRanges(
-          vmm_allocator_.get(), &pending_mapped_ranges, handle_size);
+      for (size_t i = 0; i < failed_count; ++i) {
+        vmm_allocator_->TryUnmapHandle(failed_dst + i * handle_size,
+                                       handle_size);
+      }
+      transaction.RollbackPendingMappings();
       RollbackToOriginalVA(blocks,
                            remapped_handles,
                            remapped_metas,
@@ -655,7 +625,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
         rollback(tail_va, remapped_handles.size());
         return 0;
       }
-      pending_mapped_ranges.push_back({tail_va, remapped_handles.size()});
+      transaction.RecordMappedRange(tail_va, remapped_handles.size());
 
       // Register a synthetic allocation so FreeIdleChunks can release
       // these handles when the tail block becomes entirely free.
@@ -684,13 +654,13 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
             TryAppendPart(&last->parts_, part);
           }
           vmm_allocator_->AdvanceTailOffset(total_remapped);
-          pending_mapped_ranges.clear();
+          transaction.ClearPendingMappings();
           return total_remapped;
         }
       }
       blocks->push_back(std::move(tail_free));
       vmm_allocator_->AdvanceTailOffset(total_remapped);
-      pending_mapped_ranges.clear();
+      transaction.ClearPendingMappings();
       return total_remapped;
     }
 
@@ -716,7 +686,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
         rollback(gap_va, remapped_handles.size());
         return 0;
       }
-      pending_mapped_ranges.push_back({gap_va, remapped_handles.size()});
+      transaction.RecordMappedRange(gap_va, remapped_handles.size());
 
       // Register synthetic allocation for gap-remapped handles.
       HandleLayout gap_layout;
@@ -772,7 +742,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
         }
       }
       MergeAdjacentGaps(blocks);
-      pending_mapped_ranges.clear();
+      transaction.ClearPendingMappings();
       return total_remapped;
     }
 
@@ -832,11 +802,11 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
                 << "handle_idx=" << handle_idx << "/"
                 << remapped_handles.size();
         // Unmap this failed batch (partial mapping).
-        UnmapPartialDestination(
-            vmm_allocator_.get(), dst, to_fill, handle_size);
+        for (size_t i = 0; i < to_fill; ++i) {
+          vmm_allocator_->TryUnmapHandle(dst + i * handle_size, handle_size);
+        }
         // Unmap all prior successful placements.
-        UnmapPendingMappedRanges(
-            vmm_allocator_.get(), &pending_mapped_ranges, handle_size);
+        transaction.RollbackPendingMappings();
         // All-or-nothing: roll back everything to original VA.
         RollbackToOriginalVA(blocks,
                              remapped_handles,
@@ -847,7 +817,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       }
 
       placements.push_back({it, dst, handle_idx, to_fill});
-      pending_mapped_ranges.push_back({dst, to_fill});
+      transaction.RecordMappedRange(dst, to_fill);
       handle_idx += to_fill;
     }
 
@@ -856,8 +826,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       VLOG(0) << "VMM V2 compactor gap-scatter: placed " << handle_idx << " of "
               << remapped_handles.size()
               << " handles despite precheck; rolling back";
-      UnmapPendingMappedRanges(
-          vmm_allocator_.get(), &pending_mapped_ranges, handle_size);
+      transaction.RollbackPendingMappings();
       RollbackToOriginalVA(blocks,
                            remapped_handles,
                            remapped_metas,
@@ -902,14 +871,13 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
 
     MergeAdjacentFreeBlocks(blocks);
     MergeAdjacentGaps(blocks);
-    pending_mapped_ranges.clear();
+    transaction.ClearPendingMappings();
     return total_remapped;
   } catch (...) {
     VLOG(0)
         << "VMM V2 compactor: exception caught during Compact, rolling back "
         << remapped_handles.size() << " unmapped handles";
-    UnmapPendingMappedRanges(
-        vmm_allocator_.get(), &pending_mapped_ranges, handle_size);
+    transaction.RollbackPendingMappings();
     if (!remapped_handles.empty()) {
       RollbackToOriginalVA(blocks,
                            remapped_handles,

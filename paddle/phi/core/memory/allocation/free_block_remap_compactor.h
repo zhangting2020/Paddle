@@ -18,6 +18,7 @@
 #include <memory>
 
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator_v2.h"
+#include "paddle/phi/core/memory/allocation/remap_transaction.h"
 #include "paddle/phi/core/memory/allocation/vmm_allocator_v2_types.h"
 
 namespace paddle {
