@@ -52,6 +52,8 @@ class RemapTransaction {
                                          const char* target_context) const;
 
   void RecordMappedRange(VmmDevicePtr dst, size_t handle_count);
+  void Commit();
+  void Rollback(VmmDevicePtr failed_dst = 0, size_t failed_count = 0);
   void RollbackPendingMappings();
   void ClearPendingMappings() { pending_mapped_ranges_.clear(); }
 

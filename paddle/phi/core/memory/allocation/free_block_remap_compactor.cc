@@ -578,11 +578,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     auto rollback = [&](VmmDevicePtr failed_dst, size_t failed_count) {
       VLOG(0) << "VMM V2 compactor Phase 2 failed, rolling back "
               << remapped_handles.size() << " handles to original VA";
-      for (size_t i = 0; i < failed_count; ++i) {
-        vmm_allocator_->TryUnmapHandle(failed_dst + i * handle_size,
-                                       handle_size);
-      }
-      transaction.RollbackPendingMappings();
+      transaction.Rollback(failed_dst, failed_count);
       RollbackToOriginalVA(blocks,
                            remapped_handles,
                            remapped_metas,
@@ -652,13 +648,13 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
             TryAppendPart(&last->parts_, part);
           }
           vmm_allocator_->AdvanceTailOffset(total_remapped);
-          transaction.ClearPendingMappings();
+          transaction.Commit();
           return total_remapped;
         }
       }
       blocks->push_back(std::move(tail_free));
       vmm_allocator_->AdvanceTailOffset(total_remapped);
-      transaction.ClearPendingMappings();
+      transaction.Commit();
       return total_remapped;
     }
 
@@ -740,7 +736,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
         }
       }
       MergeAdjacentGaps(blocks);
-      transaction.ClearPendingMappings();
+      transaction.Commit();
       return total_remapped;
     }
 
@@ -799,12 +795,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
         VLOG(0) << "VMM V2 compactor: gap-scatter MapHandlesToVA failed at "
                 << "handle_idx=" << handle_idx << "/"
                 << remapped_handles.size();
-        // Unmap this failed batch (partial mapping).
-        for (size_t i = 0; i < to_fill; ++i) {
-          vmm_allocator_->TryUnmapHandle(dst + i * handle_size, handle_size);
-        }
-        // Unmap all prior successful placements.
-        transaction.RollbackPendingMappings();
+        transaction.Rollback(dst, to_fill);
         // All-or-nothing: roll back everything to original VA.
         RollbackToOriginalVA(blocks,
                              remapped_handles,
@@ -824,7 +815,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       VLOG(0) << "VMM V2 compactor gap-scatter: placed " << handle_idx << " of "
               << remapped_handles.size()
               << " handles despite precheck; rolling back";
-      transaction.RollbackPendingMappings();
+      transaction.Rollback();
       RollbackToOriginalVA(blocks,
                            remapped_handles,
                            remapped_metas,
@@ -869,13 +860,13 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
 
     MergeAdjacentFreeBlocks(blocks);
     MergeAdjacentGaps(blocks);
-    transaction.ClearPendingMappings();
+    transaction.Commit();
     return total_remapped;
   } catch (...) {
     VLOG(0)
         << "VMM V2 compactor: exception caught during Compact, rolling back "
         << remapped_handles.size() << " unmapped handles";
-    transaction.RollbackPendingMappings();
+    transaction.Rollback();
     if (!remapped_handles.empty()) {
       RollbackToOriginalVA(blocks,
                            remapped_handles,

@@ -49,11 +49,23 @@ void RemapTransaction::RecordMappedRange(VmmDevicePtr dst, size_t handle_count) 
   pending_mapped_ranges_.push_back({dst, handle_count});
 }
 
+void RemapTransaction::Commit() { ClearPendingMappings(); }
+
 void RemapTransaction::UnmapPartialDestination(VmmDevicePtr dst_base,
                                                size_t handle_count) {
   for (size_t i = 0; i < handle_count; ++i) {
     vmm_allocator_->TryUnmapHandle(dst_base + i * handle_size_, handle_size_);
   }
+}
+
+void RemapTransaction::Rollback(VmmDevicePtr failed_dst, size_t failed_count) {
+  if (failed_dst != 0 && failed_count != 0) {
+    VLOG(0) << "VMM V2 remap transaction: unmapping failed dst range "
+            << reinterpret_cast<void*>(failed_dst)
+            << " handles=" << failed_count;
+    UnmapPartialDestination(failed_dst, failed_count);
+  }
+  RollbackPendingMappings();
 }
 
 void RemapTransaction::RollbackPendingMappings() {
