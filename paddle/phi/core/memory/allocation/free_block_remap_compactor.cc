@@ -345,6 +345,15 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
   bool logged_first_candidate = false;
   const size_t handle_size = vmm_allocator_->handle_size();
   RemapTransaction transaction(vmm_allocator_.get(), handle_size);
+  transaction.SetSourceRollbackAction([&] {
+    if (!remapped_handles.empty()) {
+      RollbackToOriginalVA(blocks,
+                           remapped_handles,
+                           remapped_metas,
+                           vmm_allocator_.get(),
+                           handle_size);
+    }
+  });
 
   LOG(INFO) << "VMM V2 compactor: entering Compact, blocks=" << blocks->size()
             << " handle_size=" << handle_size;
@@ -575,15 +584,10 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     // Phase 2: Remap handles to destination VA.
     // If remap fails, map each handle back to its original VA (meta->base).
     // -------------------------------------------------------------------
-    auto rollback = [&](VmmDevicePtr failed_dst, size_t failed_count) {
+    auto rollback = [&] {
       VLOG(0) << "VMM V2 compactor Phase 2 failed, rolling back "
               << remapped_handles.size() << " handles to original VA";
-      transaction.Rollback(failed_dst, failed_count);
-      RollbackToOriginalVA(blocks,
-                           remapped_handles,
-                           remapped_metas,
-                           vmm_allocator_.get(),
-                           handle_size);
+      transaction.Rollback();
     };
 
     bool tail_usable = (tail_va + total_remapped <= va_limit);
@@ -611,15 +615,15 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       VLOG(10) << "VMM remap compact using tail path, dst_va="
                << reinterpret_cast<void*>(tail_va)
                << " bytes=" << total_remapped;
+      transaction.RecordDestinationRange(tail_va, remapped_handles.size());
       try {
         vmm_allocator_->MapHandlesToVA(
             tail_va, remapped_handles, &remapped_metas);
       } catch (...) {
         VLOG(0) << "VMM V2 compactor: tail MapHandlesToVA failed";
-        rollback(tail_va, remapped_handles.size());
+        rollback();
         return 0;
       }
-      transaction.RecordMappedRange(tail_va, remapped_handles.size());
 
       // Register a synthetic allocation so FreeIdleChunks can release
       // these handles when the tail block becomes entirely free.
@@ -672,15 +676,15 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       VLOG(10) << "VMM remap compact using gap path, dst_va="
                << reinterpret_cast<void*>(gap_va)
                << " gap_size=" << gap_it->size_ << " bytes=" << total_remapped;
+      transaction.RecordDestinationRange(gap_va, remapped_handles.size());
       try {
         vmm_allocator_->MapHandlesToVA(
             gap_va, remapped_handles, &remapped_metas);
       } catch (...) {
         VLOG(0) << "VMM V2 compactor: gap MapHandlesToVA failed";
-        rollback(gap_va, remapped_handles.size());
+        rollback();
         return 0;
       }
-      transaction.RecordMappedRange(gap_va, remapped_handles.size());
 
       // Register synthetic allocation for gap-remapped handles.
       HandleLayout gap_layout;
@@ -755,11 +759,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       VLOG(0) << "VMM V2 compactor: gap capacity " << total_gap_capacity
               << " < total_remapped " << total_remapped
               << ", rolling back to original VA";
-      RollbackToOriginalVA(blocks,
-                           remapped_handles,
-                           remapped_metas,
-                           vmm_allocator_.get(),
-                           handle_size);
+      transaction.Rollback();
       return 0;
     }
 
@@ -789,24 +789,18 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
           remapped_metas.begin() + handle_idx,
           remapped_metas.begin() + handle_idx + to_fill);
 
+      transaction.RecordDestinationRange(dst, to_fill);
       try {
         vmm_allocator_->MapHandlesToVA(dst, chunk, &chunk_metas);
       } catch (...) {
         VLOG(0) << "VMM V2 compactor: gap-scatter MapHandlesToVA failed at "
                 << "handle_idx=" << handle_idx << "/"
                 << remapped_handles.size();
-        transaction.Rollback(dst, to_fill);
-        // All-or-nothing: roll back everything to original VA.
-        RollbackToOriginalVA(blocks,
-                             remapped_handles,
-                             remapped_metas,
-                             vmm_allocator_.get(),
-                             handle_size);
+        transaction.Rollback();
         return 0;
       }
 
       placements.push_back({it, dst, handle_idx, to_fill});
-      transaction.RecordMappedRange(dst, to_fill);
       handle_idx += to_fill;
     }
 
@@ -816,11 +810,6 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
               << remapped_handles.size()
               << " handles despite precheck; rolling back";
       transaction.Rollback();
-      RollbackToOriginalVA(blocks,
-                           remapped_handles,
-                           remapped_metas,
-                           vmm_allocator_.get(),
-                           handle_size);
       return 0;
     }
 
@@ -867,13 +856,6 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
         << "VMM V2 compactor: exception caught during Compact, rolling back "
         << remapped_handles.size() << " unmapped handles";
     transaction.Rollback();
-    if (!remapped_handles.empty()) {
-      RollbackToOriginalVA(blocks,
-                           remapped_handles,
-                           remapped_metas,
-                           vmm_allocator_.get(),
-                           handle_size);
-    }
     return 0;
   }
 }

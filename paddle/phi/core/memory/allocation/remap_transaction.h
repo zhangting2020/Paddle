@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <vector>
 
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator_v2.h"
@@ -27,7 +28,7 @@ class RemapTransaction {
  public:
   using VaRanges = std::vector<std::pair<VmmDevicePtr, size_t>>;
 
-  struct PendingMappedRange {
+  struct PendingDestinationRange {
     VmmDevicePtr dst{0};
     size_t handle_count{0};
   };
@@ -51,19 +52,24 @@ class RemapTransaction {
   CandidateValidation ValidateCandidates(const char* source_context,
                                          const char* target_context) const;
 
-  void RecordMappedRange(VmmDevicePtr dst, size_t handle_count);
+  void SetSourceRollbackAction(std::function<void()> action);
+  // Record the intended destination before map so later bookkeeping failures
+  // can still unmap every destination touched by this transaction.
+  void RecordDestinationRange(VmmDevicePtr dst, size_t handle_count);
   void Commit();
-  void Rollback(VmmDevicePtr failed_dst = 0, size_t failed_count = 0);
-  void RollbackPendingMappings();
-  void ClearPendingMappings() { pending_mapped_ranges_.clear(); }
+  void Rollback();
 
  private:
   void UnmapPartialDestination(VmmDevicePtr dst_base, size_t handle_count);
+  void RollbackPendingDestinations();
+  void ClearPendingDestinations() { pending_destination_ranges_.clear(); }
 
   CUDAVirtualMemAllocatorV2* vmm_allocator_;
   size_t handle_size_;
   VmmBackingMap::CompactCandidates candidates_;
-  std::vector<PendingMappedRange> pending_mapped_ranges_;
+  std::vector<PendingDestinationRange> pending_destination_ranges_;
+  std::function<void()> source_rollback_action_;
+  bool completed_{false};
 };
 
 }  // namespace allocation

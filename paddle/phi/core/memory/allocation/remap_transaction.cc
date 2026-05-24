@@ -14,6 +14,8 @@
 
 #include "paddle/phi/core/memory/allocation/remap_transaction.h"
 
+#include <utility>
+
 #include "glog/logging.h"
 
 namespace paddle {
@@ -45,11 +47,20 @@ RemapTransaction::CandidateValidation RemapTransaction::ValidateCandidates(
   return validation;
 }
 
-void RemapTransaction::RecordMappedRange(VmmDevicePtr dst, size_t handle_count) {
-  pending_mapped_ranges_.push_back({dst, handle_count});
+void RemapTransaction::SetSourceRollbackAction(std::function<void()> action) {
+  source_rollback_action_ = std::move(action);
 }
 
-void RemapTransaction::Commit() { ClearPendingMappings(); }
+void RemapTransaction::RecordDestinationRange(VmmDevicePtr dst,
+                                              size_t handle_count) {
+  pending_destination_ranges_.push_back({dst, handle_count});
+}
+
+void RemapTransaction::Commit() {
+  ClearPendingDestinations();
+  source_rollback_action_ = nullptr;
+  completed_ = true;
+}
 
 void RemapTransaction::UnmapPartialDestination(VmmDevicePtr dst_base,
                                                size_t handle_count) {
@@ -58,26 +69,28 @@ void RemapTransaction::UnmapPartialDestination(VmmDevicePtr dst_base,
   }
 }
 
-void RemapTransaction::Rollback(VmmDevicePtr failed_dst, size_t failed_count) {
-  if (failed_dst != 0 && failed_count != 0) {
-    VLOG(0) << "VMM V2 remap transaction: unmapping failed dst range "
-            << reinterpret_cast<void*>(failed_dst)
-            << " handles=" << failed_count;
-    UnmapPartialDestination(failed_dst, failed_count);
+void RemapTransaction::Rollback() {
+  if (completed_) {
+    return;
   }
-  RollbackPendingMappings();
+  RollbackPendingDestinations();
+  if (source_rollback_action_) {
+    source_rollback_action_();
+  }
+  source_rollback_action_ = nullptr;
+  completed_ = true;
 }
 
-void RemapTransaction::RollbackPendingMappings() {
-  for (auto it = pending_mapped_ranges_.rbegin();
-       it != pending_mapped_ranges_.rend();
+void RemapTransaction::RollbackPendingDestinations() {
+  for (auto it = pending_destination_ranges_.rbegin();
+       it != pending_destination_ranges_.rend();
        ++it) {
-    VLOG(0) << "VMM V2 remap transaction: unmapping pending dst range "
+    VLOG(0) << "VMM V2 remap transaction: unmapping pending destination "
             << reinterpret_cast<void*>(it->dst)
             << " handles=" << it->handle_count;
     UnmapPartialDestination(it->dst, it->handle_count);
   }
-  pending_mapped_ranges_.clear();
+  pending_destination_ranges_.clear();
 }
 
 }  // namespace allocation
