@@ -86,7 +86,7 @@ class RemapTransaction {
       const std::vector<VmmAllocHandle>& handles,
       size_t start,
       size_t count,
-      PoolType pool_type) const;
+      PoolType pool_type);
   void Commit();
   void Rollback();
 

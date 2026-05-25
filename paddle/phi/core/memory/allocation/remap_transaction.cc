@@ -285,7 +285,7 @@ RemapTransaction::MaterializedRange RemapTransaction::MaterializeMappedRange(
     const std::vector<VmmAllocHandle>& handles,
     size_t start,
     size_t count,
-    PoolType pool_type) const {
+    PoolType pool_type) {
   MaterializedRange range;
   range.layout = BuildDestinationLayout(dst, handles, start, count);
   range.bytes = count * handle_size_;
