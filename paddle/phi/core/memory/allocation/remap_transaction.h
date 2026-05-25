@@ -45,6 +45,12 @@ class RemapTransaction {
     BlockV2 free_block;
     size_t bytes{0};
   };
+  struct GapPlacement {
+    BlockIterator gap_it;
+    VmmDevicePtr dst{0};
+    size_t handle_start_idx{0};
+    size_t count{0};
+  };
 
   RemapTransaction(CUDAVirtualMemAllocatorV2* vmm_allocator, size_t handle_size)
       : vmm_allocator_(vmm_allocator), handle_size_(handle_size) {}
@@ -88,6 +94,34 @@ class RemapTransaction {
       const std::vector<VmmAllocHandle>& handles,
       size_t start,
       size_t count,
+      PoolType pool_type);
+  bool TailIsUsable(VmmDevicePtr tail_va,
+                    size_t total_bytes,
+                    VmmDevicePtr va_limit) const;
+  bool FindSingleGap(BlockList* blocks,
+                     size_t required_bytes,
+                     BlockIterator* gap_it) const;
+  size_t CollectGapCapacity(const BlockList& blocks) const;
+  bool PlanGapScatter(BlockList* blocks,
+                      size_t handle_count,
+                      std::vector<GapPlacement>* placements) const;
+  bool TryCommitTailPlacement(
+      BlockList* blocks,
+      VmmDevicePtr tail_va,
+      const std::vector<VmmAllocHandle>& handles,
+      const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
+      PoolType pool_type);
+  bool TryCommitSingleGapPlacement(
+      BlockList* blocks,
+      BlockIterator gap_it,
+      const std::vector<VmmAllocHandle>& handles,
+      const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
+      PoolType pool_type);
+  bool TryCommitGapScatter(
+      BlockList* blocks,
+      const std::vector<VmmAllocHandle>& handles,
+      const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
+      const std::vector<GapPlacement>& placements,
       PoolType pool_type);
   void InstallTailFreeBlock(BlockList* blocks, BlockV2 free_block) const;
   BlockIterator InstallMappedGapRange(BlockList* blocks,

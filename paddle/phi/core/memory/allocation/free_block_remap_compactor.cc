@@ -380,86 +380,35 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     // Phase 2: Remap handles to destination VA.
     // If remap fails, map each handle back to its original VA (meta->base).
     // -------------------------------------------------------------------
-    auto rollback = [&] {
-      VLOG(0) << "VMM V2 compactor Phase 2 failed, rolling back "
-              << remapped_handles.size() << " handles to original VA";
-      transaction.Rollback();
-    };
-
-    bool tail_usable = (tail_va + total_remapped <= va_limit);
-
-    // Safety probe: verify tail range is unmapped.
-    if (tail_usable) {
-      for (size_t off = 0; off < total_remapped; off += handle_size) {
-        CUmemGenericAllocationHandle probe_handle;
-        CUresult probe = phi::dynload::cuMemRetainAllocationHandle(
-            &probe_handle, reinterpret_cast<void*>(tail_va + off));
-        if (probe == CUDA_SUCCESS) {
-          phi::dynload::cuMemRelease(probe_handle);
-          tail_usable = false;
-          VLOG(3) << "VMM V2 compactor: tail VA slot "
-                  << reinterpret_cast<void*>(tail_va + off) << " (offset "
-                  << off << "/" << total_remapped
-                  << ") is unexpectedly mapped, skipping tail path";
-          break;
-        }
-      }
-    }
+    bool tail_usable = transaction.TailIsUsable(tail_va, total_remapped, va_limit);
 
     // ---- Path 1: tail path ----
     if (tail_usable) {
       VLOG(10) << "VMM remap compact using tail path, dst_va="
                << reinterpret_cast<void*>(tail_va)
                << " bytes=" << total_remapped;
-      try {
-        transaction.MapHandlesToDestination(
-            tail_va, remapped_handles, &remapped_metas);
-      } catch (...) {
-        VLOG(0) << "VMM V2 compactor: tail MapHandlesToVA failed";
-        rollback();
+      if (!transaction.TryCommitTailPlacement(
+              blocks, tail_va, remapped_handles, remapped_metas, pool_type_)) {
         return 0;
       }
-
-      auto mapped = transaction.MaterializeMappedRange(
-          tail_va, remapped_handles, 0, remapped_metas.size(), pool_type_);
-      BlockV2 tail_free = std::move(mapped.free_block);
-
-      transaction.InstallTailFreeBlock(blocks, std::move(tail_free));
       vmm_allocator_->AdvanceTailOffset(total_remapped);
-      transaction.Commit();
       return total_remapped;
     }
 
     // ---- Path 2: single-gap path ----
     auto gap_it = blocks->end();
-    for (auto it = blocks->begin(); it != blocks->end(); ++it) {
-      if (it->type_ == BlockType::kGap && it->size_ >= total_remapped) {
-        gap_it = it;
-        break;
-      }
-    }
+    bool has_single_gap =
+        transaction.FindSingleGap(blocks, total_remapped, &gap_it);
 
-    if (gap_it != blocks->end()) {
+    if (has_single_gap) {
       const VmmDevicePtr gap_va = reinterpret_cast<VmmDevicePtr>(gap_it->ptr_);
       VLOG(10) << "VMM remap compact using gap path, dst_va="
                << reinterpret_cast<void*>(gap_va)
                << " gap_size=" << gap_it->size_ << " bytes=" << total_remapped;
-      try {
-        transaction.MapHandlesToDestination(
-            gap_va, remapped_handles, &remapped_metas);
-      } catch (...) {
-        VLOG(0) << "VMM V2 compactor: gap MapHandlesToVA failed";
-        rollback();
+      if (!transaction.TryCommitSingleGapPlacement(
+              blocks, gap_it, remapped_handles, remapped_metas, pool_type_)) {
         return 0;
       }
-
-      auto mapped = transaction.MaterializeMappedRange(
-          gap_va, remapped_handles, 0, remapped_metas.size(), pool_type_);
-
-      transaction.InstallMappedGapRange(
-          blocks, gap_it, std::move(mapped.free_block), pool_type_);
-      transaction.NormalizeBlocks(blocks);
-      transaction.Commit();
       return total_remapped;
     }
 
@@ -468,12 +417,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
             << total_remapped << " bytes, falling back to gap-scatter remap";
 
     // Capacity precheck: verify total GAP can hold all handles.
-    size_t total_gap_capacity = 0;
-    for (const auto& blk : *blocks) {
-      if (blk.type_ == BlockType::kGap) {
-        total_gap_capacity += (blk.size_ / handle_size) * handle_size;
-      }
-    }
+    size_t total_gap_capacity = transaction.CollectGapCapacity(*blocks);
     if (total_gap_capacity < total_remapped) {
       VLOG(0) << "VMM V2 compactor: gap capacity " << total_gap_capacity
               << " < total_remapped " << total_remapped
@@ -483,59 +427,27 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     }
 
     // Phase 3a: tentative placement (cuMemMap only, no bookkeeping).
-    struct GapPlacement {
-      std::list<BlockV2>::iterator gap_it;
-      VmmDevicePtr dst;
-      size_t handle_start_idx;
-      size_t count;
-    };
-    std::vector<GapPlacement> placements;
-    size_t handle_idx = 0;
-
-    for (auto it = blocks->begin();
-         it != blocks->end() && handle_idx < remapped_handles.size();
-         ++it) {
-      if (it->type_ != BlockType::kGap) continue;
-      size_t gap_cap = it->size_ / handle_size;
-      size_t to_fill = std::min(gap_cap, remapped_handles.size() - handle_idx);
-      if (to_fill == 0) continue;
-
-      VmmDevicePtr dst = reinterpret_cast<VmmDevicePtr>(it->ptr_);
-      try {
-        transaction.MapHandleRangeToDestination(
-            dst, remapped_handles, handle_idx, to_fill, &remapped_metas);
-      } catch (...) {
-        VLOG(0) << "VMM V2 compactor: gap-scatter MapHandlesToVA failed at "
-                << "handle_idx=" << handle_idx << "/"
-                << remapped_handles.size();
-        transaction.Rollback();
-        return 0;
-      }
-
-      placements.push_back({it, dst, handle_idx, to_fill});
-      handle_idx += to_fill;
-    }
+    std::vector<RemapTransaction::GapPlacement> placements;
+    bool planned =
+        transaction.PlanGapScatter(blocks, remapped_handles.size(), &placements);
 
     // Defensive: capacity precheck should prevent this.
-    if (handle_idx != remapped_handles.size()) {
-      VLOG(0) << "VMM V2 compactor gap-scatter: placed " << handle_idx << " of "
-              << remapped_handles.size()
+    if (!planned) {
+      size_t planned_handles = 0;
+      for (const auto& p : placements) {
+        planned_handles += p.count;
+      }
+      VLOG(0) << "VMM V2 compactor gap-scatter: placed " << planned_handles
+              << " of " << remapped_handles.size()
               << " handles despite precheck; rolling back";
       transaction.Rollback();
       return 0;
     }
 
-    // Phase 3b: commit — all handles mapped successfully.
-    for (auto& p : placements) {
-      auto it = p.gap_it;
-      auto mapped = transaction.MaterializeMappedRange(
-          p.dst, remapped_handles, p.handle_start_idx, p.count, pool_type_);
-      transaction.InstallMappedGapRange(
-          blocks, it, std::move(mapped.free_block), pool_type_);
+    if (!transaction.TryCommitGapScatter(
+            blocks, remapped_handles, remapped_metas, placements, pool_type_)) {
+      return 0;
     }
-
-    transaction.NormalizeBlocks(blocks);
-    transaction.Commit();
     return total_remapped;
   } catch (...) {
     VLOG(0)

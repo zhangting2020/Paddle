@@ -316,6 +316,141 @@ RemapTransaction::MaterializedRange RemapTransaction::MaterializeMappedRange(
   return range;
 }
 
+bool RemapTransaction::TailIsUsable(VmmDevicePtr tail_va,
+                                    size_t total_bytes,
+                                    VmmDevicePtr va_limit) const {
+  if (tail_va + total_bytes > va_limit) {
+    return false;
+  }
+  for (size_t off = 0; off < total_bytes; off += handle_size_) {
+    CUmemGenericAllocationHandle probe_handle;
+    CUresult probe = phi::dynload::cuMemRetainAllocationHandle(
+        &probe_handle, reinterpret_cast<void*>(tail_va + off));
+    if (probe == CUDA_SUCCESS) {
+      phi::dynload::cuMemRelease(probe_handle);
+      VLOG(3) << "VMM V2 remap transaction: tail VA slot "
+              << reinterpret_cast<void*>(tail_va + off) << " (offset " << off
+              << "/" << total_bytes
+              << ") is unexpectedly mapped, skipping tail path";
+      return false;
+    }
+  }
+  return true;
+}
+
+bool RemapTransaction::FindSingleGap(BlockList* blocks,
+                                     size_t required_bytes,
+                                     BlockIterator* gap_it) const {
+  for (auto it = blocks->begin(); it != blocks->end(); ++it) {
+    if (it->type_ == BlockType::kGap && it->size_ >= required_bytes) {
+      *gap_it = it;
+      return true;
+    }
+  }
+  return false;
+}
+
+size_t RemapTransaction::CollectGapCapacity(const BlockList& blocks) const {
+  size_t total_gap_capacity = 0;
+  for (const auto& blk : blocks) {
+    if (blk.type_ == BlockType::kGap) {
+      total_gap_capacity += (blk.size_ / handle_size_) * handle_size_;
+    }
+  }
+  return total_gap_capacity;
+}
+
+bool RemapTransaction::PlanGapScatter(
+    BlockList* blocks,
+    size_t handle_count,
+    std::vector<GapPlacement>* placements) const {
+  placements->clear();
+  size_t handle_idx = 0;
+  for (auto it = blocks->begin(); it != blocks->end() && handle_idx < handle_count;
+       ++it) {
+    if (it->type_ != BlockType::kGap) continue;
+    size_t gap_cap = it->size_ / handle_size_;
+    size_t to_fill = std::min(gap_cap, handle_count - handle_idx);
+    if (to_fill == 0) continue;
+    placements->push_back(
+        {it, reinterpret_cast<VmmDevicePtr>(it->ptr_), handle_idx, to_fill});
+    handle_idx += to_fill;
+  }
+  return handle_idx == handle_count;
+}
+
+bool RemapTransaction::TryCommitTailPlacement(
+    BlockList* blocks,
+    VmmDevicePtr tail_va,
+    const std::vector<VmmAllocHandle>& handles,
+    const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
+    PoolType pool_type) {
+  try {
+    MapHandlesToDestination(tail_va, handles, &metas);
+  } catch (...) {
+    VLOG(0) << "VMM V2 remap transaction: tail MapHandlesToVA failed";
+    Rollback();
+    return false;
+  }
+
+  auto mapped = MaterializeMappedRange(
+      tail_va, handles, 0, metas.size(), pool_type);
+  InstallTailFreeBlock(blocks, std::move(mapped.free_block));
+  Commit();
+  return true;
+}
+
+bool RemapTransaction::TryCommitSingleGapPlacement(
+    BlockList* blocks,
+    BlockIterator gap_it,
+    const std::vector<VmmAllocHandle>& handles,
+    const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
+    PoolType pool_type) {
+  VmmDevicePtr gap_va = reinterpret_cast<VmmDevicePtr>(gap_it->ptr_);
+  try {
+    MapHandlesToDestination(gap_va, handles, &metas);
+  } catch (...) {
+    VLOG(0) << "VMM V2 remap transaction: gap MapHandlesToVA failed";
+    Rollback();
+    return false;
+  }
+
+  auto mapped = MaterializeMappedRange(gap_va, handles, 0, metas.size(), pool_type);
+  InstallMappedGapRange(blocks, gap_it, std::move(mapped.free_block), pool_type);
+  NormalizeBlocks(blocks);
+  Commit();
+  return true;
+}
+
+bool RemapTransaction::TryCommitGapScatter(
+    BlockList* blocks,
+    const std::vector<VmmAllocHandle>& handles,
+    const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
+    const std::vector<GapPlacement>& placements,
+    PoolType pool_type) {
+  for (const auto& p : placements) {
+    try {
+      MapHandleRangeToDestination(
+          p.dst, handles, p.handle_start_idx, p.count, &metas);
+    } catch (...) {
+      VLOG(0) << "VMM V2 remap transaction: gap-scatter MapHandlesToVA failed at "
+              << "handle_idx=" << p.handle_start_idx << "/" << handles.size();
+      Rollback();
+      return false;
+    }
+  }
+
+  for (const auto& p : placements) {
+    auto mapped = MaterializeMappedRange(
+        p.dst, handles, p.handle_start_idx, p.count, pool_type);
+    InstallMappedGapRange(
+        blocks, p.gap_it, std::move(mapped.free_block), pool_type);
+  }
+  NormalizeBlocks(blocks);
+  Commit();
+  return true;
+}
+
 void RemapTransaction::InstallTailFreeBlock(BlockList* blocks,
                                             BlockV2 free_block) const {
   if (!blocks->empty()) {
