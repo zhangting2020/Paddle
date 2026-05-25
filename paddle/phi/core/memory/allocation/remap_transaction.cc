@@ -59,6 +59,25 @@ void RemapTransaction::MapHandlesToDestination(
   vmm_allocator_->MapHandlesToVA(dst, handles, metas);
 }
 
+void RemapTransaction::MapHandleRangeToDestination(
+    VmmDevicePtr dst,
+    const std::vector<VmmAllocHandle>& handles,
+    size_t start,
+    size_t count,
+    const std::vector<std::shared_ptr<VmmHandleMeta>>* metas) {
+  std::vector<VmmAllocHandle> handle_slice(handles.begin() + start,
+                                           handles.begin() + start + count);
+  if (metas == nullptr) {
+    MapHandlesToDestination(dst, handle_slice, nullptr);
+    return;
+  }
+
+  std::vector<std::shared_ptr<VmmHandleMeta>> meta_slice(metas->begin() + start,
+                                                         metas->begin() + start +
+                                                             count);
+  MapHandlesToDestination(dst, handle_slice, &meta_slice);
+}
+
 void RemapTransaction::RecordDestinationRange(VmmDevicePtr dst,
                                               size_t handle_count) {
   pending_destination_ranges_.push_back({dst, handle_count});

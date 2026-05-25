@@ -780,15 +780,9 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       if (to_fill == 0) continue;
 
       VmmDevicePtr dst = reinterpret_cast<VmmDevicePtr>(it->ptr_);
-      std::vector<VmmAllocHandle> chunk(
-          remapped_handles.begin() + handle_idx,
-          remapped_handles.begin() + handle_idx + to_fill);
-      std::vector<std::shared_ptr<VmmHandleMeta>> chunk_metas(
-          remapped_metas.begin() + handle_idx,
-          remapped_metas.begin() + handle_idx + to_fill);
-
       try {
-        transaction.MapHandlesToDestination(dst, chunk, &chunk_metas);
+        transaction.MapHandleRangeToDestination(
+            dst, remapped_handles, handle_idx, to_fill, &remapped_metas);
       } catch (...) {
         VLOG(0) << "VMM V2 compactor: gap-scatter MapHandlesToVA failed at "
                 << "handle_idx=" << handle_idx << "/"

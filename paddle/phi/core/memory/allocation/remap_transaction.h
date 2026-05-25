@@ -57,6 +57,12 @@ class RemapTransaction {
       VmmDevicePtr dst,
       const std::vector<VmmAllocHandle>& handles,
       const std::vector<std::shared_ptr<VmmHandleMeta>>* metas = nullptr);
+  void MapHandleRangeToDestination(
+      VmmDevicePtr dst,
+      const std::vector<VmmAllocHandle>& handles,
+      size_t start,
+      size_t count,
+      const std::vector<std::shared_ptr<VmmHandleMeta>>* metas = nullptr);
   void Commit();
   void Rollback();
 
