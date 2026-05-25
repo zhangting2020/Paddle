@@ -51,6 +51,10 @@ class RemapTransaction {
     size_t handle_start_idx{0};
     size_t count{0};
   };
+  struct PlacementResult {
+    bool success{false};
+    bool used_tail{false};
+  };
 
   RemapTransaction(CUDAVirtualMemAllocatorV2* vmm_allocator, size_t handle_size)
       : vmm_allocator_(vmm_allocator), handle_size_(handle_size) {}
@@ -122,6 +126,13 @@ class RemapTransaction {
       const std::vector<VmmAllocHandle>& handles,
       const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
       const std::vector<GapPlacement>& placements,
+      PoolType pool_type);
+  PlacementResult ExecutePlacementStrategy(
+      BlockList* blocks,
+      VmmDevicePtr tail_va,
+      VmmDevicePtr va_limit,
+      const std::vector<VmmAllocHandle>& handles,
+      const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
       PoolType pool_type);
   void InstallTailFreeBlock(BlockList* blocks, BlockV2 free_block) const;
   BlockIterator InstallMappedGapRange(BlockList* blocks,

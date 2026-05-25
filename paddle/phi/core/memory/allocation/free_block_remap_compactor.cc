@@ -380,73 +380,13 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     // Phase 2: Remap handles to destination VA.
     // If remap fails, map each handle back to its original VA (meta->base).
     // -------------------------------------------------------------------
-    bool tail_usable = transaction.TailIsUsable(tail_va, total_remapped, va_limit);
-
-    // ---- Path 1: tail path ----
-    if (tail_usable) {
-      VLOG(10) << "VMM remap compact using tail path, dst_va="
-               << reinterpret_cast<void*>(tail_va)
-               << " bytes=" << total_remapped;
-      if (!transaction.TryCommitTailPlacement(
-              blocks, tail_va, remapped_handles, remapped_metas, pool_type_)) {
-        return 0;
-      }
+    auto placement = transaction.ExecutePlacementStrategy(
+        blocks, tail_va, va_limit, remapped_handles, remapped_metas, pool_type_);
+    if (!placement.success) {
+      return 0;
+    }
+    if (placement.used_tail) {
       vmm_allocator_->AdvanceTailOffset(total_remapped);
-      return total_remapped;
-    }
-
-    // ---- Path 2: single-gap path ----
-    auto gap_it = blocks->end();
-    bool has_single_gap =
-        transaction.FindSingleGap(blocks, total_remapped, &gap_it);
-
-    if (has_single_gap) {
-      const VmmDevicePtr gap_va = reinterpret_cast<VmmDevicePtr>(gap_it->ptr_);
-      VLOG(10) << "VMM remap compact using gap path, dst_va="
-               << reinterpret_cast<void*>(gap_va)
-               << " gap_size=" << gap_it->size_ << " bytes=" << total_remapped;
-      if (!transaction.TryCommitSingleGapPlacement(
-              blocks, gap_it, remapped_handles, remapped_metas, pool_type_)) {
-        return 0;
-      }
-      return total_remapped;
-    }
-
-    // ---- Path 3: gap-scatter (two-phase commit) ----
-    VLOG(3) << "VMM V2 compactor: tail unavailable and no single gap >= "
-            << total_remapped << " bytes, falling back to gap-scatter remap";
-
-    // Capacity precheck: verify total GAP can hold all handles.
-    size_t total_gap_capacity = transaction.CollectGapCapacity(*blocks);
-    if (total_gap_capacity < total_remapped) {
-      VLOG(0) << "VMM V2 compactor: gap capacity " << total_gap_capacity
-              << " < total_remapped " << total_remapped
-              << ", rolling back to original VA";
-      transaction.Rollback();
-      return 0;
-    }
-
-    // Phase 3a: tentative placement (cuMemMap only, no bookkeeping).
-    std::vector<RemapTransaction::GapPlacement> placements;
-    bool planned =
-        transaction.PlanGapScatter(blocks, remapped_handles.size(), &placements);
-
-    // Defensive: capacity precheck should prevent this.
-    if (!planned) {
-      size_t planned_handles = 0;
-      for (const auto& p : placements) {
-        planned_handles += p.count;
-      }
-      VLOG(0) << "VMM V2 compactor gap-scatter: placed " << planned_handles
-              << " of " << remapped_handles.size()
-              << " handles despite precheck; rolling back";
-      transaction.Rollback();
-      return 0;
-    }
-
-    if (!transaction.TryCommitGapScatter(
-            blocks, remapped_handles, remapped_metas, placements, pool_type_)) {
-      return 0;
     }
     return total_remapped;
   } catch (...) {

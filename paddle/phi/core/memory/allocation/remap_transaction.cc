@@ -451,6 +451,67 @@ bool RemapTransaction::TryCommitGapScatter(
   return true;
 }
 
+RemapTransaction::PlacementResult RemapTransaction::ExecutePlacementStrategy(
+    BlockList* blocks,
+    VmmDevicePtr tail_va,
+    VmmDevicePtr va_limit,
+    const std::vector<VmmAllocHandle>& handles,
+    const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
+    PoolType pool_type) {
+  PlacementResult result;
+  const size_t total_remapped = handles.size() * handle_size_;
+
+  if (TailIsUsable(tail_va, total_remapped, va_limit)) {
+    VLOG(10) << "VMM remap compact using tail path, dst_va="
+             << reinterpret_cast<void*>(tail_va)
+             << " bytes=" << total_remapped;
+    result.success =
+        TryCommitTailPlacement(blocks, tail_va, handles, metas, pool_type);
+    result.used_tail = result.success;
+    return result;
+  }
+
+  BlockIterator gap_it = blocks->end();
+  if (FindSingleGap(blocks, total_remapped, &gap_it)) {
+    const VmmDevicePtr gap_va = reinterpret_cast<VmmDevicePtr>(gap_it->ptr_);
+    VLOG(10) << "VMM remap compact using gap path, dst_va="
+             << reinterpret_cast<void*>(gap_va)
+             << " gap_size=" << gap_it->size_ << " bytes=" << total_remapped;
+    result.success =
+        TryCommitSingleGapPlacement(blocks, gap_it, handles, metas, pool_type);
+    return result;
+  }
+
+  VLOG(3) << "VMM V2 remap transaction: tail unavailable and no single gap >= "
+          << total_remapped << " bytes, falling back to gap-scatter remap";
+
+  size_t total_gap_capacity = CollectGapCapacity(*blocks);
+  if (total_gap_capacity < total_remapped) {
+    VLOG(0) << "VMM V2 remap transaction: gap capacity " << total_gap_capacity
+            << " < total_remapped " << total_remapped
+            << ", rolling back to original VA";
+    Rollback();
+    return result;
+  }
+
+  std::vector<GapPlacement> placements;
+  bool planned = PlanGapScatter(blocks, handles.size(), &placements);
+  if (!planned) {
+    size_t planned_handles = 0;
+    for (const auto& p : placements) {
+      planned_handles += p.count;
+    }
+    VLOG(0) << "VMM V2 remap transaction gap-scatter: placed "
+            << planned_handles << " of " << handles.size()
+            << " handles despite precheck; rolling back";
+    Rollback();
+    return result;
+  }
+
+  result.success = TryCommitGapScatter(blocks, handles, metas, placements, pool_type);
+  return result;
+}
+
 void RemapTransaction::InstallTailFreeBlock(BlockList* blocks,
                                             BlockV2 free_block) const {
   if (!blocks->empty()) {
