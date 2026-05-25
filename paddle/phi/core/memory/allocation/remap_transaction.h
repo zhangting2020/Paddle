@@ -45,6 +45,18 @@ class RemapTransaction {
     BlockV2 free_block;
     size_t bytes{0};
   };
+  struct SourceCollectionStats {
+    size_t free_block_count{0};
+    size_t safe_block_count{0};
+    size_t fully_covered_count{0};
+    size_t partial_count{0};
+    size_t event_blocked_count{0};
+    size_t fully_covered_bytes{0};
+    size_t partial_bytes{0};
+    size_t event_blocked_bytes{0};
+    size_t remapped_blocked_count{0};
+    size_t remapped_blocked_bytes{0};
+  };
   struct GapPlacement {
     BlockIterator gap_it;
     VmmDevicePtr dst{0};
@@ -55,6 +67,21 @@ class RemapTransaction {
     bool success{false};
     bool used_tail{false};
   };
+  struct PreScanResult {
+    size_t free_range_count{0};
+    size_t gap_range_count{0};
+    size_t mapped_page_count{0};
+    size_t target_page_count{0};
+    bool source_ok{true};
+    bool target_ok{true};
+  };
+  struct CompactResult {
+    SourceCollectionStats source_stats;
+    size_t remapped_handle_count{0};
+    size_t remapped_bytes{0};
+    bool success{false};
+    bool used_tail{false};
+  };
 
   RemapTransaction(CUDAVirtualMemAllocatorV2* vmm_allocator, size_t handle_size)
       : vmm_allocator_(vmm_allocator), handle_size_(handle_size) {}
@@ -62,6 +89,10 @@ class RemapTransaction {
   void PrepareCandidates(const VaRanges& source_ranges,
                          const VaRanges& target_ranges,
                          size_t target_bytes);
+  PreScanResult PreparePhase1Diagnostics(BlockList* blocks,
+                                         size_t requested_size,
+                                         const char* source_context,
+                                         const char* target_context);
   const VmmBackingMap::CompactCandidates& candidates() const {
     return candidates_;
   }
@@ -99,6 +130,12 @@ class RemapTransaction {
       size_t start,
       size_t count,
       PoolType pool_type);
+  SourceCollectionStats CollectRemapSources(
+      BlockList* blocks,
+      size_t requested_size,
+      PoolType pool_type,
+      std::vector<VmmAllocHandle>* handles,
+      std::vector<std::shared_ptr<VmmHandleMeta>>* metas);
   bool TailIsUsable(VmmDevicePtr tail_va,
                     size_t total_bytes,
                     VmmDevicePtr va_limit) const;
@@ -134,6 +171,9 @@ class RemapTransaction {
       const std::vector<VmmAllocHandle>& handles,
       const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
       PoolType pool_type);
+  CompactResult CompactFreeBlocks(BlockList* blocks,
+                                  size_t requested_size,
+                                  PoolType pool_type);
   void InstallTailFreeBlock(BlockList* blocks, BlockV2 free_block) const;
   BlockIterator InstallMappedGapRange(BlockList* blocks,
                                       BlockIterator gap_it,

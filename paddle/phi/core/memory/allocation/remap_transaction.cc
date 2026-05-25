@@ -15,9 +15,11 @@
 #include "paddle/phi/core/memory/allocation/remap_transaction.h"
 
 #include <list>
+#include <map>
 #include <utility>
 
 #include "glog/logging.h"
+#include "paddle/phi/core/enforce.h"
 #include "paddle/phi/core/platform/cuda_device_guard.h"
 #include "paddle/phi/core/platform/device/gpu/gpu_info.h"
 
@@ -33,6 +35,108 @@ bool TryAppendPart(std::vector<BlockPartV2>* dst, const BlockPartV2& part) {
     return false;
   }
   return true;
+}
+
+std::vector<std::pair<VmmDevicePtr, size_t>> CollectFreeRanges(
+    const std::list<BlockV2>& blocks) {
+  std::vector<std::pair<VmmDevicePtr, size_t>> ranges;
+  for (const auto& block : blocks) {
+    if (block.type_ != BlockType::kFree || block.ipc_exported_) {
+      continue;
+    }
+    ranges.emplace_back(reinterpret_cast<VmmDevicePtr>(block.ptr_),
+                        block.size_);
+  }
+  return ranges;
+}
+
+std::vector<std::pair<VmmDevicePtr, size_t>> CollectGapRanges(
+    const std::list<BlockV2>& blocks) {
+  std::vector<std::pair<VmmDevicePtr, size_t>> ranges;
+  for (const auto& block : blocks) {
+    if (block.type_ != BlockType::kGap) {
+      continue;
+    }
+    ranges.emplace_back(reinterpret_cast<VmmDevicePtr>(block.ptr_),
+                        block.size_);
+  }
+  return ranges;
+}
+
+void AppendGapOrFreeSegment(std::vector<BlockV2>* segments,
+                            BlockType type,
+                            size_t size,
+                            const BlockPartV2* part,
+                            void* ptr,
+                            PoolType pool_type) {
+  if (size == 0) {
+    return;
+  }
+
+  if (!segments->empty() && segments->back().type_ == type) {
+    segments->back().size_ += size;
+    if (part != nullptr) {
+      TryAppendPart(&segments->back().parts_, *part);
+    }
+    return;
+  }
+
+  BlockV2 segment;
+  segment.ptr_ = ptr;
+  segment.size_ = size;
+  segment.type_ = type;
+  segment.pool_type_ = pool_type;
+  if (part != nullptr) {
+    segment.parts_.push_back(*part);
+  }
+  segments->push_back(std::move(segment));
+}
+
+using EventReadyCache =
+    std::map<std::shared_ptr<CudaEventGuard>,
+             bool,
+             std::owner_less<std::shared_ptr<CudaEventGuard>>>;
+
+bool IsFullyCoveredHandle(const BlockPartV2& part, EventReadyCache* cache) {
+  if (part.handle->remapped) {
+    return false;
+  }
+  if (part.handle_rel_off != 0 || part.len != part.handle->size) {
+    return false;
+  }
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+  if (part.handle->remap_safe_event) {
+    auto event = part.handle->remap_safe_event;
+    auto it = cache->find(event);
+    bool ready = false;
+    if (it != cache->end()) {
+      ready = it->second;
+    } else {
+#ifdef PADDLE_WITH_CUDA
+      gpuError_t err = cudaEventQuery(event->event);
+      if (err != gpuSuccess && err != cudaErrorNotReady) {
+        PADDLE_ENFORCE_GPU_SUCCESS(err);
+      }
+#else
+      gpuError_t err = hipEventQuery(event->event);
+      if (err != gpuSuccess && err != hipErrorNotReady) {
+        PADDLE_ENFORCE_GPU_SUCCESS(err);
+      }
+#endif
+      ready = (err == gpuSuccess);
+      cache->emplace(event, ready);
+    }
+    if (!ready) {
+      return false;
+    }
+    part.handle->remap_safe_event.reset();
+  }
+#endif
+  return true;
+}
+
+bool IsRemapSafe(const BlockV2& block) {
+  return block.type_ == BlockType::kFree && !block.ipc_exported_;
 }
 
 void MergeAdjacentFreeBlocks(std::list<BlockV2>* blocks) {
@@ -210,6 +314,25 @@ void RemapTransaction::PrepareCandidates(const VaRanges& source_ranges,
       source_ranges, target_ranges, target_bytes);
 }
 
+RemapTransaction::PreScanResult RemapTransaction::PreparePhase1Diagnostics(
+    BlockList* blocks,
+    size_t requested_size,
+    const char* source_context,
+    const char* target_context) {
+  PreScanResult result;
+  auto free_ranges = CollectFreeRanges(*blocks);
+  auto gap_ranges = CollectGapRanges(*blocks);
+  result.free_range_count = free_ranges.size();
+  result.gap_range_count = gap_ranges.size();
+  PrepareCandidates(free_ranges, gap_ranges, requested_size);
+  result.mapped_page_count = candidates_.source_pages.size();
+  result.target_page_count = candidates_.target_pages.size();
+  auto validation = ValidateCandidates(source_context, target_context);
+  result.source_ok = validation.source_ok;
+  result.target_ok = validation.target_ok;
+  return result;
+}
+
 bool RemapTransaction::ValidateSourcePages(const char* context) const {
   return vmm_allocator_->ValidateMappedBackingPages(candidates_.source_pages,
                                                     context);
@@ -314,6 +437,105 @@ RemapTransaction::MaterializedRange RemapTransaction::MaterializeMappedRange(
     range.free_block.parts_.push_back(BlockPartV2{meta, 0, handle_size_});
   }
   return range;
+}
+
+RemapTransaction::SourceCollectionStats RemapTransaction::CollectRemapSources(
+    BlockList* blocks,
+    size_t requested_size,
+    PoolType pool_type,
+    std::vector<VmmAllocHandle>* handles,
+    std::vector<std::shared_ptr<VmmHandleMeta>>* metas) {
+  SourceCollectionStats stats;
+  EventReadyCache event_ready_cache;
+  bool logged_first_candidate = false;
+  for (auto it = blocks->begin(); it != blocks->end();) {
+    auto current = it++;
+    if (current->type_ == BlockType::kFree) stats.free_block_count++;
+    if (!IsRemapSafe(*current)) {
+      continue;
+    }
+    stats.safe_block_count++;
+
+    std::vector<BlockV2> replacement_segments;
+    size_t block_offset = 0;
+    size_t remapped_count_before = handles->size();
+    for (const auto& part : current->parts_) {
+      void* part_ptr =
+          reinterpret_cast<uint8_t*>(current->ptr_) + block_offset;
+      block_offset += part.len;
+      if (IsFullyCoveredHandle(part, &event_ready_cache)) {
+        stats.fully_covered_count++;
+        stats.fully_covered_bytes += part.len;
+        if (!logged_first_candidate) {
+          VLOG(0) << "First remap candidate pool="
+                  << static_cast<int>(pool_type)
+                  << " block_ptr=" << current->ptr_
+                  << " block_size=" << current->size_ << " handle_base="
+                  << reinterpret_cast<void*>(part.handle->base)
+                  << " handle_size=" << part.handle->size << " handle="
+                  << reinterpret_cast<void*>(part.handle->handle);
+          logged_first_candidate = true;
+        }
+        if (!vmm_allocator_->TryUnmapHandle(part.handle->base, part.len)) {
+          VLOG(0) << "VMM V2 remap transaction: TryUnmapHandle failed, "
+                     "skipping handle "
+                  << reinterpret_cast<void*>(part.handle->base);
+          AppendGapOrFreeSegment(&replacement_segments,
+                                 BlockType::kFree,
+                                 part.len,
+                                 &part,
+                                 part_ptr,
+                                 pool_type);
+          continue;
+        }
+        part.handle->remapped = true;
+        handles->push_back(part.handle->handle);
+        metas->push_back(part.handle);
+        AppendGapOrFreeSegment(&replacement_segments,
+                               BlockType::kGap,
+                               part.len,
+                               nullptr,
+                               part_ptr,
+                               pool_type);
+        continue;
+      }
+      if (part.handle->remapped) {
+        stats.remapped_blocked_count++;
+        stats.remapped_blocked_bytes += part.len;
+      }
+      if (part.handle->remap_safe_event) {
+        stats.event_blocked_count++;
+        stats.event_blocked_bytes += part.len;
+      } else {
+        stats.partial_count++;
+        stats.partial_bytes += part.len;
+      }
+      AppendGapOrFreeSegment(&replacement_segments,
+                             BlockType::kFree,
+                             part.len,
+                             &part,
+                             part_ptr,
+                             pool_type);
+    }
+
+    if (handles->size() == remapped_count_before) {
+      continue;
+    }
+
+    auto insert_pos = current;
+    for (auto& segment : replacement_segments) {
+      blocks->insert(insert_pos, std::move(segment));
+    }
+    blocks->erase(current);
+
+    if (requested_size > 0 && handles->size() * handle_size_ >= requested_size) {
+      VLOG(3) << "VMM V2 remap transaction: bounded exit, collected "
+              << handles->size() << " handles (" << handles->size() * handle_size_
+              << " bytes) >= requested=" << requested_size;
+      break;
+    }
+  }
+  return stats;
 }
 
 bool RemapTransaction::TailIsUsable(VmmDevicePtr tail_va,
@@ -509,6 +731,42 @@ RemapTransaction::PlacementResult RemapTransaction::ExecutePlacementStrategy(
   }
 
   result.success = TryCommitGapScatter(blocks, handles, metas, placements, pool_type);
+  return result;
+}
+
+RemapTransaction::CompactResult RemapTransaction::CompactFreeBlocks(
+    BlockList* blocks, size_t requested_size, PoolType pool_type) {
+  CompactResult result;
+  std::vector<VmmAllocHandle> remapped_handles;
+  std::vector<std::shared_ptr<VmmHandleMeta>> remapped_metas;
+
+  AddSourceRestoreAction(blocks, &remapped_handles, &remapped_metas);
+  result.source_stats = CollectRemapSources(
+      blocks, requested_size, pool_type, &remapped_handles, &remapped_metas);
+  result.remapped_handle_count = remapped_handles.size();
+  result.remapped_bytes = remapped_handles.size() * handle_size_;
+  if (remapped_handles.empty()) {
+    return result;
+  }
+
+  NormalizeBlocks(blocks);
+
+  VmmDevicePtr tail_va = vmm_allocator_->virtual_mem_base();
+  if (!blocks->empty()) {
+    const auto& last = blocks->back();
+    tail_va = reinterpret_cast<VmmDevicePtr>(
+        reinterpret_cast<uint8_t*>(last.ptr_) + last.size_);
+  }
+  const VmmDevicePtr va_limit =
+      vmm_allocator_->virtual_mem_base() + vmm_allocator_->virtual_mem_size();
+
+  auto placement = ExecutePlacementStrategy(
+      blocks, tail_va, va_limit, remapped_handles, remapped_metas, pool_type);
+  result.success = placement.success;
+  result.used_tail = placement.used_tail;
+  if (placement.success && placement.used_tail) {
+    vmm_allocator_->AdvanceTailOffset(result.remapped_bytes);
+  }
   return result;
 }
 
