@@ -159,25 +159,6 @@ std::vector<std::pair<VmmDevicePtr, size_t>> CollectGapRanges(
   return ranges;
 }
 
-BlockV2 CreateTailFreeBlock(
-    VmmDevicePtr dst_va,
-    size_t total_remapped,
-    PoolType pool_type,
-    const std::vector<std::shared_ptr<VmmHandleMeta>>& remapped_metas,
-    size_t handle_size) {
-  BlockV2 free_block;
-  free_block.ptr_ = reinterpret_cast<void*>(dst_va);
-  free_block.size_ = total_remapped;
-  free_block.type_ = BlockType::kFree;
-  free_block.pool_type_ = pool_type;
-  free_block.parts_.reserve(remapped_metas.size());
-  for (size_t i = 0; i < remapped_metas.size(); ++i) {
-    remapped_metas[i]->base = dst_va + i * handle_size;
-    free_block.parts_.push_back(BlockPartV2{remapped_metas[i], 0, handle_size});
-  }
-  return free_block;
-}
-
 void MergeAdjacentFreeBlocks(std::list<BlockV2>* blocks) {
   for (auto it = blocks->begin(); it != blocks->end();) {
     if (it->type_ != BlockType::kFree) {
@@ -624,16 +605,11 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
         return 0;
       }
 
-      // Register a synthetic allocation so FreeIdleChunks can release
-      // these handles when the tail block becomes entirely free.
-      HandleLayout tail_layout = transaction.BuildDestinationLayout(
-          tail_va, remapped_handles, 0, remapped_metas.size());
-      auto synth = vmm_allocator_->CreateSyntheticAllocation(
-          tail_va, total_remapped, tail_layout);
-      underlying_allocations_->emplace_back(std::move(synth));
-
-      BlockV2 tail_free = CreateTailFreeBlock(
-          tail_va, total_remapped, pool_type_, tail_layout, handle_size);
+      auto mapped = transaction.MaterializeMappedRange(
+          tail_va, remapped_handles, 0, remapped_metas.size(), pool_type_);
+      underlying_allocations_->emplace_back(
+          std::move(mapped.synthetic_allocation));
+      BlockV2 tail_free = std::move(mapped.free_block);
 
       if (!blocks->empty()) {
         auto last = std::prev(blocks->end());
@@ -678,24 +654,21 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
         return 0;
       }
 
-      // Register synthetic allocation for gap-remapped handles.
-      HandleLayout gap_layout = transaction.BuildDestinationLayout(
-          gap_va, remapped_handles, 0, remapped_metas.size());
-      auto synth = vmm_allocator_->CreateSyntheticAllocation(
-          gap_va, total_remapped, gap_layout);
-      underlying_allocations_->emplace_back(std::move(synth));
+      auto mapped = transaction.MaterializeMappedRange(
+          gap_va, remapped_handles, 0, remapped_metas.size(), pool_type_);
+      underlying_allocations_->emplace_back(
+          std::move(mapped.synthetic_allocation));
 
-      BlockV2 free_block = CreateTailFreeBlock(
-          gap_va, total_remapped, pool_type_, gap_layout, handle_size);
-      if (gap_it->size_ == total_remapped) {
+      BlockV2 free_block = std::move(mapped.free_block);
+      size_t gap_size = gap_it->size_;
+      if (gap_size == total_remapped) {
         *gap_it = std::move(free_block);
       } else {
         BlockV2 remaining_gap;
         remaining_gap.ptr_ = reinterpret_cast<void*>(gap_va + total_remapped);
-        remaining_gap.size_ = gap_it->size_ - total_remapped;
+        remaining_gap.size_ = gap_size - total_remapped;
         remaining_gap.type_ = BlockType::kGap;
         remaining_gap.pool_type_ = pool_type_;
-        gap_it->size_ = total_remapped;
         *gap_it = std::move(free_block);
         blocks->insert(std::next(gap_it), std::move(remaining_gap));
       }
@@ -796,26 +769,19 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     for (auto& p : placements) {
       auto it = p.gap_it;
       size_t filled_bytes = p.count * handle_size;
+      size_t gap_size = it->size_;
+      auto mapped = transaction.MaterializeMappedRange(
+          p.dst, remapped_handles, p.handle_start_idx, p.count, pool_type_);
+      underlying_allocations_->emplace_back(
+          std::move(mapped.synthetic_allocation));
 
-      HandleLayout chunk_layout = transaction.BuildDestinationLayout(
-          p.dst, remapped_handles, p.handle_start_idx, p.count);
-      auto synth = vmm_allocator_->CreateSyntheticAllocation(
-          p.dst, filled_bytes, chunk_layout);
-      underlying_allocations_->emplace_back(std::move(synth));
-
-      it->type_ = BlockType::kFree;
-      it->parts_.clear();
-      for (size_t i = 0; i < p.count; ++i) {
-        it->parts_.push_back(BlockPartV2{chunk_layout[i], 0, handle_size});
-      }
-
-      if (filled_bytes < it->size_) {
+      *it = std::move(mapped.free_block);
+      if (filled_bytes < gap_size) {
         BlockV2 leftover_gap;
         leftover_gap.ptr_ = reinterpret_cast<void*>(p.dst + filled_bytes);
-        leftover_gap.size_ = it->size_ - filled_bytes;
+        leftover_gap.size_ = gap_size - filled_bytes;
         leftover_gap.type_ = BlockType::kGap;
         leftover_gap.pool_type_ = pool_type_;
-        it->size_ = filled_bytes;
         blocks->insert(std::next(it), std::move(leftover_gap));
       }
     }

@@ -95,6 +95,28 @@ HandleLayout RemapTransaction::BuildDestinationLayout(
   return layout;
 }
 
+RemapTransaction::MaterializedRange RemapTransaction::MaterializeMappedRange(
+    VmmDevicePtr dst,
+    const std::vector<VmmAllocHandle>& handles,
+    size_t start,
+    size_t count,
+    PoolType pool_type) const {
+  MaterializedRange range;
+  range.layout = BuildDestinationLayout(dst, handles, start, count);
+  range.bytes = count * handle_size_;
+  range.synthetic_allocation = vmm_allocator_->CreateSyntheticAllocation(
+      dst, range.bytes, range.layout);
+  range.free_block.ptr_ = reinterpret_cast<void*>(dst);
+  range.free_block.size_ = range.bytes;
+  range.free_block.type_ = BlockType::kFree;
+  range.free_block.pool_type_ = pool_type;
+  range.free_block.parts_.reserve(range.layout.size());
+  for (const auto& meta : range.layout) {
+    range.free_block.parts_.push_back(BlockPartV2{meta, 0, handle_size_});
+  }
+  return range;
+}
+
 void RemapTransaction::RecordDestinationRange(VmmDevicePtr dst,
                                               size_t handle_count) {
   pending_destination_ranges_.push_back({dst, handle_count});

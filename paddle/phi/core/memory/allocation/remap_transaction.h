@@ -36,6 +36,12 @@ class RemapTransaction {
     bool source_ok{true};
     bool target_ok{true};
   };
+  struct MaterializedRange {
+    HandleLayout layout;
+    DecoratedAllocationPtr synthetic_allocation;
+    BlockV2 free_block;
+    size_t bytes{0};
+  };
 
   RemapTransaction(CUDAVirtualMemAllocatorV2* vmm_allocator, size_t handle_size)
       : vmm_allocator_(vmm_allocator), handle_size_(handle_size) {}
@@ -68,6 +74,12 @@ class RemapTransaction {
       const std::vector<VmmAllocHandle>& handles,
       size_t start,
       size_t count) const;
+  MaterializedRange MaterializeMappedRange(
+      VmmDevicePtr dst,
+      const std::vector<VmmAllocHandle>& handles,
+      size_t start,
+      size_t count,
+      PoolType pool_type) const;
   void Commit();
   void Rollback();
 
