@@ -53,13 +53,17 @@ class RemapTransaction {
                                          const char* target_context) const;
 
   void SetSourceRollbackAction(std::function<void()> action);
-  // Record the intended destination before map so later bookkeeping failures
-  // can still unmap every destination touched by this transaction.
-  void RecordDestinationRange(VmmDevicePtr dst, size_t handle_count);
+  void MapHandlesToDestination(
+      VmmDevicePtr dst,
+      const std::vector<VmmAllocHandle>& handles,
+      const std::vector<std::shared_ptr<VmmHandleMeta>>* metas = nullptr);
   void Commit();
   void Rollback();
 
  private:
+  // Record destination intent before map so later bookkeeping failures can
+  // still unmap every destination touched by this transaction.
+  void RecordDestinationRange(VmmDevicePtr dst, size_t handle_count);
   void UnmapPartialDestination(VmmDevicePtr dst_base, size_t handle_count);
   void RollbackPendingDestinations();
   void ClearPendingDestinations() { pending_destination_ranges_.clear(); }

@@ -51,6 +51,14 @@ void RemapTransaction::SetSourceRollbackAction(std::function<void()> action) {
   source_rollback_action_ = std::move(action);
 }
 
+void RemapTransaction::MapHandlesToDestination(
+    VmmDevicePtr dst,
+    const std::vector<VmmAllocHandle>& handles,
+    const std::vector<std::shared_ptr<VmmHandleMeta>>* metas) {
+  RecordDestinationRange(dst, handles.size());
+  vmm_allocator_->MapHandlesToVA(dst, handles, metas);
+}
+
 void RemapTransaction::RecordDestinationRange(VmmDevicePtr dst,
                                               size_t handle_count) {
   pending_destination_ranges_.push_back({dst, handle_count});

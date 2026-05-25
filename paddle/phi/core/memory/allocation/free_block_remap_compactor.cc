@@ -615,9 +615,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       VLOG(10) << "VMM remap compact using tail path, dst_va="
                << reinterpret_cast<void*>(tail_va)
                << " bytes=" << total_remapped;
-      transaction.RecordDestinationRange(tail_va, remapped_handles.size());
       try {
-        vmm_allocator_->MapHandlesToVA(
+        transaction.MapHandlesToDestination(
             tail_va, remapped_handles, &remapped_metas);
       } catch (...) {
         VLOG(0) << "VMM V2 compactor: tail MapHandlesToVA failed";
@@ -676,9 +675,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       VLOG(10) << "VMM remap compact using gap path, dst_va="
                << reinterpret_cast<void*>(gap_va)
                << " gap_size=" << gap_it->size_ << " bytes=" << total_remapped;
-      transaction.RecordDestinationRange(gap_va, remapped_handles.size());
       try {
-        vmm_allocator_->MapHandlesToVA(
+        transaction.MapHandlesToDestination(
             gap_va, remapped_handles, &remapped_metas);
       } catch (...) {
         VLOG(0) << "VMM V2 compactor: gap MapHandlesToVA failed";
@@ -789,9 +787,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
           remapped_metas.begin() + handle_idx,
           remapped_metas.begin() + handle_idx + to_fill);
 
-      transaction.RecordDestinationRange(dst, to_fill);
       try {
-        vmm_allocator_->MapHandlesToVA(dst, chunk, &chunk_metas);
+        transaction.MapHandlesToDestination(dst, chunk, &chunk_metas);
       } catch (...) {
         VLOG(0) << "VMM V2 compactor: gap-scatter MapHandlesToVA failed at "
                 << "handle_idx=" << handle_idx << "/"
