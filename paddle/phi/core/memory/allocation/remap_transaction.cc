@@ -78,6 +78,23 @@ void RemapTransaction::MapHandleRangeToDestination(
   MapHandlesToDestination(dst, handle_slice, &meta_slice);
 }
 
+HandleLayout RemapTransaction::BuildDestinationLayout(
+    VmmDevicePtr dst,
+    const std::vector<VmmAllocHandle>& handles,
+    size_t start,
+    size_t count) const {
+  HandleLayout layout;
+  layout.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    layout.push_back(std::make_shared<VmmHandleMeta>(
+        VmmHandleMeta{dst + i * handle_size_,
+                      handle_size_,
+                      handles[start + i],
+                      vmm_allocator_->place().device}));
+  }
+  return layout;
+}
+
 void RemapTransaction::RecordDestinationRange(VmmDevicePtr dst,
                                               size_t handle_count) {
   pending_destination_ranges_.push_back({dst, handle_count});

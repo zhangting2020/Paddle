@@ -626,14 +626,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
 
       // Register a synthetic allocation so FreeIdleChunks can release
       // these handles when the tail block becomes entirely free.
-      HandleLayout tail_layout;
-      for (size_t i = 0; i < remapped_metas.size(); ++i) {
-        tail_layout.push_back(std::make_shared<VmmHandleMeta>(
-            VmmHandleMeta{tail_va + i * handle_size,
-                          handle_size,
-                          remapped_handles[i],
-                          vmm_allocator_->place().device}));
-      }
+      HandleLayout tail_layout = transaction.BuildDestinationLayout(
+          tail_va, remapped_handles, 0, remapped_metas.size());
       auto synth = vmm_allocator_->CreateSyntheticAllocation(
           tail_va, total_remapped, tail_layout);
       underlying_allocations_->emplace_back(std::move(synth));
@@ -685,14 +679,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       }
 
       // Register synthetic allocation for gap-remapped handles.
-      HandleLayout gap_layout;
-      for (size_t i = 0; i < remapped_metas.size(); ++i) {
-        gap_layout.push_back(std::make_shared<VmmHandleMeta>(
-            VmmHandleMeta{gap_va + i * handle_size,
-                          handle_size,
-                          remapped_handles[i],
-                          vmm_allocator_->place().device}));
-      }
+      HandleLayout gap_layout = transaction.BuildDestinationLayout(
+          gap_va, remapped_handles, 0, remapped_metas.size());
       auto synth = vmm_allocator_->CreateSyntheticAllocation(
           gap_va, total_remapped, gap_layout);
       underlying_allocations_->emplace_back(std::move(synth));
@@ -809,14 +797,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       auto it = p.gap_it;
       size_t filled_bytes = p.count * handle_size;
 
-      HandleLayout chunk_layout;
-      for (size_t i = 0; i < p.count; ++i) {
-        chunk_layout.push_back(std::make_shared<VmmHandleMeta>(
-            VmmHandleMeta{p.dst + i * handle_size,
-                          handle_size,
-                          remapped_handles[p.handle_start_idx + i],
-                          vmm_allocator_->place().device}));
-      }
+      HandleLayout chunk_layout = transaction.BuildDestinationLayout(
+          p.dst, remapped_handles, p.handle_start_idx, p.count);
       auto synth = vmm_allocator_->CreateSyntheticAllocation(
           p.dst, filled_bytes, chunk_layout);
       underlying_allocations_->emplace_back(std::move(synth));

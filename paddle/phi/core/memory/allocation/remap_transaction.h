@@ -63,6 +63,11 @@ class RemapTransaction {
       size_t start,
       size_t count,
       const std::vector<std::shared_ptr<VmmHandleMeta>>* metas = nullptr);
+  HandleLayout BuildDestinationLayout(
+      VmmDevicePtr dst,
+      const std::vector<VmmAllocHandle>& handles,
+      size_t start,
+      size_t count) const;
   void Commit();
   void Rollback();
 
