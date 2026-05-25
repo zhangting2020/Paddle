@@ -30,14 +30,6 @@ namespace allocation {
 
 namespace {
 
-bool TryAppendPart(std::vector<BlockPartV2>* dst, const BlockPartV2& part) {
-  if (dst->empty() || !dst->back().TryExtend(part)) {
-    dst->push_back(part);
-    return false;
-  }
-  return true;
-}
-
 void AppendGapOrFreeSegment(std::vector<BlockV2>* segments,
                             BlockType type,
                             size_t size,
@@ -51,7 +43,10 @@ void AppendGapOrFreeSegment(std::vector<BlockV2>* segments,
   if (!segments->empty() && segments->back().type_ == type) {
     segments->back().size_ += size;
     if (part != nullptr) {
-      TryAppendPart(&segments->back().parts_, *part);
+      if (segments->back().parts_.empty() ||
+          !segments->back().parts_.back().TryExtend(*part)) {
+        segments->back().parts_.push_back(*part);
+      }
     }
     return;
   }
@@ -117,21 +112,6 @@ bool IsRemapSafe(const BlockV2& block) {
   return block.type_ == BlockType::kFree && !block.ipc_exported_;
 }
 
-void MergeAdjacentGaps(std::list<BlockV2>* blocks) {
-  for (auto it = blocks->begin(); it != blocks->end();) {
-    auto next = std::next(it);
-    if (next != blocks->end() && it->type_ == BlockType::kGap &&
-        next->type_ == BlockType::kGap &&
-        reinterpret_cast<uint8_t*>(it->ptr_) + it->size_ ==
-            reinterpret_cast<uint8_t*>(next->ptr_)) {
-      it->size_ += next->size_;
-      blocks->erase(next);
-      continue;
-    }
-    ++it;
-  }
-}
-
 std::vector<std::pair<VmmDevicePtr, size_t>> CollectFreeRanges(
     const std::list<BlockV2>& blocks) {
   std::vector<std::pair<VmmDevicePtr, size_t>> ranges;
@@ -156,27 +136,6 @@ std::vector<std::pair<VmmDevicePtr, size_t>> CollectGapRanges(
                         block.size_);
   }
   return ranges;
-}
-
-void MergeAdjacentFreeBlocks(std::list<BlockV2>* blocks) {
-  for (auto it = blocks->begin(); it != blocks->end();) {
-    if (it->type_ != BlockType::kFree) {
-      ++it;
-      continue;
-    }
-    auto next = std::next(it);
-    if (next != blocks->end() && next->type_ == BlockType::kFree &&
-        reinterpret_cast<uint8_t*>(it->ptr_) + it->size_ ==
-            reinterpret_cast<uint8_t*>(next->ptr_)) {
-      it->size_ += next->size_;
-      for (const auto& part : next->parts_) {
-        TryAppendPart(&it->parts_, part);
-      }
-      blocks->erase(next);
-      continue;
-    }
-    ++it;
-  }
 }
 
 }  // namespace
@@ -393,7 +352,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       return 0;
     }
 
-    MergeAdjacentGaps(blocks);
+    transaction.NormalizeBlocks(blocks);
 
     const size_t total_remapped = remapped_handles.size() * handle_size;
     LOG(INFO) << "VMM V2 compactor: Phase 1 done, " << remapped_handles.size()
@@ -465,21 +424,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
           tail_va, remapped_handles, 0, remapped_metas.size(), pool_type_);
       BlockV2 tail_free = std::move(mapped.free_block);
 
-      if (!blocks->empty()) {
-        auto last = std::prev(blocks->end());
-        if (last->type_ == BlockType::kFree &&
-            reinterpret_cast<uint8_t*>(last->ptr_) + last->size_ ==
-                reinterpret_cast<uint8_t*>(tail_free.ptr_)) {
-          last->size_ += tail_free.size_;
-          for (const auto& part : tail_free.parts_) {
-            TryAppendPart(&last->parts_, part);
-          }
-          vmm_allocator_->AdvanceTailOffset(total_remapped);
-          transaction.Commit();
-          return total_remapped;
-        }
-      }
-      blocks->push_back(std::move(tail_free));
+      transaction.InstallTailFreeBlock(blocks, std::move(tail_free));
       vmm_allocator_->AdvanceTailOffset(total_remapped);
       transaction.Commit();
       return total_remapped;
@@ -511,46 +456,9 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       auto mapped = transaction.MaterializeMappedRange(
           gap_va, remapped_handles, 0, remapped_metas.size(), pool_type_);
 
-      BlockV2 free_block = std::move(mapped.free_block);
-      size_t gap_size = gap_it->size_;
-      if (gap_size == total_remapped) {
-        *gap_it = std::move(free_block);
-      } else {
-        BlockV2 remaining_gap;
-        remaining_gap.ptr_ = reinterpret_cast<void*>(gap_va + total_remapped);
-        remaining_gap.size_ = gap_size - total_remapped;
-        remaining_gap.type_ = BlockType::kGap;
-        remaining_gap.pool_type_ = pool_type_;
-        *gap_it = std::move(free_block);
-        blocks->insert(std::next(gap_it), std::move(remaining_gap));
-      }
-
-      if (gap_it != blocks->begin()) {
-        auto prev = std::prev(gap_it);
-        if (prev->type_ == BlockType::kFree &&
-            reinterpret_cast<uint8_t*>(prev->ptr_) + prev->size_ ==
-                reinterpret_cast<uint8_t*>(gap_it->ptr_)) {
-          prev->size_ += gap_it->size_;
-          for (const auto& part : gap_it->parts_) {
-            TryAppendPart(&prev->parts_, part);
-          }
-          blocks->erase(gap_it);
-          gap_it = prev;
-        }
-      }
-      if (gap_it != blocks->end()) {
-        auto next = std::next(gap_it);
-        if (next != blocks->end() && next->type_ == BlockType::kFree &&
-            reinterpret_cast<uint8_t*>(gap_it->ptr_) + gap_it->size_ ==
-                reinterpret_cast<uint8_t*>(next->ptr_)) {
-          gap_it->size_ += next->size_;
-          for (const auto& part : next->parts_) {
-            TryAppendPart(&gap_it->parts_, part);
-          }
-          blocks->erase(next);
-        }
-      }
-      MergeAdjacentGaps(blocks);
+      transaction.InstallMappedGapRange(
+          blocks, gap_it, std::move(mapped.free_block), pool_type_);
+      transaction.NormalizeBlocks(blocks);
       transaction.Commit();
       return total_remapped;
     }
@@ -620,24 +528,13 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     // Phase 3b: commit — all handles mapped successfully.
     for (auto& p : placements) {
       auto it = p.gap_it;
-      size_t filled_bytes = p.count * handle_size;
-      size_t gap_size = it->size_;
       auto mapped = transaction.MaterializeMappedRange(
           p.dst, remapped_handles, p.handle_start_idx, p.count, pool_type_);
-
-      *it = std::move(mapped.free_block);
-      if (filled_bytes < gap_size) {
-        BlockV2 leftover_gap;
-        leftover_gap.ptr_ = reinterpret_cast<void*>(p.dst + filled_bytes);
-        leftover_gap.size_ = gap_size - filled_bytes;
-        leftover_gap.type_ = BlockType::kGap;
-        leftover_gap.pool_type_ = pool_type_;
-        blocks->insert(std::next(it), std::move(leftover_gap));
-      }
+      transaction.InstallMappedGapRange(
+          blocks, it, std::move(mapped.free_block), pool_type_);
     }
 
-    MergeAdjacentFreeBlocks(blocks);
-    MergeAdjacentGaps(blocks);
+    transaction.NormalizeBlocks(blocks);
     transaction.Commit();
     return total_remapped;
   } catch (...) {

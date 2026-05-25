@@ -29,6 +29,8 @@ namespace allocation {
 class RemapTransaction {
  public:
   using VaRanges = std::vector<std::pair<VmmDevicePtr, size_t>>;
+  using BlockList = std::list<BlockV2>;
+  using BlockIterator = BlockList::iterator;
 
   struct PendingDestinationRange {
     VmmDevicePtr dst{0};
@@ -87,6 +89,12 @@ class RemapTransaction {
       size_t start,
       size_t count,
       PoolType pool_type);
+  void InstallTailFreeBlock(BlockList* blocks, BlockV2 free_block) const;
+  BlockIterator InstallMappedGapRange(BlockList* blocks,
+                                      BlockIterator gap_it,
+                                      BlockV2 free_block,
+                                      PoolType pool_type) const;
+  void NormalizeBlocks(BlockList* blocks) const;
   void Commit();
   void Rollback();
 

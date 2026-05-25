@@ -27,8 +27,7 @@ namespace allocation {
 
 namespace {
 
-bool TryAppendRollbackPart(std::vector<BlockPartV2>* dst,
-                           const BlockPartV2& part) {
+bool TryAppendPart(std::vector<BlockPartV2>* dst, const BlockPartV2& part) {
   if (dst->empty() || !dst->back().TryExtend(part)) {
     dst->push_back(part);
     return false;
@@ -36,7 +35,7 @@ bool TryAppendRollbackPart(std::vector<BlockPartV2>* dst,
   return true;
 }
 
-void MergeAdjacentFreeBlocksForRollback(std::list<BlockV2>* blocks) {
+void MergeAdjacentFreeBlocks(std::list<BlockV2>* blocks) {
   for (auto it = blocks->begin(); it != blocks->end();) {
     if (it->type_ != BlockType::kFree) {
       ++it;
@@ -48,8 +47,23 @@ void MergeAdjacentFreeBlocksForRollback(std::list<BlockV2>* blocks) {
             reinterpret_cast<uint8_t*>(next->ptr_)) {
       it->size_ += next->size_;
       for (const auto& part : next->parts_) {
-        TryAppendRollbackPart(&it->parts_, part);
+        TryAppendPart(&it->parts_, part);
       }
+      blocks->erase(next);
+      continue;
+    }
+    ++it;
+  }
+}
+
+void MergeAdjacentGaps(std::list<BlockV2>* blocks) {
+  for (auto it = blocks->begin(); it != blocks->end();) {
+    auto next = std::next(it);
+    if (next != blocks->end() && it->type_ == BlockType::kGap &&
+        next->type_ == BlockType::kGap &&
+        reinterpret_cast<uint8_t*>(it->ptr_) + it->size_ ==
+            reinterpret_cast<uint8_t*>(next->ptr_)) {
+      it->size_ += next->size_;
       blocks->erase(next);
       continue;
     }
@@ -182,7 +196,7 @@ void RestoreSourceMappings(
       force_released++;
     }
   }
-  MergeAdjacentFreeBlocksForRollback(blocks);
+  MergeAdjacentFreeBlocks(blocks);
   VLOG(3) << "RestoreSourceMappings: restored=" << restored
           << " force_released=" << force_released;
 }
@@ -300,6 +314,77 @@ RemapTransaction::MaterializedRange RemapTransaction::MaterializeMappedRange(
     range.free_block.parts_.push_back(BlockPartV2{meta, 0, handle_size_});
   }
   return range;
+}
+
+void RemapTransaction::InstallTailFreeBlock(BlockList* blocks,
+                                            BlockV2 free_block) const {
+  if (!blocks->empty()) {
+    auto last = std::prev(blocks->end());
+    if (last->type_ == BlockType::kFree &&
+        reinterpret_cast<uint8_t*>(last->ptr_) + last->size_ ==
+            reinterpret_cast<uint8_t*>(free_block.ptr_)) {
+      last->size_ += free_block.size_;
+      for (const auto& part : free_block.parts_) {
+        TryAppendPart(&last->parts_, part);
+      }
+      return;
+    }
+  }
+  blocks->push_back(std::move(free_block));
+}
+
+RemapTransaction::BlockIterator RemapTransaction::InstallMappedGapRange(
+    BlockList* blocks,
+    BlockIterator gap_it,
+    BlockV2 free_block,
+    PoolType pool_type) const {
+  VmmDevicePtr gap_va = reinterpret_cast<VmmDevicePtr>(gap_it->ptr_);
+  size_t gap_size = gap_it->size_;
+  size_t filled_bytes = free_block.size_;
+
+  if (gap_size == filled_bytes) {
+    *gap_it = std::move(free_block);
+  } else {
+    BlockV2 remaining_gap;
+    remaining_gap.ptr_ = reinterpret_cast<void*>(gap_va + filled_bytes);
+    remaining_gap.size_ = gap_size - filled_bytes;
+    remaining_gap.type_ = BlockType::kGap;
+    remaining_gap.pool_type_ = pool_type;
+    *gap_it = std::move(free_block);
+    blocks->insert(std::next(gap_it), std::move(remaining_gap));
+  }
+
+  auto result = gap_it;
+  if (result != blocks->begin()) {
+    auto prev = std::prev(result);
+    if (prev->type_ == BlockType::kFree &&
+        reinterpret_cast<uint8_t*>(prev->ptr_) + prev->size_ ==
+            reinterpret_cast<uint8_t*>(result->ptr_)) {
+      prev->size_ += result->size_;
+      for (const auto& part : result->parts_) {
+        TryAppendPart(&prev->parts_, part);
+      }
+      blocks->erase(result);
+      result = prev;
+    }
+  }
+
+  auto next = std::next(result);
+  if (next != blocks->end() && next->type_ == BlockType::kFree &&
+      reinterpret_cast<uint8_t*>(result->ptr_) + result->size_ ==
+          reinterpret_cast<uint8_t*>(next->ptr_)) {
+    result->size_ += next->size_;
+    for (const auto& part : next->parts_) {
+      TryAppendPart(&result->parts_, part);
+    }
+    blocks->erase(next);
+  }
+  return result;
+}
+
+void RemapTransaction::NormalizeBlocks(BlockList* blocks) const {
+  MergeAdjacentFreeBlocks(blocks);
+  MergeAdjacentGaps(blocks);
 }
 
 void RemapTransaction::RecordDestinationRange(VmmDevicePtr dst,
