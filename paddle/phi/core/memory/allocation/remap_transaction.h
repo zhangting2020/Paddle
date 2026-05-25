@@ -16,8 +16,10 @@
 
 #include <cstddef>
 #include <functional>
+#include <list>
 #include <vector>
 
+#include "paddle/phi/core/memory/allocation/allocator.h"
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator_v2.h"
 
 namespace paddle {
@@ -38,7 +40,6 @@ class RemapTransaction {
   };
   struct MaterializedRange {
     HandleLayout layout;
-    DecoratedAllocationPtr synthetic_allocation;
     BlockV2 free_block;
     size_t bytes{0};
   };
@@ -58,7 +59,13 @@ class RemapTransaction {
   CandidateValidation ValidateCandidates(const char* source_context,
                                          const char* target_context) const;
 
-  void SetSourceRollbackAction(std::function<void()> action);
+  void AddRollbackAction(std::function<void()> action);
+  void AddSourceRestoreAction(
+      std::list<BlockV2>* blocks,
+      const std::vector<VmmAllocHandle>* handles,
+      const std::vector<std::shared_ptr<VmmHandleMeta>>* metas);
+  void SetSyntheticAllocationSink(
+      std::list<DecoratedAllocationPtr>* underlying_allocations);
   void MapHandlesToDestination(
       VmmDevicePtr dst,
       const std::vector<VmmAllocHandle>& handles,
@@ -89,13 +96,16 @@ class RemapTransaction {
   void RecordDestinationRange(VmmDevicePtr dst, size_t handle_count);
   void UnmapPartialDestination(VmmDevicePtr dst_base, size_t handle_count);
   void RollbackPendingDestinations();
+  void StageSyntheticAllocation(DecoratedAllocationPtr allocation);
   void ClearPendingDestinations() { pending_destination_ranges_.clear(); }
 
   CUDAVirtualMemAllocatorV2* vmm_allocator_;
   size_t handle_size_;
   VmmBackingMap::CompactCandidates candidates_;
   std::vector<PendingDestinationRange> pending_destination_ranges_;
-  std::function<void()> source_rollback_action_;
+  std::list<DecoratedAllocationPtr>* underlying_allocations_{nullptr};
+  std::vector<DecoratedAllocationPtr> pending_synthetic_allocations_;
+  std::vector<std::function<void()>> rollback_actions_;
   bool completed_{false};
 };
 

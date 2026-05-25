@@ -14,13 +14,180 @@
 
 #include "paddle/phi/core/memory/allocation/remap_transaction.h"
 
+#include <list>
 #include <utility>
 
 #include "glog/logging.h"
+#include "paddle/phi/core/platform/cuda_device_guard.h"
+#include "paddle/phi/core/platform/device/gpu/gpu_info.h"
 
 namespace paddle {
 namespace memory {
 namespace allocation {
+
+namespace {
+
+bool TryAppendRollbackPart(std::vector<BlockPartV2>* dst,
+                           const BlockPartV2& part) {
+  if (dst->empty() || !dst->back().TryExtend(part)) {
+    dst->push_back(part);
+    return false;
+  }
+  return true;
+}
+
+void MergeAdjacentFreeBlocksForRollback(std::list<BlockV2>* blocks) {
+  for (auto it = blocks->begin(); it != blocks->end();) {
+    if (it->type_ != BlockType::kFree) {
+      ++it;
+      continue;
+    }
+    auto next = std::next(it);
+    if (next != blocks->end() && next->type_ == BlockType::kFree &&
+        reinterpret_cast<uint8_t*>(it->ptr_) + it->size_ ==
+            reinterpret_cast<uint8_t*>(next->ptr_)) {
+      it->size_ += next->size_;
+      for (const auto& part : next->parts_) {
+        TryAppendRollbackPart(&it->parts_, part);
+      }
+      blocks->erase(next);
+      continue;
+    }
+    ++it;
+  }
+}
+
+bool RestoreGapToFree(std::list<BlockV2>* blocks,
+                      VmmDevicePtr va,
+                      size_t size,
+                      const std::shared_ptr<VmmHandleMeta>& meta) {
+  for (auto it = blocks->begin(); it != blocks->end(); ++it) {
+    if (it->type_ != BlockType::kGap) continue;
+    auto blk_start = reinterpret_cast<VmmDevicePtr>(it->ptr_);
+    auto blk_end = blk_start + it->size_;
+    if (va < blk_start || va >= blk_end) continue;
+    if (size > blk_end - va) {
+      VLOG(0) << "RestoreGapToFree: range exceeds GAP, va="
+              << reinterpret_cast<void*>(va) << " size=" << size
+              << " gap_start=" << reinterpret_cast<void*>(blk_start)
+              << " gap_size=" << it->size_;
+      return false;
+    }
+
+    size_t prefix = va - blk_start;
+    size_t suffix = blk_end - (va + size);
+
+    if (prefix > 0) {
+      BlockV2 prefix_gap;
+      prefix_gap.ptr_ = it->ptr_;
+      prefix_gap.size_ = prefix;
+      prefix_gap.type_ = BlockType::kGap;
+      prefix_gap.pool_type_ = it->pool_type_;
+      blocks->insert(it, std::move(prefix_gap));
+    }
+
+    it->ptr_ = reinterpret_cast<void*>(va);
+    it->size_ = size;
+    it->type_ = BlockType::kFree;
+    it->parts_.clear();
+    it->parts_.push_back(BlockPartV2{meta, 0, size});
+
+    if (suffix > 0) {
+      BlockV2 suffix_gap;
+      suffix_gap.ptr_ = reinterpret_cast<void*>(va + size);
+      suffix_gap.size_ = suffix;
+      suffix_gap.type_ = BlockType::kGap;
+      suffix_gap.pool_type_ = it->pool_type_;
+      blocks->insert(std::next(it), std::move(suffix_gap));
+    }
+    return true;
+  }
+  VLOG(0) << "RestoreGapToFree: GAP not found for VA "
+          << reinterpret_cast<void*>(va) << " — force-release will follow";
+  return false;
+}
+
+void RestoreSourceMappings(
+    std::list<BlockV2>* blocks,
+    const std::vector<VmmAllocHandle>& handles,
+    const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
+    CUDAVirtualMemAllocatorV2* vmm_allocator,
+    size_t handle_size) {
+  platform::CUDADeviceGuard guard(vmm_allocator->place().device);
+  size_t restored = 0, force_released = 0;
+  for (size_t i = 0; i < handles.size(); ++i) {
+    if (!metas[i]->remapped) continue;
+    VmmDevicePtr original_va = metas[i]->base;
+
+    auto map_status =
+        phi::dynload::cuMemMap(original_va, handle_size, 0, handles[i], 0);
+    if (map_status != CUDA_SUCCESS) {
+      VLOG(0) << "RestoreSourceMappings: cuMemMap(" << std::hex << original_va
+              << std::dec << ") failed status=" << map_status
+              << ", force-releasing handle";
+      auto release_status = platform::RecordedGpuMemRelease(
+          handles[i], handle_size, vmm_allocator->place().device);
+      if (release_status == CUDA_SUCCESS) {
+        vmm_allocator->MarkBackingReleased(
+            original_va, handles[i], handle_size);
+      }
+      if (release_status != CUDA_SUCCESS) {
+        VLOG(0) << "RestoreSourceMappings: force-release after cuMemMap "
+                << "failure returned status=" << release_status;
+      }
+      force_released++;
+      continue;
+    }
+    CUmemAccessDesc access_desc;
+    access_desc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    access_desc.location.id = vmm_allocator->place().device;
+    access_desc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    auto access_status =
+        phi::dynload::cuMemSetAccess(original_va, handle_size, &access_desc, 1);
+    if (access_status != CUDA_SUCCESS) {
+      VLOG(0) << "RestoreSourceMappings: cuMemSetAccess failed for VA "
+              << std::hex << original_va << std::dec
+              << " status=" << access_status;
+      phi::dynload::cuMemUnmap(original_va, handle_size);
+      auto release_status = platform::RecordedGpuMemRelease(
+          handles[i], handle_size, vmm_allocator->place().device);
+      if (release_status == CUDA_SUCCESS) {
+        vmm_allocator->MarkBackingReleased(
+            original_va, handles[i], handle_size);
+      }
+      if (release_status != CUDA_SUCCESS) {
+        VLOG(0) << "RestoreSourceMappings: force-release after cuMemSetAccess "
+                << "failure returned status=" << release_status;
+      }
+      force_released++;
+      continue;
+    }
+    vmm_allocator->MarkBackingMapped(original_va, handles[i], handle_size);
+    if (RestoreGapToFree(blocks, original_va, handle_size, metas[i])) {
+      metas[i]->remapped = false;
+      restored++;
+    } else {
+      phi::dynload::cuMemUnmap(original_va, handle_size);
+      vmm_allocator->MarkBackingUnmapped(original_va, handle_size);
+      auto release_status = platform::RecordedGpuMemRelease(
+          handles[i], handle_size, vmm_allocator->place().device);
+      if (release_status == CUDA_SUCCESS) {
+        vmm_allocator->MarkBackingReleased(
+            original_va, handles[i], handle_size);
+      }
+      if (release_status != CUDA_SUCCESS) {
+        VLOG(0) << "RestoreSourceMappings: force-release after block restore "
+                << "failure returned status=" << release_status;
+      }
+      force_released++;
+    }
+  }
+  MergeAdjacentFreeBlocksForRollback(blocks);
+  VLOG(3) << "RestoreSourceMappings: restored=" << restored
+          << " force_released=" << force_released;
+}
+
+}  // namespace
 
 void RemapTransaction::PrepareCandidates(const VaRanges& source_ranges,
                                          const VaRanges& target_ranges,
@@ -47,8 +214,26 @@ RemapTransaction::CandidateValidation RemapTransaction::ValidateCandidates(
   return validation;
 }
 
-void RemapTransaction::SetSourceRollbackAction(std::function<void()> action) {
-  source_rollback_action_ = std::move(action);
+void RemapTransaction::AddRollbackAction(std::function<void()> action) {
+  rollback_actions_.push_back(std::move(action));
+}
+
+void RemapTransaction::AddSourceRestoreAction(
+    std::list<BlockV2>* blocks,
+    const std::vector<VmmAllocHandle>* handles,
+    const std::vector<std::shared_ptr<VmmHandleMeta>>* metas) {
+  AddRollbackAction([=] {
+    if (handles->empty()) {
+      return;
+    }
+    RestoreSourceMappings(
+        blocks, *handles, *metas, vmm_allocator_, handle_size_);
+  });
+}
+
+void RemapTransaction::SetSyntheticAllocationSink(
+    std::list<DecoratedAllocationPtr>* underlying_allocations) {
+  underlying_allocations_ = underlying_allocations;
 }
 
 void RemapTransaction::MapHandlesToDestination(
@@ -104,8 +289,8 @@ RemapTransaction::MaterializedRange RemapTransaction::MaterializeMappedRange(
   MaterializedRange range;
   range.layout = BuildDestinationLayout(dst, handles, start, count);
   range.bytes = count * handle_size_;
-  range.synthetic_allocation = vmm_allocator_->CreateSyntheticAllocation(
-      dst, range.bytes, range.layout);
+  StageSyntheticAllocation(
+      vmm_allocator_->CreateSyntheticAllocation(dst, range.bytes, range.layout));
   range.free_block.ptr_ = reinterpret_cast<void*>(dst);
   range.free_block.size_ = range.bytes;
   range.free_block.type_ = BlockType::kFree;
@@ -123,8 +308,14 @@ void RemapTransaction::RecordDestinationRange(VmmDevicePtr dst,
 }
 
 void RemapTransaction::Commit() {
+  if (underlying_allocations_ != nullptr) {
+    for (auto& allocation : pending_synthetic_allocations_) {
+      underlying_allocations_->emplace_back(std::move(allocation));
+    }
+  }
+  pending_synthetic_allocations_.clear();
   ClearPendingDestinations();
-  source_rollback_action_ = nullptr;
+  rollback_actions_.clear();
   completed_ = true;
 }
 
@@ -139,11 +330,15 @@ void RemapTransaction::Rollback() {
   if (completed_) {
     return;
   }
+  pending_synthetic_allocations_.clear();
   RollbackPendingDestinations();
-  if (source_rollback_action_) {
-    source_rollback_action_();
+  for (auto it = rollback_actions_.rbegin(); it != rollback_actions_.rend();
+       ++it) {
+    if (*it) {
+      (*it)();
+    }
   }
-  source_rollback_action_ = nullptr;
+  rollback_actions_.clear();
   completed_ = true;
 }
 
@@ -157,6 +352,11 @@ void RemapTransaction::RollbackPendingDestinations() {
     UnmapPartialDestination(it->dst, it->handle_count);
   }
   pending_destination_ranges_.clear();
+}
+
+void RemapTransaction::StageSyntheticAllocation(
+    DecoratedAllocationPtr allocation) {
+  pending_synthetic_allocations_.emplace_back(std::move(allocation));
 }
 
 }  // namespace allocation

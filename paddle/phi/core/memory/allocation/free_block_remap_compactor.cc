@@ -22,7 +22,6 @@
 
 #include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
-#include "paddle/phi/core/platform/cuda_device_guard.h"
 #include "paddle/phi/core/platform/device/gpu/gpu_info.h"
 
 namespace paddle {
@@ -180,143 +179,6 @@ void MergeAdjacentFreeBlocks(std::list<BlockV2>* blocks) {
   }
 }
 
-bool RestoreGapToFree(std::list<BlockV2>* blocks,
-                      VmmDevicePtr va,
-                      size_t size,
-                      const std::shared_ptr<VmmHandleMeta>& meta) {
-  for (auto it = blocks->begin(); it != blocks->end(); ++it) {
-    if (it->type_ != BlockType::kGap) continue;
-    auto blk_start = reinterpret_cast<VmmDevicePtr>(it->ptr_);
-    auto blk_end = blk_start + it->size_;
-    if (va < blk_start || va >= blk_end) continue;
-    if (size > blk_end - va) {
-      VLOG(0) << "RestoreGapToFree: range exceeds GAP, va="
-              << reinterpret_cast<void*>(va) << " size=" << size
-              << " gap_start=" << reinterpret_cast<void*>(blk_start)
-              << " gap_size=" << it->size_;
-      return false;
-    }
-
-    size_t prefix = va - blk_start;
-    size_t suffix = blk_end - (va + size);
-
-    if (prefix > 0) {
-      BlockV2 prefix_gap;
-      prefix_gap.ptr_ = it->ptr_;
-      prefix_gap.size_ = prefix;
-      prefix_gap.type_ = BlockType::kGap;
-      prefix_gap.pool_type_ = it->pool_type_;
-      blocks->insert(it, std::move(prefix_gap));
-    }
-
-    it->ptr_ = reinterpret_cast<void*>(va);
-    it->size_ = size;
-    it->type_ = BlockType::kFree;
-    it->parts_.clear();
-    it->parts_.push_back(BlockPartV2{meta, 0, size});
-
-    if (suffix > 0) {
-      BlockV2 suffix_gap;
-      suffix_gap.ptr_ = reinterpret_cast<void*>(va + size);
-      suffix_gap.size_ = suffix;
-      suffix_gap.type_ = BlockType::kGap;
-      suffix_gap.pool_type_ = it->pool_type_;
-      blocks->insert(std::next(it), std::move(suffix_gap));
-    }
-    return true;
-  }
-  VLOG(0) << "RestoreGapToFree: GAP not found for VA "
-          << reinterpret_cast<void*>(va) << " — force-release will follow";
-  return false;
-}
-
-// Maps each handle back to its original VA (meta->base) and restores
-// the corresponding GAP block to FREE in the block list.
-// Invariant: meta->base was unmapped in Phase 1 and is currently a GAP.
-void RollbackToOriginalVA(
-    std::list<BlockV2>* blocks,
-    const std::vector<VmmAllocHandle>& handles,
-    const std::vector<std::shared_ptr<VmmHandleMeta>>& metas,
-    CUDAVirtualMemAllocatorV2* vmm_allocator,
-    size_t handle_size) {
-  platform::CUDADeviceGuard guard(vmm_allocator->place().device);
-  size_t restored = 0, force_released = 0;
-  for (size_t i = 0; i < handles.size(); ++i) {
-    if (!metas[i]->remapped) continue;
-    VmmDevicePtr original_va = metas[i]->base;
-
-    auto map_status =
-        phi::dynload::cuMemMap(original_va, handle_size, 0, handles[i], 0);
-    if (map_status != CUDA_SUCCESS) {
-      VLOG(0) << "RollbackToOriginalVA: cuMemMap(" << std::hex << original_va
-              << std::dec << ") failed status=" << map_status
-              << ", force-releasing handle";
-      auto release_status = platform::RecordedGpuMemRelease(
-          handles[i], handle_size, vmm_allocator->place().device);
-      if (release_status == CUDA_SUCCESS) {
-        vmm_allocator->MarkBackingReleased(
-            original_va, handles[i], handle_size);
-      }
-      if (release_status != CUDA_SUCCESS) {
-        VLOG(0) << "RollbackToOriginalVA: force-release after cuMemMap "
-                << "failure returned status=" << release_status;
-      }
-      // Keep remapped=true so FreeImpl skips this already-released handle.
-      force_released++;
-      continue;
-    }
-    // Set access permissions.
-    CUmemAccessDesc access_desc;
-    access_desc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-    access_desc.location.id = vmm_allocator->place().device;
-    access_desc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-    auto access_status =
-        phi::dynload::cuMemSetAccess(original_va, handle_size, &access_desc, 1);
-    if (access_status != CUDA_SUCCESS) {
-      VLOG(0) << "RollbackToOriginalVA: cuMemSetAccess failed for VA "
-              << std::hex << original_va << std::dec
-              << " status=" << access_status;
-      phi::dynload::cuMemUnmap(original_va, handle_size);
-      auto release_status = platform::RecordedGpuMemRelease(
-          handles[i], handle_size, vmm_allocator->place().device);
-      if (release_status == CUDA_SUCCESS) {
-        vmm_allocator->MarkBackingReleased(
-            original_va, handles[i], handle_size);
-      }
-      if (release_status != CUDA_SUCCESS) {
-        VLOG(0) << "RollbackToOriginalVA: force-release after cuMemSetAccess "
-                << "failure returned status=" << release_status;
-      }
-      // Keep remapped=true so FreeImpl skips this already-released handle.
-      force_released++;
-      continue;
-    }
-    vmm_allocator->MarkBackingMapped(original_va, handles[i], handle_size);
-    if (RestoreGapToFree(blocks, original_va, handle_size, metas[i])) {
-      metas[i]->remapped = false;
-      restored++;
-    } else {
-      phi::dynload::cuMemUnmap(original_va, handle_size);
-      vmm_allocator->MarkBackingUnmapped(original_va, handle_size);
-      auto release_status = platform::RecordedGpuMemRelease(
-          handles[i], handle_size, vmm_allocator->place().device);
-      if (release_status == CUDA_SUCCESS) {
-        vmm_allocator->MarkBackingReleased(
-            original_va, handles[i], handle_size);
-      }
-      if (release_status != CUDA_SUCCESS) {
-        VLOG(0) << "RollbackToOriginalVA: force-release after block restore "
-                << "failure returned status=" << release_status;
-      }
-      // Keep remapped=true so FreeImpl skips this handle.
-      force_released++;
-    }
-  }
-  MergeAdjacentFreeBlocks(blocks);
-  VLOG(3) << "RollbackToOriginalVA: restored=" << restored
-          << " force_released=" << force_released;
-}
-
 }  // namespace
 
 size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
@@ -326,15 +188,9 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
   bool logged_first_candidate = false;
   const size_t handle_size = vmm_allocator_->handle_size();
   RemapTransaction transaction(vmm_allocator_.get(), handle_size);
-  transaction.SetSourceRollbackAction([&] {
-    if (!remapped_handles.empty()) {
-      RollbackToOriginalVA(blocks,
-                           remapped_handles,
-                           remapped_metas,
-                           vmm_allocator_.get(),
-                           handle_size);
-    }
-  });
+  transaction.AddSourceRestoreAction(
+      blocks, &remapped_handles, &remapped_metas);
+  transaction.SetSyntheticAllocationSink(underlying_allocations_);
 
   LOG(INFO) << "VMM V2 compactor: entering Compact, blocks=" << blocks->size()
             << " handle_size=" << handle_size;
@@ -607,8 +463,6 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
 
       auto mapped = transaction.MaterializeMappedRange(
           tail_va, remapped_handles, 0, remapped_metas.size(), pool_type_);
-      underlying_allocations_->emplace_back(
-          std::move(mapped.synthetic_allocation));
       BlockV2 tail_free = std::move(mapped.free_block);
 
       if (!blocks->empty()) {
@@ -656,8 +510,6 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
 
       auto mapped = transaction.MaterializeMappedRange(
           gap_va, remapped_handles, 0, remapped_metas.size(), pool_type_);
-      underlying_allocations_->emplace_back(
-          std::move(mapped.synthetic_allocation));
 
       BlockV2 free_block = std::move(mapped.free_block);
       size_t gap_size = gap_it->size_;
@@ -772,8 +624,6 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       size_t gap_size = it->size_;
       auto mapped = transaction.MaterializeMappedRange(
           p.dst, remapped_handles, p.handle_start_idx, p.count, pool_type_);
-      underlying_allocations_->emplace_back(
-          std::move(mapped.synthetic_allocation));
 
       *it = std::move(mapped.free_block);
       if (filled_bytes < gap_size) {
