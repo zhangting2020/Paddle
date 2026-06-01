@@ -171,6 +171,7 @@ limitations under the License. */
 #include "pybind11/stl.h"
 
 PD_DECLARE_bool(use_virtual_memory_auto_growth);
+PHI_DECLARE_bool(use_vmm_auto_growth_best_fit_allocator_v2);
 
 COMMON_DECLARE_bool(use_mkldnn);
 COMMON_DECLARE_bool(use_onednn);
@@ -1001,7 +1002,8 @@ void BindTensor(pybind11::module &m) {  // NOLINT
                      "Tensor, share_filename is for CPU tensor."));
 
              // VMM IPC
-             if (FLAGS_use_virtual_memory_auto_growth) {
+             if (FLAGS_use_virtual_memory_auto_growth ||
+                 FLAGS_use_vmm_auto_growth_best_fit_allocator_v2) {
                py::tuple meta;
                ShareTensorViaVmm(self, &meta);
                return meta;
@@ -1053,7 +1055,9 @@ void BindTensor(pybind11::module &m) {  // NOLINT
       )DOC")
       .def("_new_shared_cuda",
            [](py::tuple t) {
-              if (FLAGS_use_virtual_memory_auto_growth && t.size() == 5) {
+              if ((FLAGS_use_virtual_memory_auto_growth ||
+                   FLAGS_use_vmm_auto_growth_best_fit_allocator_v2) &&
+                  t.size() == 5) {
                 return RebuildTensorFromVmmMeta(t);
               }
              if (t.size() != 7)
