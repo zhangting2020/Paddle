@@ -77,6 +77,8 @@ StreamSafeCUDAAllocation::StreamSafeCUDAAllocation(
                  underlying_allocation->size(),
                  underlying_allocation->place()),
       underlying_allocation_(std::move(underlying_allocation)),
+      vmm_v2_remap_allocation_(
+          dynamic_cast<VMMRemapEventAllocation*>(underlying_allocation_.get())),
       owning_stream_(owning_stream),
       allocator_(allocator->shared_from_this()) {}
 
@@ -173,12 +175,10 @@ void StreamSafeCUDAAllocation::RecordGraphCapturingStreams() {
 }
 
 bool StreamSafeCUDAAllocation::SetVMMV2RemapEvent() {
-  auto* remap_allocation =
-      dynamic_cast<VMMRemapEventAllocation*>(underlying_allocation_.get());
-  if (remap_allocation == nullptr) {
+  if (vmm_v2_remap_allocation_ == nullptr) {
     return false;
   }
-  return remap_allocation->SetVMMRemapEvent(owning_stream_, nullptr);
+  return vmm_v2_remap_allocation_->SetVMMRemapEvent(owning_stream_, nullptr);
 }
 
 void StreamSafeCUDAAllocation::RecordStreamWithNoGraphCapturing(

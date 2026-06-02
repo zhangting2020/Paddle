@@ -35,6 +35,7 @@ namespace allocation {
 
 class StreamSafeCUDAAllocator;
 class VMMAutoGrowthBestFitMultiPoolAllocatorV2;
+class VMMRemapEventAllocation;
 
 class StreamSafeCUDAAllocation : public Allocation {
  public:
@@ -60,6 +61,7 @@ class StreamSafeCUDAAllocation : public Allocation {
   void RecordGraphCapturingStreams();
   void RecordStreamWithNoGraphCapturing(gpuStream_t stream);
   DecoratedAllocationPtr underlying_allocation_;
+  VMMRemapEventAllocation *vmm_v2_remap_allocation_{nullptr};
   std::set<gpuStream_t> graph_capturing_stream_set_;
   std::map<gpuStream_t, gpuEvent_t> outstanding_event_map_;
   gpuStream_t owning_stream_;

@@ -37,7 +37,9 @@ class VMMAutoGrowthBestFitMultiPoolAllocationV2
             underlying_allocation->place()),
         underlying_allocation_(std::move(underlying_allocation)),
         allocator_(allocator),
-        pool_type_(pool_type) {}
+        pool_type_(pool_type),
+        remap_allocation_(dynamic_cast<VMMRemapEventAllocation*>(
+            underlying_allocation_.get())) {}
 
   AllocationPtr TakeUnderlyingAllocation() {
     return std::move(underlying_allocation_);
@@ -47,18 +49,17 @@ class VMMAutoGrowthBestFitMultiPoolAllocationV2
   PoolType pool_type() const { return pool_type_; }
   bool SetVMMRemapEvent(gpuStream_t stream,
                         std::shared_ptr<CUDAEventGuard> event) override {
-    auto* remap_allocation =
-        dynamic_cast<VMMRemapEventAllocation*>(underlying_allocation_.get());
-    if (remap_allocation == nullptr) {
+    if (remap_allocation_ == nullptr) {
       return false;
     }
-    return remap_allocation->SetVMMRemapEvent(stream, std::move(event));
+    return remap_allocation_->SetVMMRemapEvent(stream, std::move(event));
   }
 
  private:
   AllocationPtr underlying_allocation_;
   VMMAutoGrowthBestFitAllocatorV2* allocator_;
   PoolType pool_type_;
+  VMMRemapEventAllocation* remap_allocation_{nullptr};
 };
 
 }  // namespace
