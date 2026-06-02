@@ -14,14 +14,271 @@
 
 #include "gtest/gtest.h"
 
+#include <utility>
+#include <vector>
+
+#include "paddle/phi/core/enforce.h"
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator_v2.h"
+#include "paddle/phi/core/memory/allocation/vmm_backing_map.h"
 
 namespace paddle {
 namespace memory {
 namespace allocation {
 
+namespace {
+
+__global__ void VmmBackingMapBusyWaitKernel(unsigned long long cycles) {
+  const auto start = clock64();
+  while (clock64() - start < cycles) {
+  }
+}
+
+size_t TotalPartLength(const std::vector<BlockPartV2>& parts) {
+  size_t total = 0;
+  for (const auto& part : parts) {
+    total += part.ByteSize();
+  }
+  return total;
+}
+
+BlockV2 MakeTestMappedBlock(BlockType type, std::vector<BlockPartV2> parts) {
+  const size_t size = TotalPartLength(parts);
+  void* ptr = nullptr;
+  if (!parts.empty() && parts.front().HasHandle()) {
+    ptr = reinterpret_cast<void*>(parts.front().SliceBase());
+  }
+  return BlockV2::MakeMappedBlock(
+      type, ptr, size, parts, 0, size, PoolType::kLarge);
+}
+
+}  // namespace
+
+TEST(VmmBackingMap, TracksMappedAndUnmappedRanges) {
+  VmmBackingMap map;
+  const VmmDevicePtr base = 0x10000000;
+  const size_t page_size = 2UL << 20;
+  map.Configure(base, page_size * 4, page_size, 0);
+
+  EXPECT_TRUE(map.IsRangeUnmapped(base, page_size * 4));
+  EXPECT_FALSE(map.IsRangeMapped(base, page_size));
+  EXPECT_EQ(map.TotalMappedBytes(), 0UL);
+
+  const VmmAllocHandle first_handle = static_cast<VmmAllocHandle>(0x101);
+  const VmmAllocHandle second_handle = static_cast<VmmAllocHandle>(0x102);
+  map.MarkMapped(base, first_handle, page_size);
+  map.MarkMapped(base + page_size, second_handle, page_size);
+  map.MarkMapped(base, first_handle, page_size);
+  EXPECT_EQ(map.TotalMappedBytes(), page_size * 2);
+  EXPECT_TRUE(map.IsRangeReleasable(base, page_size * 4));
+  EXPECT_FALSE(map.IsRangeReleasable(base - page_size, page_size));
+
+  auto mapped_ranges = map.CollectMappedRanges(base, page_size * 4);
+  ASSERT_EQ(mapped_ranges.size(), 1UL);
+  EXPECT_EQ(mapped_ranges[0].first, base);
+  EXPECT_EQ(mapped_ranges[0].second, page_size * 2);
+  auto unmapped_ranges = map.CollectUnmappedRanges(base, page_size * 4);
+  ASSERT_EQ(unmapped_ranges.size(), 1UL);
+  EXPECT_EQ(unmapped_ranges[0].first, base + page_size * 2);
+  EXPECT_EQ(unmapped_ranges[0].second, page_size * 2);
+  std::vector<std::pair<VmmDevicePtr, size_t>> free_ranges = {
+      {base, page_size}, {base + page_size, page_size * 3}};
+  mapped_ranges = map.CollectMappedRanges(free_ranges);
+  ASSERT_EQ(mapped_ranges.size(), 1UL);
+  EXPECT_EQ(mapped_ranges[0].first, base);
+  EXPECT_EQ(mapped_ranges[0].second, page_size * 2);
+  unmapped_ranges = map.CollectUnmappedRanges(free_ranges);
+  ASSERT_EQ(unmapped_ranges.size(), 1UL);
+  EXPECT_EQ(unmapped_ranges[0].first, base + page_size * 2);
+  EXPECT_EQ(unmapped_ranges[0].second, page_size * 2);
+  auto mapped_pages = map.CollectMappedPages(free_ranges);
+  ASSERT_EQ(mapped_pages.size(), 2UL);
+  EXPECT_EQ(mapped_pages[0].va, base);
+  EXPECT_EQ(mapped_pages[0].handle, first_handle);
+  EXPECT_EQ(mapped_pages[1].va, base + page_size);
+  EXPECT_EQ(mapped_pages[1].handle, second_handle);
+  mapped_pages = map.CollectMappedPages(free_ranges, page_size + 1);
+  ASSERT_EQ(mapped_pages.size(), 2UL);
+  EXPECT_EQ(mapped_pages[0].va, base);
+  EXPECT_EQ(mapped_pages[1].va, base + page_size);
+  mapped_pages = map.CollectMappedPages(free_ranges, page_size);
+  ASSERT_EQ(mapped_pages.size(), 1UL);
+  EXPECT_EQ(mapped_pages[0].va, base);
+  const auto two_page_snapshot = map.CollectMappedPages(free_ranges);
+  ASSERT_EQ(two_page_snapshot.size(), 2UL);
+  EXPECT_TRUE(map.ValidateMappedPages(two_page_snapshot, "unit_test"));
+
+  EXPECT_TRUE(map.IsRangeMapped(base, page_size * 2));
+  EXPECT_FALSE(map.IsRangeMapped(base, page_size * 3));
+  EXPECT_FALSE(map.IsRangeUnmapped(base, page_size));
+  EXPECT_TRUE(map.IsRangeUnmapped(base + page_size * 2, page_size * 2));
+  EXPECT_EQ(map.TotalMappedBytes(), page_size * 2);
+
+  map.MarkUnmapped(base, page_size);
+  map.MarkUnmapped(base, page_size);
+  EXPECT_FALSE(map.ValidateMappedPages(two_page_snapshot, "unit_test_stale"));
+  std::vector<std::pair<VmmDevicePtr, size_t>> unmapped_base_range = {
+      {base, page_size}};
+  auto unmapped_base_pages =
+      map.CollectUnmappedPagesFullyCoveredBy(unmapped_base_range);
+  ASSERT_EQ(unmapped_base_pages.size(), 1UL);
+  EXPECT_TRUE(map.ValidateUnmappedPages(unmapped_base_pages,
+                                        "unit_test_unmapped_clears_handle"));
+  mapped_ranges = map.CollectMappedRanges(base, page_size * 4);
+  ASSERT_EQ(mapped_ranges.size(), 1UL);
+  EXPECT_EQ(mapped_ranges[0].first, base + page_size);
+  EXPECT_EQ(mapped_ranges[0].second, page_size);
+  unmapped_ranges = map.CollectUnmappedRanges(base, page_size * 4);
+  ASSERT_EQ(unmapped_ranges.size(), 2UL);
+  EXPECT_EQ(unmapped_ranges[0].first, base);
+  EXPECT_EQ(unmapped_ranges[0].second, page_size);
+  EXPECT_EQ(unmapped_ranges[1].first, base + page_size * 2);
+  EXPECT_EQ(unmapped_ranges[1].second, page_size * 2);
+  unmapped_ranges = map.CollectUnmappedRanges(free_ranges);
+  ASSERT_EQ(unmapped_ranges.size(), 2UL);
+  EXPECT_EQ(unmapped_ranges[0].first, base);
+  EXPECT_EQ(unmapped_ranges[0].second, page_size);
+  EXPECT_EQ(unmapped_ranges[1].first, base + page_size * 2);
+  EXPECT_EQ(unmapped_ranges[1].second, page_size * 2);
+  mapped_pages = map.CollectMappedPages(free_ranges);
+  ASSERT_EQ(mapped_pages.size(), 1UL);
+  EXPECT_EQ(mapped_pages[0].va, base + page_size);
+  EXPECT_EQ(mapped_pages[0].handle, second_handle);
+  mapped_pages = map.CollectMappedPages(free_ranges, page_size * 4);
+  ASSERT_EQ(mapped_pages.size(), 1UL);
+  EXPECT_EQ(mapped_pages[0].va, base + page_size);
+  std::vector<std::pair<VmmDevicePtr, size_t>> unaligned_free_ranges = {
+      {base + page_size / 2, page_size * 3}};
+  mapped_pages = map.CollectMappedPagesFullyCoveredBy(unaligned_free_ranges);
+  ASSERT_EQ(mapped_pages.size(), 1UL);
+  EXPECT_EQ(mapped_pages[0].va, base + page_size);
+  EXPECT_EQ(mapped_pages[0].handle, second_handle);
+  mapped_pages =
+      map.CollectMappedPagesFullyCoveredBy(unaligned_free_ranges, page_size);
+  ASSERT_EQ(mapped_pages.size(), 1UL);
+  EXPECT_EQ(mapped_pages[0].va, base + page_size);
+  auto unmapped_pages =
+      map.CollectUnmappedPagesFullyCoveredBy(unaligned_free_ranges);
+  ASSERT_EQ(unmapped_pages.size(), 1UL);
+  EXPECT_EQ(unmapped_pages[0].va, base + page_size * 2);
+  EXPECT_TRUE(map.ValidateUnmappedPages(unmapped_pages, "unit_test_unmapped"));
+  unmapped_pages =
+      map.CollectUnmappedPagesFullyCoveredBy(unaligned_free_ranges, page_size);
+  ASSERT_EQ(unmapped_pages.size(), 1UL);
+  EXPECT_EQ(unmapped_pages[0].va, base + page_size * 2);
+  auto candidates =
+      map.CollectCompactCandidates(unaligned_free_ranges,
+                                   unaligned_free_ranges,
+                                   page_size);
+  ASSERT_EQ(candidates.source_pages.size(), 1UL);
+  ASSERT_EQ(candidates.target_pages.size(), 1UL);
+  EXPECT_EQ(candidates.source_pages[0].va, base + page_size);
+  EXPECT_EQ(candidates.target_pages[0].va, base + page_size * 2);
+
+  map.MarkIpcExported(base + page_size, page_size);
+  EXPECT_FALSE(map.HasIpcExportedPages(base, page_size));
+  EXPECT_TRUE(map.HasIpcExportedPages(base + page_size, page_size));
+  EXPECT_TRUE(map.HasIpcExportedPages(base, page_size * 2));
+  EXPECT_FALSE(map.IsRangeReleasable(base, page_size * 2));
+  mapped_pages = map.CollectMappedPagesFullyCoveredBy(unaligned_free_ranges);
+  EXPECT_TRUE(mapped_pages.empty());
+  candidates = map.CollectCompactCandidates(
+      unaligned_free_ranges, unaligned_free_ranges, page_size);
+  EXPECT_TRUE(candidates.source_pages.empty());
+  ASSERT_EQ(candidates.target_pages.size(), 1UL);
+  EXPECT_EQ(candidates.target_pages[0].va, base + page_size * 2);
+
+  EXPECT_FALSE(map.IsRangeMapped(base, page_size * 2));
+  EXPECT_TRUE(map.IsRangeUnmapped(base, page_size));
+  EXPECT_TRUE(map.IsRangeMapped(base + page_size, page_size));
+  EXPECT_EQ(map.TotalMappedBytes(), page_size);
+
+  map.MarkReleased(base + page_size, second_handle, page_size);
+  map.MarkReleased(base + page_size, second_handle, page_size);
+  EXPECT_TRUE(map.IsRangeUnmapped(base, page_size * 4));
+  EXPECT_TRUE(map.IsRangeReleasable(base, page_size * 4));
+  EXPECT_EQ(map.TotalMappedBytes(), 0UL);
+  std::vector<std::pair<VmmDevicePtr, size_t>> all_ranges = {
+      {base, page_size * 4}};
+  auto all_unmapped_pages =
+      map.CollectUnmappedPagesFullyCoveredBy(all_ranges, page_size * 2);
+  ASSERT_EQ(all_unmapped_pages.size(), 2UL);
+  EXPECT_TRUE(
+      map.ValidateUnmappedPages(all_unmapped_pages, "unit_test_all_unmapped"));
+  const VmmAllocHandle third_handle = static_cast<VmmAllocHandle>(0x103);
+  map.MarkMapped(base, third_handle, page_size);
+  EXPECT_FALSE(
+      map.ValidateUnmappedPages(all_unmapped_pages, "unit_test_unmapped_stale"));
+}
+
+TEST(VmmBackingMap, RejectsMappedPageHandleOverwrite) {
+  VmmBackingMap map;
+  const VmmDevicePtr base = 0x18000000;
+  const size_t page_size = 2UL << 20;
+  map.Configure(base, page_size, page_size, 0);
+
+  const VmmAllocHandle first_handle = static_cast<VmmAllocHandle>(0x181);
+  const VmmAllocHandle second_handle = static_cast<VmmAllocHandle>(0x182);
+  map.MarkMapped(base, first_handle, page_size);
+  EXPECT_THROW(map.MarkMapped(base, second_handle, page_size),
+               common::enforce::EnforceNotMet);
+
+  map.MarkUnmapped(base, page_size);
+  auto meta = std::make_shared<VmmHandleMeta>(base, page_size, first_handle, 0);
+  map.MarkMapped(base, meta, page_size);
+  auto other_meta =
+      std::make_shared<VmmHandleMeta>(base, page_size, second_handle, 0);
+  EXPECT_THROW(map.MarkMapped(base, other_meta, page_size),
+               common::enforce::EnforceNotMet);
+}
+
+TEST(VmmBackingMap, ReplacesPendingEventForSameStream) {
+  VmmBackingMap map;
+  const VmmDevicePtr base = 0x20000000;
+  const size_t page_size = 2UL << 20;
+  map.Configure(base, page_size, page_size, 0);
+  auto meta = std::make_shared<VmmHandleMeta>(
+      base, page_size, static_cast<VmmAllocHandle>(0x201), 0);
+  map.MarkMapped(base, meta, page_size);
+
+  gpuStream_t key_stream;
+  gpuStream_t busy_stream;
+  ASSERT_EQ(cudaStreamCreate(&key_stream), cudaSuccess);
+  ASSERT_EQ(cudaStreamCreate(&busy_stream), cudaSuccess);
+
+  VmmBackingMapBusyWaitKernel<<<1, 1, 0, busy_stream>>>(500000000ULL);
+  ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+  gpuEvent_t pending_event;
+  ASSERT_EQ(cudaEventCreateWithFlags(&pending_event, cudaEventDisableTiming),
+            cudaSuccess);
+  ASSERT_EQ(cudaEventRecord(pending_event, busy_stream), cudaSuccess);
+  map.MarkPendingEvent(
+      base, page_size, key_stream, std::make_shared<CudaEventGuard>(pending_event));
+
+  gpuEvent_t ready_event;
+  ASSERT_EQ(cudaEventCreateWithFlags(&ready_event, cudaEventDisableTiming),
+            cudaSuccess);
+  ASSERT_EQ(cudaEventRecord(ready_event, key_stream), cudaSuccess);
+  ASSERT_EQ(cudaEventSynchronize(ready_event), cudaSuccess);
+  map.MarkPendingEvent(
+      base, page_size, key_stream, std::make_shared<CudaEventGuard>(ready_event));
+
+  std::vector<std::pair<VmmDevicePtr, size_t>> ranges = {{base, page_size}};
+  auto mapped_snapshot = map.CollectMappedPages(ranges);
+  ASSERT_EQ(mapped_snapshot.size(), 1UL);
+  auto pages = map.CollectRemapSourcePagesFullyCoveredBy(ranges, page_size);
+  ASSERT_EQ(pages.size(), 1UL);
+  EXPECT_EQ(pages[0].remap_source_state,
+            VmmBackingMap::RemapSourceState::kReady);
+  EXPECT_TRUE(map.ValidateMappedPages(
+      mapped_snapshot, "unit_test_ready_event_gc_keeps_epoch"));
+
+  ASSERT_EQ(cudaStreamSynchronize(busy_stream), cudaSuccess);
+  ASSERT_EQ(cudaStreamDestroy(key_stream), cudaSuccess);
+  ASSERT_EQ(cudaStreamDestroy(busy_stream), cudaSuccess);
+}
+
 TEST(CUDAVirtualMemAllocatorV2, HandleSizeAligned) {
-  CUDAVirtualMemAllocatorV2 allocator(phi::GPUPlace(), 1, PoolType::kTransient);
+  CUDAVirtualMemAllocatorV2 allocator(phi::GPUPlace(), 1, PoolType::kLarge);
 
   auto allocation = allocator.Allocate(1);
   ASSERT_NE(allocation, nullptr);
@@ -30,29 +287,80 @@ TEST(CUDAVirtualMemAllocatorV2, HandleSizeAligned) {
   ASSERT_EQ(allocation->size() % allocator.handle_size(), 0UL);
 }
 
-TEST(CUDAVirtualMemAllocatorV2, CollectAllocationHandleLayout) {
+TEST(CUDAVirtualMemAllocatorV2, DetectsDriverVaRangeMapping) {
   CUDAVirtualMemAllocatorV2 allocator(
-      phi::GPUPlace(), 2UL << 20, PoolType::kTransient);
+      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
-  auto allocation = allocator.Allocate(allocator.handle_size() * 2);
+  auto allocation = allocator.Allocate(allocator.handle_size());
   ASSERT_NE(allocation, nullptr);
+  auto va = reinterpret_cast<VmmDevicePtr>(allocation->ptr());
+  EXPECT_FALSE(
+      allocator.IsDriverVaRangeUnmapped(va, allocator.handle_size()));
 
-  HandleLayout layout;
-  ASSERT_TRUE(
-      allocator.CollectAllocationHandleLayout(allocation->ptr(), &layout));
-  ASSERT_EQ(layout.size(), 2UL);
+  allocation.reset();
+  EXPECT_TRUE(allocator.IsDriverVaRangeUnmapped(va, allocator.handle_size()));
+}
 
-  auto base = reinterpret_cast<VmmDevicePtr>(allocation->ptr());
-  for (size_t i = 0; i < layout.size(); ++i) {
-    ASSERT_TRUE(layout[i]);
-    EXPECT_EQ(layout[i]->base, base + i * allocator.handle_size());
-    EXPECT_EQ(layout[i]->size, allocator.handle_size());
+TEST(CUDAVirtualMemAllocatorV2, AllocateWithBlockReturnsHandleMetadata) {
+  CUDAVirtualMemAllocatorV2 allocator(
+      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
+
+  auto allocation_with_block =
+      allocator.AllocateWithBlock(allocator.handle_size() * 2);
+  ASSERT_NE(allocation_with_block.allocation, nullptr);
+
+  const auto& block = allocation_with_block.block;
+  ASSERT_EQ(block.AllocationPartCount(), 2UL);
+
+  auto base =
+      reinterpret_cast<VmmDevicePtr>(allocation_with_block.allocation->ptr());
+  std::vector<std::pair<VmmDevicePtr, size_t>> ranges = {
+      {base, allocation_with_block.allocation->size()}};
+  auto pages = allocator.CollectMappedPages(
+      ranges, allocation_with_block.allocation->size());
+  ASSERT_EQ(pages.size(), 2UL);
+  for (size_t i = 0; i < pages.size(); ++i) {
+    EXPECT_EQ(pages[i].va, base + i * allocator.handle_size());
+    EXPECT_EQ(block.AllocationPartHandleRelOffset(i), 0UL);
+    EXPECT_EQ(block.AllocationPartByteSize(i), allocator.handle_size());
+  }
+}
+
+TEST(CUDAVirtualMemAllocatorV2, AllocateWithBlockReturnsMappedFreeBlock) {
+  CUDAVirtualMemAllocatorV2 allocator(
+      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
+
+  auto allocation_with_block =
+      allocator.AllocateWithBlock(allocator.handle_size() * 2);
+  ASSERT_NE(allocation_with_block.allocation, nullptr);
+  ASSERT_EQ(allocation_with_block.block.size_,
+            allocation_with_block.allocation->size());
+  EXPECT_TRUE(allocation_with_block.block.IsMappedFree());
+
+  ASSERT_EQ(allocation_with_block.block.AllocationPartCount(), 2UL);
+
+  auto base =
+      reinterpret_cast<VmmDevicePtr>(allocation_with_block.allocation->ptr());
+  for (size_t i = 0; i < allocation_with_block.block.AllocationPartCount();
+       ++i) {
+    EXPECT_EQ(allocation_with_block.block.AllocationPartHandleRelOffset(i),
+              0UL);
+    EXPECT_EQ(allocation_with_block.block.AllocationPartByteSize(i),
+              allocator.handle_size());
+  }
+  std::vector<std::pair<VmmDevicePtr, size_t>> ranges = {
+      {base, allocation_with_block.allocation->size()}};
+  auto pages = allocator.CollectMappedPages(
+      ranges, allocation_with_block.allocation->size());
+  ASSERT_EQ(pages.size(), allocation_with_block.block.AllocationPartCount());
+  for (size_t i = 0; i < pages.size(); ++i) {
+    EXPECT_EQ(pages[i].va, base + i * allocator.handle_size());
   }
 }
 
 TEST(CUDAVirtualMemAllocatorV2, TailOffsetAdvancesWithAllocationSize) {
   CUDAVirtualMemAllocatorV2 allocator(
-      phi::GPUPlace(), 2UL << 20, PoolType::kTransient);
+      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
   auto first = allocator.Allocate(1);
   ASSERT_NE(first, nullptr);
@@ -65,44 +373,226 @@ TEST(CUDAVirtualMemAllocatorV2, TailOffsetAdvancesWithAllocationSize) {
 
 TEST(CUDAVirtualMemAllocatorV2, FreeRemovesHandleRegistration) {
   CUDAVirtualMemAllocatorV2 allocator(
-      phi::GPUPlace(), 2UL << 20, PoolType::kLongLived);
+      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
-  auto allocation = allocator.Allocate(allocator.handle_size());
-  ASSERT_NE(allocation, nullptr);
-  void* ptr = allocation->ptr();
+  auto allocation_with_block =
+      allocator.AllocateWithBlock(allocator.handle_size());
+  ASSERT_NE(allocation_with_block.allocation, nullptr);
+  void* ptr = allocation_with_block.allocation->ptr();
+  ASSERT_EQ(allocation_with_block.block.AllocationPartCount(), 1UL);
 
-  HandleLayout layout;
-  ASSERT_TRUE(allocator.CollectAllocationHandleLayout(ptr, &layout));
-  ASSERT_EQ(layout.size(), 1UL);
+  allocation_with_block.allocation.reset();
 
-  allocation.reset();
-
-  EXPECT_FALSE(allocator.CollectAllocationHandleLayout(ptr, &layout));
+  auto reused = allocator.AllocateAtVAWithBlock(
+      reinterpret_cast<VmmDevicePtr>(ptr), allocator.handle_size());
+  ASSERT_NE(reused.allocation, nullptr);
+  EXPECT_EQ(reused.allocation->ptr(), ptr);
+  ASSERT_EQ(reused.block.AllocationPartCount(), 1UL);
 }
 
-TEST(CUDAVirtualMemAllocatorV2, UnmapAndMapHandleBackToSameVA) {
+TEST(CUDAVirtualMemAllocatorV2, MoveBackingPageRoundTripsHandle) {
   CUDAVirtualMemAllocatorV2 allocator(
-      phi::GPUPlace(), 2UL << 20, PoolType::kTransient);
+      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
-  auto allocation = allocator.Allocate(allocator.handle_size() * 2);
-  ASSERT_NE(allocation, nullptr);
+  auto allocation_with_block =
+      allocator.AllocateWithBlock(allocator.handle_size());
+  ASSERT_NE(allocation_with_block.allocation, nullptr);
+  ASSERT_EQ(allocation_with_block.block.AllocationPartCount(), 1UL);
 
-  HandleLayout layout;
+  const auto source_va =
+      reinterpret_cast<VmmDevicePtr>(allocation_with_block.allocation->ptr());
+  const auto target_va = allocator.virtual_mem_base() + allocator.tail_offset();
+  ASSERT_NE(source_va, target_va);
+
+  std::vector<std::pair<VmmDevicePtr, size_t>> source_ranges = {
+      {source_va, allocator.handle_size()}};
+  std::vector<std::pair<VmmDevicePtr, size_t>> target_ranges = {
+      {target_va, allocator.handle_size()}};
+  auto source_pages = allocator.CollectMappedPages(
+      source_ranges, allocator.handle_size());
+  auto target_pages = allocator.CollectUnmappedPages(
+      target_ranges, allocator.handle_size());
+  ASSERT_EQ(source_pages.size(), 1UL);
+  ASSERT_EQ(target_pages.size(), 1UL);
+
+  ASSERT_TRUE(allocator.MoveBackingPage(source_pages[0], target_pages[0]));
+  EXPECT_FALSE(
+      allocator.ValidateUnmappedPages({target_pages[0]},
+                                             "unit_test_move_stale_target"));
+  EXPECT_FALSE(
+      allocator.ValidateMappedPages({source_pages[0]},
+                                           "unit_test_move_stale_source"));
+  auto moved_pages = allocator.CollectMappedPages(
+      target_ranges, allocator.handle_size());
+  auto source_unmapped_pages =
+      allocator.CollectUnmappedPages(
+          source_ranges, allocator.handle_size());
+  ASSERT_EQ(moved_pages.size(), 1UL);
+  ASSERT_EQ(source_unmapped_pages.size(), 1UL);
+  EXPECT_EQ(moved_pages[0].handle, source_pages[0].handle);
+
   ASSERT_TRUE(
-      allocator.CollectAllocationHandleLayout(allocation->ptr(), &layout));
-  ASSERT_EQ(layout.size(), 2UL);
+      allocator.MoveBackingPage(moved_pages[0], source_unmapped_pages[0]));
+  auto restored_pages = allocator.CollectMappedPages(
+      source_ranges, allocator.handle_size());
+  ASSERT_EQ(restored_pages.size(), 1UL);
+  EXPECT_EQ(restored_pages[0].handle, source_pages[0].handle);
+}
 
-  const auto remap_ptr = layout[0]->base;
-  const auto remap_handle = layout[0]->handle;
-  allocator.UnmapHandle(remap_ptr, allocator.handle_size());
-  allocator.MapHandlesToVA(remap_ptr, {remap_handle});
+TEST(CUDAVirtualMemAllocatorV2, DetectsRemapDestinationOwnedLayouts) {
+  CUDAVirtualMemAllocatorV2 allocator(
+      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
-  HandleLayout layout_after_remap;
-  EXPECT_TRUE(allocator.CollectAllocationHandleLayout(allocation->ptr(),
-                                                      &layout_after_remap));
-  ASSERT_EQ(layout_after_remap.size(), layout.size());
-  EXPECT_EQ(layout_after_remap[0]->base, layout[0]->base);
-  EXPECT_EQ(layout_after_remap[0]->handle, layout[0]->handle);
+  auto allocation_with_block =
+      allocator.AllocateWithBlock(allocator.handle_size());
+  ASSERT_NE(allocation_with_block.allocation, nullptr);
+  auto* ptr = allocation_with_block.allocation->ptr();
+  EXPECT_FALSE(allocator.IsAllocationOwnedByRemapDestination(
+      ptr));
+  auto meta = allocation_with_block.block.FirstAllocationPartHandleMeta();
+  meta->MarkOwnedByRemapDestination();
+  EXPECT_TRUE(allocator.IsAllocationOwnedByRemapDestination(ptr));
+  meta->RestoreOriginalOwnership();
+  EXPECT_FALSE(allocator.IsAllocationOwnedByRemapDestination(ptr));
+  EXPECT_FALSE(allocator.IsAllocationOwnedByRemapDestination(nullptr));
+}
+
+TEST(CUDAVirtualMemAllocatorV2, DetectsReusableBlockBacking) {
+  CUDAVirtualMemAllocatorV2 allocator(
+      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
+
+  auto allocation_with_block =
+      allocator.AllocateWithBlock(allocator.handle_size() * 2);
+  ASSERT_NE(allocation_with_block.allocation, nullptr);
+  BlockV2 block = allocation_with_block.block;
+  EXPECT_TRUE(allocator.IsBlockReusableForAllocation(block));
+
+  allocator.MarkBackingIpcExported(block.BeginVA(),
+                                   allocator.handle_size());
+  EXPECT_FALSE(allocator.IsBlockReusableForAllocation(block));
+
+  BlockV2 invalid_block = MakeTestMappedBlock(
+      BlockType::kFree, {BlockPartV2{nullptr, 0, allocator.handle_size()}});
+  EXPECT_FALSE(allocator.IsBlockReusableForAllocation(invalid_block));
+}
+
+TEST(CUDAVirtualMemAllocatorV2, CollectsAndPinsIpcBlockBacking) {
+  CUDAVirtualMemAllocatorV2 allocator(
+      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
+
+  auto allocation_with_block =
+      allocator.AllocateWithBlock(allocator.handle_size() * 2);
+  ASSERT_NE(allocation_with_block.allocation, nullptr);
+  ASSERT_EQ(allocation_with_block.block.AllocationPartCount(), 2UL);
+
+  BlockV2 block = allocation_with_block.block.MakeMappedActiveSubBlock(
+      128, allocator.handle_size() - 128 + 2048);
+  const auto block_base =
+      reinterpret_cast<VmmDevicePtr>(allocation_with_block.allocation->ptr());
+  std::vector<std::pair<VmmDevicePtr, size_t>> ranges = {
+      {block_base, allocation_with_block.allocation->size()}};
+  auto pages = allocator.CollectMappedPages(
+      ranges, allocation_with_block.allocation->size());
+  ASSERT_EQ(pages.size(), 2UL);
+  std::vector<BlockPart> ipc_parts;
+  ASSERT_TRUE(allocator.CollectBlockIpcParts(block, &ipc_parts));
+  ASSERT_EQ(ipc_parts.size(), 2UL);
+  EXPECT_EQ(ipc_parts[0].chunk->base, pages[0].va);
+  EXPECT_EQ(ipc_parts[0].chunk->size, allocator.handle_size());
+  EXPECT_EQ(ipc_parts[0].chunk->handle, pages[0].handle);
+  EXPECT_EQ(ipc_parts[0].chunk_rel_off, 128UL);
+  EXPECT_EQ(ipc_parts[0].len, allocator.handle_size() - 128);
+  EXPECT_EQ(ipc_parts[1].chunk->base, pages[1].va);
+  EXPECT_EQ(ipc_parts[1].chunk_rel_off, 0UL);
+  EXPECT_EQ(ipc_parts[1].len, 2048UL);
+
+  EXPECT_TRUE(allocator.IsBlockReusableForAllocation(block));
+  ASSERT_TRUE(allocator.MarkBlockIpcExported(block));
+  EXPECT_TRUE(allocator.HasBlockIpcExported(block));
+  EXPECT_FALSE(allocator.IsBlockReusableForAllocation(block));
+
+  block.FirstAllocationPartHandleMeta()->MarkOwnedByRemapDestination();
+  EXPECT_FALSE(allocator.CollectBlockIpcParts(block, &ipc_parts));
+  block.FirstAllocationPartHandleMeta()->RestoreOriginalOwnership();
+
+  BlockV2 invalid_block = MakeTestMappedBlock(
+      BlockType::kActive, {BlockPartV2{nullptr, 0, allocator.handle_size()}});
+  EXPECT_FALSE(allocator.CollectBlockIpcParts(invalid_block, &ipc_parts));
+  EXPECT_FALSE(allocator.MarkBlockIpcExported(invalid_block));
+  EXPECT_FALSE(allocator.HasBlockIpcExported(invalid_block));
+}
+
+TEST(CUDAVirtualMemAllocatorV2, SetsBlockBackingRemapEvent) {
+  CUDAVirtualMemAllocatorV2 allocator(
+      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
+
+  auto allocation_with_block =
+      allocator.AllocateWithBlock(allocator.handle_size());
+  ASSERT_NE(allocation_with_block.allocation, nullptr);
+  ASSERT_EQ(allocation_with_block.block.AllocationPartCount(), 1UL);
+
+  BlockV2 block =
+      allocation_with_block.block.MakeMappedActiveSubBlock(0, 2048);
+  cudaEvent_t raw_event = nullptr;
+  ASSERT_EQ(cudaEventCreateWithFlags(&raw_event, cudaEventDisableTiming),
+            cudaSuccess);
+  auto guard = std::make_shared<CudaEventGuard>(raw_event);
+  ASSERT_TRUE(allocator.SetBlockRemapEvent(block, nullptr, guard));
+
+  BlockV2 invalid_block = MakeTestMappedBlock(
+      BlockType::kActive, {BlockPartV2{nullptr, 0, allocator.handle_size()}});
+  EXPECT_FALSE(allocator.SetBlockRemapEvent(invalid_block, nullptr, guard));
+}
+
+TEST(CUDAVirtualMemAllocatorV2, BackingMapPendingEventBlocksReuse) {
+  CUDAVirtualMemAllocatorV2 allocator(
+      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
+
+  auto allocation_with_block =
+      allocator.AllocateWithBlock(allocator.handle_size());
+  ASSERT_NE(allocation_with_block.allocation, nullptr);
+  ASSERT_EQ(allocation_with_block.block.AllocationPartCount(), 1UL);
+
+  BlockV2 block = allocation_with_block.block;
+  const auto block_base =
+      reinterpret_cast<VmmDevicePtr>(allocation_with_block.allocation->ptr());
+
+  cudaStream_t stream = nullptr;
+  ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking),
+            cudaSuccess);
+  VmmBackingMapBusyWaitKernel<<<1, 1, 0, stream>>>(500000000ULL);
+  ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+
+  cudaEvent_t raw_event = nullptr;
+  ASSERT_EQ(cudaEventCreateWithFlags(&raw_event, cudaEventDisableTiming),
+            cudaSuccess);
+  ASSERT_EQ(cudaEventRecord(raw_event, stream), cudaSuccess);
+  auto guard = std::make_shared<CudaEventGuard>(raw_event);
+
+  ASSERT_TRUE(allocator.SetBlockRemapEvent(block, stream, guard));
+  EXPECT_FALSE(allocator.IsBlockReusableForAllocation(block));
+  EXPECT_FALSE(allocator.IsRangeReleasable(
+      block_base, allocator.handle_size()));
+  std::vector<std::pair<VmmDevicePtr, size_t>> ranges = {
+      {block_base, allocator.handle_size()}};
+  EXPECT_TRUE(
+      allocator
+          .CollectMappedPages(ranges,
+                                                   allocator.handle_size())
+          .empty());
+  auto remap_sources =
+      allocator.CollectRemapSourcePages(
+          ranges, allocator.handle_size());
+  ASSERT_EQ(remap_sources.size(), 1UL);
+  EXPECT_EQ(remap_sources[0].va, block_base);
+  EXPECT_EQ(remap_sources[0].handle,
+            block.FirstAllocationPartHandleMeta()->AllocationHandle());
+
+  ASSERT_EQ(cudaEventSynchronize(raw_event), cudaSuccess);
+  EXPECT_TRUE(allocator.IsBlockReusableForAllocation(block));
+  EXPECT_TRUE(allocator.IsRangeReleasable(
+      block_base, allocator.handle_size()));
+  ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
 }
 
 }  // namespace allocation
