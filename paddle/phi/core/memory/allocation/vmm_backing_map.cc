@@ -288,6 +288,45 @@ void VMMBackingMap::MarkPendingEvent(VMMDevicePtr va,
     page.epoch++;
   }
 }
+
+bool VMMBackingMap::MarkPendingEventForRange(
+    VMMDevicePtr va,
+    size_t size,
+    gpuStream_t stream,
+    std::shared_ptr<CUDAEventGuard> event) {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  size_t start = 0;
+  size_t count = 0;
+  if (!ComputeOverlappedPages(base_,
+                              size_,
+                              page_size_,
+                              va,
+                              size,
+                              "MarkPendingEventForRange",
+                              &start,
+                              &count)) {
+    return false;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    auto& page = pages_[start + i];
+    if (!page.mapped) {
+      VLOG(6) << "VMM V2 BackingMap marks unmapped page event-pending at "
+              << reinterpret_cast<void*>(base_ + (start + i) * page_size_);
+    }
+    auto same_stream = std::find_if(page.pending_events.begin(),
+                                    page.pending_events.end(),
+                                    [stream](const PendingEvent& pending) {
+                                      return pending.stream == stream;
+                                    });
+    if (same_stream != page.pending_events.end()) {
+      same_stream->event = event;
+    } else {
+      page.pending_events.push_back(PendingEvent{stream, event});
+    }
+    page.epoch++;
+  }
+  return true;
+}
 #endif
 
 bool VMMBackingMap::ValidateLayout(const HandleLayout& layout,

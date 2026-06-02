@@ -73,6 +73,10 @@ class VMMBackingMap {
                         size_t size,
                         gpuStream_t stream,
                         std::shared_ptr<CUDAEventGuard> event);
+  bool MarkPendingEventForRange(VMMDevicePtr va,
+                                size_t size,
+                                gpuStream_t stream,
+                                std::shared_ptr<CUDAEventGuard> event);
 #endif
 
   bool ValidateLayout(const HandleLayout& layout, const char* context) const;
@@ -153,12 +157,12 @@ class VMMBackingMap {
                         size_t* count) const;
   std::vector<std::pair<VMMDevicePtr, size_t>> CollectRangesLocked(
       VMMDevicePtr va, size_t size, bool mapped, const char* context) const;
-  void AppendRangesLocked(VMMDevicePtr va,
-                          size_t size,
-                          bool mapped,
-                          const char* context,
-                          std::vector<std::pair<VMMDevicePtr, size_t>>*
-                              ranges) const;
+  void AppendRangesLocked(
+      VMMDevicePtr va,
+      size_t size,
+      bool mapped,
+      const char* context,
+      std::vector<std::pair<VMMDevicePtr, size_t>>* ranges) const;
   void AppendMappedPagesLocked(VMMDevicePtr va,
                                size_t size,
                                const char* context,

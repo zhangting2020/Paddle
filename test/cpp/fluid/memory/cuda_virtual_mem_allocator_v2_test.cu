@@ -280,6 +280,51 @@ TEST(VMMBackingMap, ReplacesPendingEventForSameStream) {
   ASSERT_EQ(cudaStreamDestroy(busy_stream), cudaSuccess);
 }
 
+TEST(VMMBackingMap, MarksPendingEventForUnalignedRangeOnce) {
+  VMMBackingMap map;
+  const VMMDevicePtr base = 0x24000000;
+  const size_t page_size = 2UL << 20;
+  map.Configure(base, page_size * 2, page_size, 0);
+  auto first_meta = std::make_shared<VMMHandleMeta>(
+      base, page_size, static_cast<VMMAllocHandle>(0x241), 0);
+  auto second_meta = std::make_shared<VMMHandleMeta>(
+      base + page_size, page_size, static_cast<VMMAllocHandle>(0x242), 0);
+  map.MarkMapped(base, first_meta, page_size);
+  map.MarkMapped(base + page_size, second_meta, page_size);
+
+  gpuStream_t busy_stream;
+  ASSERT_EQ(cudaStreamCreate(&busy_stream), cudaSuccess);
+  VMMBackingMapBusyWaitKernel<<<1, 1, 0, busy_stream>>>(500000000ULL);
+  ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+
+  gpuEvent_t pending_event;
+  ASSERT_EQ(cudaEventCreateWithFlags(&pending_event, cudaEventDisableTiming),
+            cudaSuccess);
+  ASSERT_EQ(cudaEventRecord(pending_event, busy_stream), cudaSuccess);
+  EXPECT_TRUE(map.MarkPendingEventForRange(
+      base + 128UL,
+      page_size,
+      busy_stream,
+      std::make_shared<CUDAEventGuard>(pending_event)));
+
+  std::vector<std::pair<VMMDevicePtr, size_t>> ranges = {{base, page_size * 2}};
+  auto pages = map.CollectRemapSourcePagesFullyCoveredBy(ranges, page_size * 2);
+  ASSERT_EQ(pages.size(), 2UL);
+  EXPECT_EQ(pages[0].remap_source_state,
+            VMMBackingMap::RemapSourceState::kPendingEvent);
+  EXPECT_EQ(pages[1].remap_source_state,
+            VMMBackingMap::RemapSourceState::kPendingEvent);
+
+  ASSERT_EQ(cudaStreamSynchronize(busy_stream), cudaSuccess);
+  pages = map.CollectRemapSourcePagesFullyCoveredBy(ranges, page_size * 2);
+  ASSERT_EQ(pages.size(), 2UL);
+  EXPECT_EQ(pages[0].remap_source_state,
+            VMMBackingMap::RemapSourceState::kReady);
+  EXPECT_EQ(pages[1].remap_source_state,
+            VMMBackingMap::RemapSourceState::kReady);
+  ASSERT_EQ(cudaStreamDestroy(busy_stream), cudaSuccess);
+}
+
 TEST(CUDAVirtualMemAllocatorV2, DetectsDriverVaRangeMapping) {
   CUDAVirtualMemAllocatorV2 allocator(
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
