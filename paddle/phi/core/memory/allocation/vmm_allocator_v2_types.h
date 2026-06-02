@@ -94,15 +94,9 @@ struct VMMHandleMeta {
   VMMAllocHandle AllocationHandle() const { return handle_; }
   int Device() const { return device_; }
 
-  bool IsOwnedByRemapDestination() const {
-    return owned_by_remap_destination_;
-  }
-  void MarkOwnedByRemapDestination() {
-    owned_by_remap_destination_ = true;
-  }
-  void RestoreOriginalOwnership() {
-    owned_by_remap_destination_ = false;
-  }
+  bool IsOwnedByRemapDestination() const { return owned_by_remap_destination_; }
+  void MarkOwnedByRemapDestination() { owned_by_remap_destination_ = true; }
+  void RestoreOriginalOwnership() { owned_by_remap_destination_ = false; }
 
  private:
   VMMDevicePtr base_{0};
@@ -113,7 +107,6 @@ struct VMMHandleMeta {
   // synthetic destination block created by remap compaction. FreeImpl must skip
   // the original owner because the destination allocation now releases it.
   bool owned_by_remap_destination_{false};
-
 };
 
 // HandleLayout is a lightweight allocation-level handle list returned by the
@@ -141,7 +134,9 @@ struct BlockPartV2 {
   BlockPartV2(std::shared_ptr<VMMHandleMeta> handle,
               size_t handle_rel_off,
               size_t len)
-      : handle_(std::move(handle)), handle_rel_off_(handle_rel_off), len_(len) {}
+      : handle_(std::move(handle)),
+        handle_rel_off_(handle_rel_off),
+        len_(len) {}
 
   bool HasHandle() const { return handle_ != nullptr; }
   const std::shared_ptr<VMMHandleMeta>& HandleMeta() const { return handle_; }
@@ -315,23 +310,17 @@ struct BlockV2 {
                                  size_t parts_len,
                                  PoolType pool_type) {
     BlockV2 block;
-    block.ResetAsMappedBlock(type,
-                             ptr,
-                             size,
-                             parts,
-                             parts_offset,
-                             parts_len,
-                             pool_type);
+    block.ResetAsMappedBlock(
+        type, ptr, size, parts, parts_offset, parts_len, pool_type);
     return block;
   }
 
-  static BlockV2 MakeMappedActiveBlock(
-      void* ptr,
-      size_t size,
-      const std::vector<BlockPartV2>& parts,
-      size_t parts_offset,
-      size_t parts_len,
-      PoolType pool_type) {
+  static BlockV2 MakeMappedActiveBlock(void* ptr,
+                                       size_t size,
+                                       const std::vector<BlockPartV2>& parts,
+                                       size_t parts_offset,
+                                       size_t parts_len,
+                                       PoolType pool_type) {
     return MakeMappedBlock(BlockType::kActive,
                            ptr,
                            size,
@@ -341,20 +330,14 @@ struct BlockV2 {
                            pool_type);
   }
 
-  static BlockV2 MakeMappedFreeBlock(
-      void* ptr,
-      size_t size,
-      const std::vector<BlockPartV2>& parts,
-      size_t parts_offset,
-      size_t parts_len,
-      PoolType pool_type) {
-    return MakeMappedBlock(BlockType::kFree,
-                           ptr,
-                           size,
-                           parts,
-                           parts_offset,
-                           parts_len,
-                           pool_type);
+  static BlockV2 MakeMappedFreeBlock(void* ptr,
+                                     size_t size,
+                                     const std::vector<BlockPartV2>& parts,
+                                     size_t parts_offset,
+                                     size_t parts_len,
+                                     PoolType pool_type) {
+    return MakeMappedBlock(
+        BlockType::kFree, ptr, size, parts, parts_offset, parts_len, pool_type);
   }
 
   static BlockV2 MakeMappedFreeBlock(void* ptr,
@@ -389,8 +372,7 @@ struct BlockV2 {
       std::shared_ptr<VMMHandleMeta> meta,
       PoolType pool_type) {
     BlockV2 block;
-    block.ResetAsSinglePartMappedFree(
-        ptr, size, std::move(meta), pool_type);
+    block.ResetAsSinglePartMappedFree(ptr, size, std::move(meta), pool_type);
     return block;
   }
 
@@ -440,9 +422,7 @@ struct BlockV2 {
     return reinterpret_cast<VMMDevicePtr>(BeginPtr());
   }
   VMMDevicePtr EndVA() const { return BeginVA() + size_; }
-  std::pair<VMMDevicePtr, size_t> VARange() const {
-    return {BeginVA(), size_};
-  }
+  std::pair<VMMDevicePtr, size_t> VARange() const { return {BeginVA(), size_}; }
   bool ContainsVARange(VMMDevicePtr va, size_t size) const {
     return va >= BeginVA() && va <= EndVA() && size <= EndVA() - va;
   }
@@ -456,12 +436,16 @@ struct BlockV2 {
     return IsUnmappedFree() && next.IsUnmappedFree() && IsAdjacentBefore(next);
   }
   BlockV2 MakeMappedFreeSubBlock(size_t offset, size_t len) const {
-    return MakeMappedFreeBlock(
+    auto block = MakeMappedFreeBlock(
         BeginPtr() + offset, len, parts_, offset, len, pool_type_);
+    block.ipc_exported_ = ipc_exported_;
+    return block;
   }
   BlockV2 MakeMappedActiveSubBlock(size_t offset, size_t len) const {
-    return MakeMappedActiveBlock(
+    auto block = MakeMappedActiveBlock(
         BeginPtr() + offset, len, parts_, offset, len, pool_type_);
+    block.ipc_exported_ = ipc_exported_;
+    return block;
   }
   BlockV2 MakeUnmappedFreeSubBlock(size_t offset, size_t len) const {
     return MakeUnmappedFreeBlock(BeginPtr() + offset, len, pool_type_);
@@ -495,14 +479,12 @@ struct BlockV2 {
   void MarkFree() { type_ = BlockType::kFree; }
   void MarkMappedFree() { MarkFree(); }
   void MarkUnmappedFree() { type_ = BlockType::kUnmappedFree; }
-  void Reset(void* ptr,
-             size_t size,
-             BlockType type,
-             PoolType pool_type) {
+  void Reset(void* ptr, size_t size, BlockType type, PoolType pool_type) {
     ptr_ = ptr;
     size_ = size;
     type_ = type;
     pool_type_ = pool_type;
+    ipc_exported_ = false;
     parts_.clear();
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
     owning_stream_ = nullptr;
@@ -559,6 +541,7 @@ struct BlockV2 {
   }
   void AbsorbAdjacentBlock(BlockV2* src) {
     size_ += src->size_;
+    ipc_exported_ = ipc_exported_ || src->ipc_exported_;
     AppendPartsFrom(src);
   }
   void AbsorbAdjacentUnmappedFreeBlock(const BlockV2& src) {
@@ -581,6 +564,7 @@ struct BlockV2 {
   void* ptr_{nullptr};
   size_t size_{0};
   BlockType type_{BlockType::kUnmappedFree};
+  bool ipc_exported_{false};
 
  private:
   void SetParts(const std::vector<BlockPartV2>& parts) { parts_ = parts; }

@@ -429,6 +429,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
   if (!underlying_allocator_->MarkBlockIpcExported(tensor_block)) {
     return false;
   }
+  block_it->ipc_exported_ = true;
   if (parts != nullptr) {
     *parts = std::move(collected);
   }
@@ -674,8 +675,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::TryReleaseIdleUnderlyingAllocation(
 
 bool VMMAutoGrowthBestFitAllocatorV2::CanIndexFreeBlock(
     const BlockV2& block) const {
-  return block.IsMappedFree() &&
-         underlying_allocator_->IsBlockReusableForAllocation(block);
+  return block.IsMappedFree() && !block.ipc_exported_;
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::InsertFreeBlock(BlockListIt it) {
