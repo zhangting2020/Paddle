@@ -18,7 +18,6 @@
 #include <list>
 #include <map>
 #include <memory>
-#include <unordered_map>
 
 #include "paddle/phi/core/memory/allocation/allocator.h"
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator_v2.h"
@@ -35,7 +34,6 @@ namespace allocation {
 
 using BlockList = std::list<BlockV2>;
 using BlockListIt = BlockList::iterator;
-using PtrBlockMap = std::unordered_map<void*, BlockListIt>;
 
 class VMMAutoGrowthBestFitAllocatorV2;
 
@@ -183,7 +181,6 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   // Full block list ordered by VA address. This is the source of truth and
   // contains ACTIVE/FREE/UNMAPPED-FREE blocks together.
   BlockList all_blocks_;
-  PtrBlockMap allocated_blocks_;
   std::map<std::pair<size_t, void*>, BlockListIt> free_blocks_;
   std::map<std::pair<size_t, void*>, BlockListIt> unmapped_free_blocks_;
   mutable SpinLock spinlock_;
