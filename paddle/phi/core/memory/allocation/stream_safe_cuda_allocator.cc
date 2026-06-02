@@ -53,30 +53,17 @@ VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVMMV2MultiPoolAllocator(
   return nullptr;
 }
 
-void TrySetVMMV2RemapEvent(StreamSafeCUDAAllocator* allocator,
-                           StreamSafeCUDAAllocation* allocation) {
+void MarkVMMV2RemapPendingStream(StreamSafeCUDAAllocator* allocator,
+                                 StreamSafeCUDAAllocation* allocation) {
   auto* vmm = GetVMMV2MultiPoolAllocator(allocator->GetUnderLyingAllocator());
   if (vmm == nullptr) {
     return;
   }
-
-  gpuEvent_t event;
-#ifdef PADDLE_WITH_CUDA
-  PADDLE_ENFORCE_GPU_SUCCESS(
-      cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
-  PADDLE_ENFORCE_GPU_SUCCESS(
-      cudaEventRecord(event, allocation->GetOwningStream()));
-#else
-  PADDLE_ENFORCE_GPU_SUCCESS(
-      hipEventCreateWithFlags(&event, hipEventDisableTiming));
-  PADDLE_ENFORCE_GPU_SUCCESS(
-      hipEventRecord(event, allocation->GetOwningStream()));
-#endif
-  auto guard = std::make_shared<CUDAEventGuard>(event);
   if (!vmm->SetBlockRemapEvent(
-          allocation->ptr(), allocation->GetOwningStream(), std::move(guard))) {
-    // SetBlockRemapEvent failed (block not found); the shared_ptr destructor
-    // will call cudaEventDestroy automatically; no manual cleanup needed.
+          allocation->ptr(), allocation->GetOwningStream(), nullptr)) {
+    VLOG(0) << "VMM V2 failed to mark remap pending stream for allocation "
+            << allocation->ptr()
+            << "; compact/remap safety may be incomplete for this block";
   }
 }
 
@@ -284,8 +271,8 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
       auto* vmm = GetVMMV2MultiPoolAllocator(underlying_allocator_);
       if (vmm && FLAGS_vmm_v2_remap_on_oom) {
         size_t compacted = CompactImpl(place_, size);
-        VLOG(3) << "OOM dispatch: requested=" << size
-                << " compact returned " << compacted << " bytes";
+        VLOG(3) << "OOM dispatch: requested=" << size << " compact returned "
+                << compacted << " bytes";
         if (compacted > 0) {
           VLOG(3) << "OOM retry: compact returned " << compacted << " bytes";
           try {
@@ -327,9 +314,9 @@ void StreamSafeCUDAAllocator::FreeImpl(phi::Allocation* allocation) {
       static_cast<StreamSafeCUDAAllocation*>(allocation);
 
   VLOG(8) << "Try free allocation " << stream_safe_cuda_allocation->ptr();
-  TrySetVMMV2RemapEvent(this, stream_safe_cuda_allocation);
   if (stream_safe_cuda_allocation->CanBeFreed()) {
     VLOG(9) << "Directly delete allocation";
+    MarkVMMV2RemapPendingStream(this, stream_safe_cuda_allocation);
     delete stream_safe_cuda_allocation;
   } else {
     VLOG(9) << "Put into unfreed_allocation list";
@@ -385,6 +372,7 @@ void StreamSafeCUDAAllocator::ProcessUnfreedAllocations() {
   for (auto it = unfreed_allocations_.begin();
        it != unfreed_allocations_.end();) {
     if ((*it)->CanBeFreed()) {
+      MarkVMMV2RemapPendingStream(this, *it);
       delete *it;
       it = unfreed_allocations_.erase(it);
     } else {
