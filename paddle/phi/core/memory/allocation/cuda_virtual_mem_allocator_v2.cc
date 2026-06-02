@@ -29,13 +29,9 @@ namespace {
 
 size_t GetPoolVAMultiplier(PoolType pool_type) {
   switch (pool_type) {
-    case PoolType::kStable:
+    case PoolType::kSmall:
       return 2;
-    case PoolType::kLongLived:
-      return 3;
-    case PoolType::kTransient:
-      return 4;
-    case PoolType::kOversized:
+    case PoolType::kLarge:
       return 1;
   }
   return 1;
@@ -110,7 +106,7 @@ phi::Allocation* CUDAVirtualMemAllocatorV2::AllocateImpl(size_t size) {
   InitOnce();
   size_t aligned = AlignedSize(size, handle_size_);
   size_t num_handles = aligned / handle_size_;
-  VmmDevicePtr ptr = virtual_mem_base_ + virtual_mem_alloced_offset_;
+  VMMDevicePtr ptr = virtual_mem_base_ + virtual_mem_alloced_offset_;
   PADDLE_ENFORCE_LE(
       ptr + aligned,
       virtual_mem_base_ + virtual_mem_size_,
@@ -122,12 +118,12 @@ phi::Allocation* CUDAVirtualMemAllocatorV2::AllocateImpl(size_t size) {
   HandleLayout layout;
   layout.reserve(num_handles);
   for (size_t i = 0; i < num_handles; ++i) {
-    VmmAllocHandle handle;
+    VMMAllocHandle handle;
     PADDLE_ENFORCE_GPU_SUCCESS(
         phi::dynload::cuMemCreate(&handle, handle_size_, &prop_, 0));
     PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cuMemMap(
         ptr + i * handle_size_, handle_size_, 0, handle, 0));
-    layout.push_back(std::make_shared<VmmHandleMeta>(VmmHandleMeta{
+    layout.push_back(std::make_shared<VMMHandleMeta>(VMMHandleMeta{
         ptr + i * handle_size_, handle_size_, handle, place_.device}));
   }
   // TODO(zhangting35): Roll back already-created / already-mapped handles if
@@ -167,13 +163,13 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   delete allocation;
 }
 
-void CUDAVirtualMemAllocatorV2::UnmapHandle(VmmDevicePtr ptr, size_t size) {
+void CUDAVirtualMemAllocatorV2::UnmapHandle(VMMDevicePtr ptr, size_t size) {
   platform::CUDADeviceGuard guard(place_.device);
   PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cuMemUnmap(ptr, size));
 }
 
 void CUDAVirtualMemAllocatorV2::MapHandlesToVA(
-    VmmDevicePtr ptr, const std::vector<VmmAllocHandle>& hs) {
+    VMMDevicePtr ptr, const std::vector<VMMAllocHandle>& hs) {
   platform::CUDADeviceGuard guard(place_.device);
   // V2 currently assumes one uniform handle size per pool, so remap can
   // re-materialize a contiguous VA range by replaying fixed-size mappings.

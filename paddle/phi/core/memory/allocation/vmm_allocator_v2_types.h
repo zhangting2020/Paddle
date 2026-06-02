@@ -14,45 +14,96 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
 #if defined(PADDLE_WITH_CUDA)
 #include "paddle/phi/backends/dynload/cuda_driver.h"
-using VmmDevicePtr = CUdeviceptr;
-using VmmAllocHandle = CUmemGenericAllocationHandle;
-#else
-using VmmDevicePtr = uintptr_t;
-using VmmAllocHandle = uint64_t;
+#endif
+
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#include "paddle/phi/core/platform/device/gpu/gpu_types.h"
 #endif
 
 namespace paddle {
 namespace memory {
 namespace allocation {
 
+#if defined(PADDLE_WITH_CUDA)
+using VMMDevicePtr = CUdeviceptr;
+using VMMAllocHandle = CUmemGenericAllocationHandle;
+#else
+using VMMDevicePtr = uintptr_t;
+using VMMAllocHandle = uint64_t;
+#endif
+
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+struct CUDAEventGuard {
+  gpuEvent_t event{nullptr};
+
+  explicit CUDAEventGuard(gpuEvent_t e) : event(e) {}
+  ~CUDAEventGuard() {
+    if (event != nullptr) {
+#ifdef PADDLE_WITH_CUDA
+      cudaEventDestroy(event);
+#else
+      hipEventDestroy(event);
+#endif
+    }
+  }
+
+  CUDAEventGuard(const CUDAEventGuard&) = delete;
+  CUDAEventGuard& operator=(const CUDAEventGuard&) = delete;
+};
+#endif
+
 // V2 keeps the bottom-layer shared types independent from the best-fit layer
 // so that CUDAVirtualMemAllocatorV2 can be reviewed and compiled separately.
 enum class PoolType : uint8_t {
-  kStable = 0,
-  kLongLived = 1,
-  kTransient = 2,
-  kOversized = 3,
+  kSmall = 0,
+  kLarge = 1,
 };
 
 // Fixed-size handle metadata returned by the bottom VMM provider. Upper layers
 // may later reference these handles from block-level views, remap metadata, or
 // IPC export state.
-struct VmmHandleMeta {
-  VmmDevicePtr base;
+struct VMMHandleMeta {
+  VMMHandleMeta() = default;
+  VMMHandleMeta(VMMDevicePtr base,
+                size_t size,
+                VMMAllocHandle handle,
+                int device)
+      : base(base), size(size), handle(handle), device(device) {}
+
+  VMMDevicePtr Base() const { return base; }
+  size_t Size() const { return size; }
+  VMMAllocHandle AllocationHandle() const { return handle; }
+  int Device() const { return device; }
+  bool IsOwnedByRemapDestination() const { return owned_by_remap_destination; }
+  void MarkOwnedByRemapDestination() { owned_by_remap_destination = true; }
+  void RestoreOriginalOwnership() { owned_by_remap_destination = false; }
+
+  VMMDevicePtr base;
   size_t size;
-  VmmAllocHandle handle;
+  VMMAllocHandle handle;
   int device;
+  bool owned_by_remap_destination{false};
 };
 
 // HandleLayout is a lightweight allocation-level handle list returned by the
 // bottom VMM provider. It is only used to bootstrap upper-layer block state or
 // answer allocation-level IPC/export queries.
-using HandleLayout = std::vector<std::shared_ptr<VmmHandleMeta>>;
+using HandleLayout = std::vector<std::shared_ptr<VMMHandleMeta>>;
+
+struct IpcBlockPartDescriptor {
+  VMMDevicePtr handle_base;
+  size_t handle_size;
+  VMMAllocHandle handle;
+  int device;
+  size_t handle_rel_off;
+  size_t len;
+};
 
 // A logical slice of one fixed-size VMM handle. This is the block-level view
 // owned by VMMAutoGrowthBestFitAllocatorV2 and is updated by split / merge /
@@ -60,7 +111,7 @@ using HandleLayout = std::vector<std::shared_ptr<VmmHandleMeta>>;
 // still exports whole handles at the driver layer; BlockPartV2 carries the
 // slice metadata needed to rebuild the logical tensor view on import.
 struct BlockPartV2 {
-  std::shared_ptr<VmmHandleMeta> handle;
+  std::shared_ptr<VMMHandleMeta> handle;
   size_t handle_rel_off;
   size_t len;
 
@@ -93,7 +144,7 @@ struct BlockV2 {
   size_t size_{0};
   BlockType type_{BlockType::kGap};
   std::vector<BlockPartV2> parts_;
-  PoolType pool_type_{PoolType::kTransient};
+  PoolType pool_type_{PoolType::kLarge};
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
   gpuStream_t owning_stream_{nullptr};
   gpuStream_t last_use_stream_{nullptr};

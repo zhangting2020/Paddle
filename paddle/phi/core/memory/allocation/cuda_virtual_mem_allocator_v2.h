@@ -35,26 +35,26 @@ namespace allocation {
 // transform that list into block-level BlockPartV2 state.
 class CUDAVirtualMemAllocatorV2 : public Allocator {
  public:
-  // Standalone use defaults to the transient pool. Upper layers may still
-  // override this explicitly when routing by lifecycle.
+  // Standalone use defaults to the large pool. Upper layers may still override
+  // this explicitly when routing by allocation size.
   CUDAVirtualMemAllocatorV2(const GPUPlace& place,
                             size_t handle_size,
-                            PoolType pool = PoolType::kTransient);
+                            PoolType pool = PoolType::kLarge);
 
   bool IsAllocThreadSafe() const override;
 
-  size_t handle_size() const { return handle_size_; }
-  PoolType pool_type() const { return pool_type_; }
-  VmmDevicePtr virtual_mem_base() const { return virtual_mem_base_; }
-  size_t virtual_mem_size() const { return virtual_mem_size_; }
-  size_t tail_offset() const { return virtual_mem_alloced_offset_; }
+  size_t HandleSize() const { return handle_size_; }
+  PoolType GetPoolType() const { return pool_type_; }
+  VMMDevicePtr VirtualMemBase() const { return virtual_mem_base_; }
+  size_t VirtualMemSize() const { return virtual_mem_size_; }
+  size_t TailOffset() const { return virtual_mem_alloced_offset_; }
   // Best-fit/remap layers may consume VA from the reserved range incrementally.
   // V2 keeps this as an explicit cursor instead of reusing V1's
   // virtual_2_physical_map_ bookkeeping.
   void AdvanceTailOffset(size_t bytes) { virtual_mem_alloced_offset_ += bytes; }
 
-  void UnmapHandle(VmmDevicePtr ptr, size_t size);
-  void MapHandlesToVA(VmmDevicePtr ptr, const std::vector<VmmAllocHandle>& hs);
+  void UnmapHandle(VMMDevicePtr ptr, size_t size);
+  void MapHandlesToVA(VMMDevicePtr ptr, const std::vector<VMMAllocHandle>& hs);
   // Exposes the allocation-level handle list for IPC/export queries. The key
   // is the raw allocation ptr returned by this allocator.
   bool CollectAllocationHandleLayout(void* ptr, HandleLayout* layout) const;
@@ -73,7 +73,7 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   PoolType pool_type_;
   std::once_flag init_flag_;
 
-  VmmDevicePtr virtual_mem_base_{0};
+  VMMDevicePtr virtual_mem_base_{0};
   size_t virtual_mem_size_{0};
   size_t virtual_mem_alloced_offset_{0};
   size_t granularity_{0};
