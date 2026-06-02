@@ -161,7 +161,9 @@ bool VMMAutoGrowthBestFitBlockAllocationV2::SetVMMRemapEvent(
   if (owner_ == nullptr) {
     return false;
   }
-  return owner_->SetBlockRemapEvent(block_it_, stream, std::move(event));
+  remap_stream_ = stream;
+  remap_event_ = std::move(event);
+  return true;
 }
 
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
@@ -385,6 +387,21 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
                                "VMMAutoGrowthBestFitAllocatorV2.",
                                allocation->ptr()));
   allocated_blocks_.erase(it->ptr_);
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+  auto remap_event = wrapped_allocation->TakeRemapEvent();
+  if (remap_event != nullptr) {
+    PADDLE_ENFORCE_EQ(
+        underlying_allocator_->SetBlockRemapEvent(
+            *it, wrapped_allocation->remap_stream(), remap_event),
+        true,
+        common::errors::InvalidArgument(
+            "Failed to attach explicit VMM V2 remap event for block %p.",
+            it->ptr_));
+  } else {
+    it->owning_stream_ = wrapped_allocation->remap_stream();
+    it->remap_safe_event_.reset();
+  }
+#endif
   it->MarkFree();
   TryMerge(it);
   delete allocation;
@@ -516,10 +533,8 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
     BlockV2 remaining_block =
         block_it->MakeMappedFreeSubBlock(size, remaining_size);
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-    // owning_stream_ is cleared: nobody "owns" a free fragment. Remap safety
-    // lives on each handle meta, so the remaining fragment observes the same
-    // event state naturally through its sliced parts.
-    remaining_block.owning_stream_ = nullptr;
+    // The free remainder keeps the source block's remap-safety stream. The
+    // reused prefix is cleared by MarkActive().
 #endif
 
     block_it->TrimToPrefix(size);
@@ -600,6 +615,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
         mapped_block.MakeMappedFreeSubBlock(size, backing_size - size);
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
     mapped_remain.owning_stream_ = nullptr;
+    mapped_remain.remap_safe_event_.reset();
 #endif
     auto free_it = all_blocks_.insert(insert_pos, std::move(mapped_remain));
     InsertFreeBlock(free_it);
@@ -934,7 +950,8 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
         it->TrimToPrefix(left_size);
         InsertFreeBlock(it);
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-        right.owning_stream_ = nullptr;
+        right.owning_stream_ = it->owning_stream_;
+        right.remap_safe_event_ = it->remap_safe_event_;
 #endif
         auto right_it = all_blocks_.insert(std::next(it), std::move(right));
         InsertFreeBlock(right_it);

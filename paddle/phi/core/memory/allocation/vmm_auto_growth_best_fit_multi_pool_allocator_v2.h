@@ -15,9 +15,7 @@
 #pragma once
 
 #include <memory>
-#include <unordered_map>
 
-#include "paddle/phi/core/memory/allocation/spin_lock.h"
 #include "paddle/phi/core/memory/allocation/vmm_allocator_v2_types.h"
 #include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_allocator_v2.h"
 #include "paddle/phi/core/memory/mem_visitor.h"
@@ -82,8 +80,6 @@ class VMMAutoGrowthBestFitMultiPoolAllocatorV2 : public Allocator {
   std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2> large_allocator_;
   size_t small_allocation_threshold_;
   GPUPlace place_;
-  std::unordered_map<void*, AllocationRoute> active_allocations_;
-  mutable SpinLock spinlock_;
 };
 
 }  // namespace allocation

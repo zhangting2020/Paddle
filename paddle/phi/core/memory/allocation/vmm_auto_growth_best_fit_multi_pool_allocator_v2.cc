@@ -22,22 +22,6 @@ namespace allocation {
 
 namespace {
 
-template <typename Map, typename Key, typename Value>
-void EmplaceOrEnforce(Map* map,
-                      Key&& key,
-                      Value&& value,
-                      const char* map_name) {
-  const bool inserted =
-      map->try_emplace(std::forward<Key>(key), std::forward<Value>(value))
-          .second;
-  PADDLE_ENFORCE_EQ(
-      inserted,
-      true,
-      common::errors::AlreadyExists(
-          "Duplicate key inserted into %s, allocator state is inconsistent.",
-          map_name));
-}
-
 class VMMAutoGrowthBestFitMultiPoolAllocationV2
     : public Allocation,
       public VMMRemapEventAllocation {
@@ -98,14 +82,6 @@ phi::Allocation* VMMAutoGrowthBestFitMultiPoolAllocatorV2::AllocateImpl(
       common::errors::NotFound("No VMM pool allocator found for pool %d.",
                                static_cast<int>(route.pool_type)));
   auto allocation = route.allocator->Allocate(size);
-  void* ptr = allocation->ptr();
-  {
-    std::lock_guard<SpinLock> guard(spinlock_);
-    EmplaceOrEnforce(&active_allocations_,
-                     ptr,
-                     AllocationRoute{route.pool_type, route.allocator},
-                     "active_allocations_");
-  }
   return new VMMAutoGrowthBestFitMultiPoolAllocationV2(
       std::move(allocation), route.allocator, route.pool_type);
 }
@@ -125,17 +101,6 @@ void VMMAutoGrowthBestFitMultiPoolAllocatorV2::FreeImpl(
     phi::Allocation* allocation) {
   auto* wrapped_allocation =
       static_cast<VMMAutoGrowthBestFitMultiPoolAllocationV2*>(allocation);
-  {
-    std::lock_guard<SpinLock> guard(spinlock_);
-    auto it = active_allocations_.find(allocation->ptr());
-    PADDLE_ENFORCE_NE(
-        it,
-        active_allocations_.end(),
-        common::errors::NotFound(
-            "No VMM pool routing metadata found for allocation %p.",
-            allocation->ptr()));
-    active_allocations_.erase(it);
-  }
   auto* allocator = wrapped_allocation->allocator();
   PADDLE_ENFORCE_NOT_NULL(
       allocator,
@@ -173,20 +138,10 @@ bool VMMAutoGrowthBestFitMultiPoolAllocatorV2::SetBlockRemapEvent(
     void* event
 #endif
 ) {
-  AllocationRoute route{PoolType::kLarge, nullptr};
-  {
-    std::lock_guard<SpinLock> guard(spinlock_);
-    auto it = active_allocations_.find(ptr);
-    if (it == active_allocations_.end()) {
-      return false;
-    }
-    route = it->second;
+  if (small_allocator_->SetBlockRemapEvent(ptr, stream, event)) {
+    return true;
   }
-  PADDLE_ENFORCE_NOT_NULL(
-      route.allocator,
-      common::errors::NotFound("No VMM pool allocator found for pool %d.",
-                               static_cast<int>(route.pool_type)));
-  return route.allocator->SetBlockRemapEvent(ptr, stream, event);
+  return large_allocator_->SetBlockRemapEvent(ptr, stream, event);
 }
 
 uint64_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::ReleaseImpl(

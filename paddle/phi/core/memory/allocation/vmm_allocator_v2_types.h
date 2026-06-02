@@ -437,7 +437,15 @@ struct BlockV2 {
     return EndPtr() == next.BeginPtr();
   }
   bool CanAbsorbAdjacentFreeBlock(const BlockV2& next) const {
-    return IsFree() && next.IsFree() && IsAdjacentBefore(next);
+    if (!(IsFree() && next.IsFree() && IsAdjacentBefore(next))) {
+      return false;
+    }
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+    return owning_stream_ == next.owning_stream_ &&
+           remap_safe_event_.get() == next.remap_safe_event_.get();
+#else
+    return true;
+#endif
   }
   bool CanAbsorbAdjacentUnmappedFreeBlock(const BlockV2& next) const {
     return IsUnmappedFree() && next.IsUnmappedFree() && IsAdjacentBefore(next);
@@ -446,6 +454,10 @@ struct BlockV2 {
     auto block = MakeMappedFreeBlock(
         BeginPtr() + offset, len, parts_, offset, len, pool_type_);
     block.ipc_exported_ = ipc_exported_;
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+    block.owning_stream_ = owning_stream_;
+    block.remap_safe_event_ = remap_safe_event_;
+#endif
     return block;
   }
   BlockV2 MakeMappedActiveSubBlock(size_t offset, size_t len) const {
@@ -482,7 +494,13 @@ struct BlockV2 {
     }
     return BlockRestoreMappedFreeResult::kBuilt;
   }
-  void MarkActive() { type_ = BlockType::kActive; }
+  void MarkActive() {
+    type_ = BlockType::kActive;
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+    owning_stream_ = nullptr;
+    remap_safe_event_.reset();
+#endif
+  }
   void MarkFree() { type_ = BlockType::kFree; }
   void MarkMappedFree() { MarkFree(); }
   void MarkUnmappedFree() { type_ = BlockType::kUnmappedFree; }
@@ -495,6 +513,7 @@ struct BlockV2 {
     parts_.clear();
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
     owning_stream_ = nullptr;
+    remap_safe_event_.reset();
 #endif
   }
   void ResetAsMappedBlock(BlockType type,
@@ -606,6 +625,7 @@ struct BlockV2 {
   PoolType pool_type_{PoolType::kLarge};
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
   gpuStream_t owning_stream_{nullptr};
+  std::shared_ptr<CUDAEventGuard> remap_safe_event_;
 #endif
 };
 

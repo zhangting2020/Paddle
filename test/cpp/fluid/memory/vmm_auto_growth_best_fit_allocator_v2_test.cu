@@ -142,8 +142,8 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, SplitGrowBlockOnFirstAllocation) {
   ASSERT_EQ(it->type_, BlockType::kFree);
   EXPECT_EQ(it->size_, underlying->HandleSize() - 256UL);
   EXPECT_EQ(it->owning_stream_, nullptr);
-  EXPECT_TRUE(it->HasSingleAllocationPart(
-      256UL, underlying->HandleSize() - 256UL));
+  EXPECT_TRUE(
+      it->HasSingleAllocationPart(256UL, underlying->HandleSize() - 256UL));
   ExpectIndexedFreeStats(&allocator,
                          underlying->HandleSize() - 256UL,
                          underlying->HandleSize() - 256UL);
@@ -172,8 +172,8 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, SplitGrowBlockAcrossTwoHandles) {
   ASSERT_EQ(it, std::prev(allocator.all_blocks().end()));
   ASSERT_EQ(it->type_, BlockType::kFree);
   EXPECT_EQ(it->size_, underlying->HandleSize() - 256UL);
-  EXPECT_TRUE(it->HasSingleAllocationPart(
-      256UL, underlying->HandleSize() - 256UL));
+  EXPECT_TRUE(
+      it->HasSingleAllocationPart(256UL, underlying->HandleSize() - 256UL));
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
@@ -190,8 +190,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   const auto& merged = allocator.all_blocks().front();
   EXPECT_EQ(merged.type_, BlockType::kFree);
   EXPECT_EQ(merged.size_, underlying->HandleSize());
-  EXPECT_TRUE(
-      merged.HasSingleAllocationPart(0UL, underlying->HandleSize()));
+  EXPECT_TRUE(merged.HasSingleAllocationPart(0UL, underlying->HandleSize()));
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2, SplitFreeBlockAfterRemapEvent) {
@@ -257,8 +256,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, FreeBlockTooSmallFallsBackToGrow) {
 
   ASSERT_EQ(allocator.all_blocks().size(), 1UL);
   EXPECT_EQ(allocator.all_blocks().front().type_, BlockType::kActive);
-  EXPECT_EQ(allocator.all_blocks().front().size_,
-            underlying->HandleSize() * 2);
+  EXPECT_EQ(allocator.all_blocks().front().size_, underlying->HandleSize() * 2);
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2, ThreeWayMerge) {
@@ -278,17 +276,15 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, ThreeWayMerge) {
   // Free first and last: creates 2 non-adjacent FREE blocks.
   a.reset();
   c.reset();
-  ExpectIndexedFreeStats(&allocator,
-                         underlying->HandleSize() * 2,
-                         underlying->HandleSize());
+  ExpectIndexedFreeStats(
+      &allocator, underlying->HandleSize() * 2, underlying->HandleSize());
 
   // Free middle: TryMerge merges prev+it (left), then merged+next (right)
   // into a single block spanning all 3 handles.
   b.reset();
   EXPECT_EQ(allocator.all_blocks().size(), 1UL);
-  ExpectIndexedFreeStats(&allocator,
-                         underlying->HandleSize() * 3,
-                         underlying->HandleSize() * 3);
+  ExpectIndexedFreeStats(
+      &allocator, underlying->HandleSize() * 3, underlying->HandleSize() * 3);
 
   const auto& merged = allocator.all_blocks().front();
   EXPECT_EQ(merged.type_, BlockType::kFree);
@@ -314,8 +310,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactRemapsWholeFreeHandleToTail) {
   std::vector<std::pair<VMMDevicePtr, size_t>> middle_range = {
       {reinterpret_cast<VMMDevicePtr>(middle_ptr), underlying->HandleSize()}};
   const auto middle_pages =
-      underlying->CollectMappedPages(
-          middle_range, underlying->HandleSize());
+      underlying->CollectMappedPages(middle_range, underlying->HandleSize());
   ASSERT_EQ(middle_pages.size(), 1UL);
 
   middle.reset();
@@ -337,12 +332,11 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactRemapsWholeFreeHandleToTail) {
   ++it;
   ASSERT_EQ(it->type_, BlockType::kFree);
   EXPECT_EQ(it->size_, underlying->HandleSize());
-  EXPECT_TRUE(
-      it->HasSingleAllocationPart(0UL, underlying->HandleSize()));
+  EXPECT_TRUE(it->HasSingleAllocationPart(0UL, underlying->HandleSize()));
   std::vector<std::pair<VMMDevicePtr, size_t>> tail_range = {
       {reinterpret_cast<VMMDevicePtr>(it->ptr_), underlying->HandleSize()}};
-  const auto tail_pages = underlying->CollectMappedPages(
-      tail_range, underlying->HandleSize());
+  const auto tail_pages =
+      underlying->CollectMappedPages(tail_range, underlying->HandleSize());
   ASSERT_EQ(tail_pages.size(), 1UL);
   EXPECT_EQ(tail_pages[0].handle, middle_pages[0].handle);
   ExpectIndexedFreeStats(
@@ -443,10 +437,10 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
             reinterpret_cast<VMMDevicePtr>(ptr) + underlying->HandleSize());
   std::vector<std::pair<VMMDevicePtr, size_t>> exported_ranges = {
       {reinterpret_cast<VMMDevicePtr>(ptr), underlying->HandleSize() * 2}};
-  EXPECT_TRUE(underlying
-                  ->CollectMappedPages(
-                      exported_ranges, underlying->HandleSize() * 2)
-                  .empty());
+  EXPECT_TRUE(
+      underlying
+          ->CollectMappedPages(exported_ranges, underlying->HandleSize() * 2)
+          .empty());
 
   allocation.reset();
   ASSERT_EQ(allocator.all_blocks().size(), 1UL);
@@ -461,8 +455,8 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   EXPECT_TRUE(underlying->HasIpcExportedRange(
       reinterpret_cast<VMMDevicePtr>(ptr), underlying->HandleSize() * 2));
 
-  auto compacted = allocator.Compact(phi::GPUPlace(),
-                                     underlying->HandleSize() * 2);
+  auto compacted =
+      allocator.Compact(phi::GPUPlace(), underlying->HandleSize() * 2);
   EXPECT_EQ(compacted, 0UL);
 
   auto next = allocator.Allocate(underlying->HandleSize() * 2);
@@ -498,10 +492,8 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   ASSERT_EQ(allocator.all_blocks().size(), 1UL);
   EXPECT_TRUE(allocator.all_blocks().front().IsFree());
   EXPECT_TRUE(underlying->HasIpcExportedRange(
-      reinterpret_cast<VMMDevicePtr>(exported_ptr),
-      underlying->HandleSize()));
-  EXPECT_EQ(allocator.all_blocks().front().size_,
-            underlying->HandleSize() * 2);
+      reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->HandleSize()));
+  EXPECT_EQ(allocator.all_blocks().front().size_, underlying->HandleSize() * 2);
   ExpectIndexedFreeStats(&allocator, 0UL, 0UL);
 
   auto released = allocator.Release(phi::GPUPlace());
@@ -516,8 +508,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   EXPECT_EQ(block_it->ptr_, regular_ptr);
   EXPECT_EQ(block_it->size_, underlying->HandleSize());
   EXPECT_TRUE(underlying->HasIpcExportedRange(
-      reinterpret_cast<VMMDevicePtr>(exported_ptr),
-      underlying->HandleSize()));
+      reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->HandleSize()));
 
   auto next = allocator.Allocate(underlying->HandleSize());
   ASSERT_NE(next, nullptr);
@@ -550,22 +541,18 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   ASSERT_EQ(allocator.all_blocks().size(), 2UL);
   EXPECT_TRUE(allocator.all_blocks().front().IsFree());
   EXPECT_TRUE(underlying->HasIpcExportedRange(
-      reinterpret_cast<VMMDevicePtr>(exported_ptr),
-      underlying->HandleSize()));
-  EXPECT_EQ(allocator.all_blocks().front().size_,
-            underlying->HandleSize() * 2);
+      reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->HandleSize()));
+  EXPECT_EQ(allocator.all_blocks().front().size_, underlying->HandleSize() * 2);
   ExpectIndexedFreeStats(&allocator, 0UL, 0UL);
 
-  auto compacted =
-      allocator.Compact(phi::GPUPlace(), underlying->HandleSize());
+  auto compacted = allocator.Compact(phi::GPUPlace(), underlying->HandleSize());
   EXPECT_EQ(compacted, underlying->HandleSize());
   ASSERT_GE(allocator.all_blocks().size(), 4UL);
 
   auto first = allocator.all_blocks().begin();
   EXPECT_TRUE(first->IsFree());
   EXPECT_TRUE(underlying->HasIpcExportedRange(
-      reinterpret_cast<VMMDevicePtr>(exported_ptr),
-      underlying->HandleSize()));
+      reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->HandleSize()));
   EXPECT_EQ(first->ptr_, exported_ptr);
   EXPECT_EQ(first->size_, underlying->HandleSize());
 
@@ -629,7 +616,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, VMMTensorPartsVisitorFindsV2Blocks) {
   ASSERT_NE(allocation, nullptr);
 
   paddle::memory::VMMTensorPartsVisitor visitor(allocation->ptr(),
-                                               allocation->size());
+                                                allocation->size());
   allocator.Accept(&visitor);
 
   ASSERT_TRUE(visitor.Found());
@@ -661,8 +648,8 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactSkipsPartialFreeHandle) {
   EXPECT_EQ(it->ptr_,
             reinterpret_cast<uint8_t*>(allocation->ptr()) + allocation->size());
   EXPECT_EQ(it->size_, underlying->HandleSize() - 256UL);
-  EXPECT_TRUE(it->HasSingleAllocationPart(
-      256UL, underlying->HandleSize() - 256UL));
+  EXPECT_TRUE(
+      it->HasSingleAllocationPart(256UL, underlying->HandleSize() - 256UL));
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
@@ -818,6 +805,33 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactWaitsForBackingMapPendingEvent) {
   ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
 }
 
+TEST(VMMAutoGrowthBestFitAllocatorV2, CompactWaitsForBlockOwningStream) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
+
+  auto allocation = allocator.Allocate(underlying->HandleSize());
+  ASSERT_NE(allocation, nullptr);
+
+  gpuStream_t stream;
+  ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
+  BusyWaitKernel<<<1, 1, 0, stream>>>(500000000ULL);
+  ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+
+  auto* remap_allocation =
+      dynamic_cast<VMMRemapEventAllocation*>(allocation.get());
+  ASSERT_NE(remap_allocation, nullptr);
+  ASSERT_TRUE(remap_allocation->SetVMMRemapEvent(stream, nullptr));
+
+  allocation.reset();
+  EXPECT_EQ(allocator.Compact(phi::GPUPlace()), 0UL);
+
+  ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+  EXPECT_EQ(allocator.Compact(phi::GPUPlace()), underlying->HandleSize());
+
+  ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+}
+
 TEST(VMMAutoGrowthBestFitAllocatorV2, CompactUsesBlockListTailPlacement) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
@@ -841,16 +855,14 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactUsesBlockListTailPlacement) {
   for (const auto& block : allocator.all_blocks()) {
     if (block.type_ == BlockType::kFree &&
         block.size_ == underlying->HandleSize()) {
-      EXPECT_TRUE(
-          block.HasSingleAllocationPart(0UL, underlying->HandleSize()));
+      EXPECT_TRUE(block.HasSingleAllocationPart(0UL, underlying->HandleSize()));
       return;
     }
   }
   FAIL() << "expected one remapped tail free block";
 }
 
-TEST(VMMAutoGrowthBestFitAllocatorV2,
-     CompactKeepsPartialSourceParts) {
+TEST(VMMAutoGrowthBestFitAllocatorV2, CompactKeepsPartialSourceParts) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
       underlying, 256, phi::GPUPlace(), PoolType::kLarge);
