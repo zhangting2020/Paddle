@@ -55,7 +55,7 @@ VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVMMV2MultiPoolAllocator(
 
 void MarkVMMV2RemapPendingStream(StreamSafeCUDAAllocator* allocator,
                                  StreamSafeCUDAAllocation* allocation) {
-  auto* vmm = GetVMMV2MultiPoolAllocator(allocator->GetUnderLyingAllocator());
+  auto* vmm = allocator->GetVMMV2Allocator();
   if (vmm == nullptr) {
     return;
   }
@@ -208,6 +208,7 @@ StreamSafeCUDAAllocator::StreamSafeCUDAAllocator(
     gpuStream_t default_stream,
     bool in_cuda_graph_capturing)
     : underlying_allocator_(std::move(underlying_allocator)),
+      vmm_v2_allocator_(GetVMMV2MultiPoolAllocator(underlying_allocator_)),
       place_(place),
       default_stream_(default_stream),
       in_cuda_graph_capturing_(in_cuda_graph_capturing) {

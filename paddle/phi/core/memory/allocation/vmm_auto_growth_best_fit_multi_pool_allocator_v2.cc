@@ -38,6 +38,34 @@ void EmplaceOrEnforce(Map* map,
           map_name));
 }
 
+class VMMAutoGrowthBestFitMultiPoolAllocationV2 : public Allocation {
+ public:
+  VMMAutoGrowthBestFitMultiPoolAllocationV2(
+      AllocationPtr underlying_allocation,
+      VMMAutoGrowthBestFitAllocatorV2* allocator,
+      PoolType pool_type)
+      : Allocation(
+            underlying_allocation->ptr(),
+            static_cast<Allocation*>(underlying_allocation.get())->base_ptr(),
+            underlying_allocation->size(),
+            underlying_allocation->place()),
+        underlying_allocation_(std::move(underlying_allocation)),
+        allocator_(allocator),
+        pool_type_(pool_type) {}
+
+  AllocationPtr TakeUnderlyingAllocation() {
+    return std::move(underlying_allocation_);
+  }
+
+  VMMAutoGrowthBestFitAllocatorV2* allocator() const { return allocator_; }
+  PoolType pool_type() const { return pool_type_; }
+
+ private:
+  AllocationPtr underlying_allocation_;
+  VMMAutoGrowthBestFitAllocatorV2* allocator_;
+  PoolType pool_type_;
+};
+
 }  // namespace
 
 VMMAutoGrowthBestFitMultiPoolAllocatorV2::
@@ -59,14 +87,16 @@ phi::Allocation* VMMAutoGrowthBestFitMultiPoolAllocatorV2::AllocateImpl(
       common::errors::NotFound("No VMM pool allocator found for pool %d.",
                                static_cast<int>(route.pool_type)));
   auto allocation = route.allocator->Allocate(size);
+  void* ptr = allocation->ptr();
   {
     std::lock_guard<SpinLock> guard(spinlock_);
     EmplaceOrEnforce(&active_allocations_,
-                     allocation->ptr(),
+                     ptr,
                      AllocationRoute{route.pool_type, route.allocator},
                      "active_allocations_");
   }
-  return allocation.release();
+  return new VMMAutoGrowthBestFitMultiPoolAllocationV2(
+      std::move(allocation), route.allocator, route.pool_type);
 }
 
 size_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::CompactImpl(
@@ -82,7 +112,8 @@ size_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::CompactImpl(
 
 void VMMAutoGrowthBestFitMultiPoolAllocatorV2::FreeImpl(
     phi::Allocation* allocation) {
-  AllocationRoute route{PoolType::kLarge, nullptr};
+  auto* wrapped_allocation =
+      static_cast<VMMAutoGrowthBestFitMultiPoolAllocationV2*>(allocation);
   {
     std::lock_guard<SpinLock> guard(spinlock_);
     auto it = active_allocations_.find(allocation->ptr());
@@ -92,14 +123,17 @@ void VMMAutoGrowthBestFitMultiPoolAllocatorV2::FreeImpl(
         common::errors::NotFound(
             "No VMM pool routing metadata found for allocation %p.",
             allocation->ptr()));
-    route = it->second;
     active_allocations_.erase(it);
   }
+  auto* allocator = wrapped_allocation->allocator();
   PADDLE_ENFORCE_NOT_NULL(
-      route.allocator,
-      common::errors::NotFound("No VMM pool allocator found for pool %d.",
-                               static_cast<int>(route.pool_type)));
-  route.allocator->Free(allocation);
+      allocator,
+      common::errors::NotFound(
+          "No VMM pool allocator found for pool %d.",
+          static_cast<int>(wrapped_allocation->pool_type())));
+  auto underlying_allocation = wrapped_allocation->TakeUnderlyingAllocation();
+  allocator->Free(underlying_allocation.release());
+  delete wrapped_allocation;
 }
 
 void VMMAutoGrowthBestFitMultiPoolAllocatorV2::GetFreeBlockStats(

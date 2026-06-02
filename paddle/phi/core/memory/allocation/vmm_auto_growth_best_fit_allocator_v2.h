@@ -37,6 +37,19 @@ using BlockList = std::list<BlockV2>;
 using BlockListIt = BlockList::iterator;
 using PtrBlockMap = std::unordered_map<void*, BlockListIt>;
 
+class VMMAutoGrowthBestFitBlockAllocationV2 : public Allocation {
+ public:
+  VMMAutoGrowthBestFitBlockAllocationV2(BlockListIt block_it,
+                                        const Place& place)
+      : Allocation(block_it->ptr_, block_it->ptr_, block_it->size_, place),
+        block_it_(block_it) {}
+
+  BlockListIt block_it() const { return block_it_; }
+
+ private:
+  BlockListIt block_it_;
+};
+
 class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
  public:
   VMMAutoGrowthBestFitAllocatorV2(
@@ -57,7 +70,9 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   // total_free = sum of all FREE block sizes, max_free = largest FREE block.
   void GetFreeBlockStats(size_t* total_free, size_t* max_free);
 
-  bool CollectTensorParts(void* ptr, size_t size, std::vector<BlockPart>* parts);
+  bool CollectTensorParts(void* ptr,
+                          size_t size,
+                          std::vector<BlockPart>* parts);
 
   bool SetBlockRemapEvent(void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
@@ -79,8 +94,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   struct UnderlyingAllocationRegistry {
     using List = std::list<DecoratedAllocationPtr>;
     using iterator = List::iterator;
-    using OverlapPredicate =
-        std::function<bool(const DecoratedAllocationPtr&)>;
+    using OverlapPredicate = std::function<bool(const DecoratedAllocationPtr&)>;
 
     void Add(DecoratedAllocationPtr allocation);
     bool Overlaps(void* ptr, size_t size) const;
@@ -121,8 +135,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   bool RangeOverlapsUnderlyingAllocation(void* ptr, size_t size) const;
   bool CanReleaseIdleUnderlyingAllocation(uint8_t* base, size_t size) const;
   bool TryReleaseIdleUnderlyingAllocation(
-      UnderlyingAllocationRegistry::iterator* alloc_it,
-      uint64_t* released);
+      UnderlyingAllocationRegistry::iterator* alloc_it, uint64_t* released);
   bool CanIndexFreeBlock(const BlockV2& block) const;
   void InsertFreeBlock(BlockListIt it);
   void EraseFreeBlock(BlockListIt it);

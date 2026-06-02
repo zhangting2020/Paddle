@@ -121,9 +121,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::
-    EraseOverlapsIf(void* ptr,
-                    size_t size,
-                    const OverlapPredicate& predicate) {
+    EraseOverlapsIf(void* ptr, size_t size, const OverlapPredicate& predicate) {
   bool ok = true;
   for (auto it = allocations_.begin(); it != allocations_.end();) {
     if (!RangesOverlap(ptr, size, (*it)->ptr(), (*it)->size())) {
@@ -203,7 +201,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
       // Grow failed: restore the tail FREE block before propagating.
       if (has_tail_reuse) {
         auto restored_it = all_blocks_.insert(all_blocks_.end(),
-                                             std::move(combined_free_block));
+                                              std::move(combined_free_block));
         InsertFreeBlock(restored_it);
       }
       PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
@@ -227,21 +225,20 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
 
   const size_t remaining_size = total_new_size - requested_size;
 
-  BlockV2 block = combined_free_block.MakeMappedActiveSubBlock(0,
-                                                               requested_size);
+  BlockV2 block =
+      combined_free_block.MakeMappedActiveSubBlock(0, requested_size);
   auto it = all_blocks_.insert(all_blocks_.end(), std::move(block));
   EmplaceOrEnforce(&allocated_blocks_, it->ptr_, it, "allocated_blocks_");
 
   if (remaining_size > 0) {
-    BlockV2 remaining_block =
-        combined_free_block.MakeMappedFreeSubBlock(requested_size,
-                                                   remaining_size);
+    BlockV2 remaining_block = combined_free_block.MakeMappedFreeSubBlock(
+        requested_size, remaining_size);
     auto remain_it =
         all_blocks_.insert(std::next(it), std::move(remaining_block));
     InsertFreeBlock(remain_it);
   }
 
-  return new Allocation(it->ptr_, it->ptr_, it->size_, place_);
+  return new VMMAutoGrowthBestFitBlockAllocationV2(it, place_);
 }
 
 size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
@@ -301,13 +298,11 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
           ? required_releasable_bytes
           : requested_size;
 
-  auto source_pages =
-      underlying_allocator_->CollectRemapSourcePages(
-          compact_source_ranges, releasable_target_bytes);
+  auto source_pages = underlying_allocator_->CollectRemapSourcePages(
+      compact_source_ranges, releasable_target_bytes);
   size_t releasable_handles = 0;
   for (const auto& page : source_pages) {
-    if (page.remap_source_state ==
-        VMMBackingMap::RemapSourceState::kReady) {
+    if (page.remap_source_state == VMMBackingMap::RemapSourceState::kReady) {
       ++releasable_handles;
     }
   }
@@ -319,9 +314,8 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
     VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
             << " compact skip: releasable_bytes=" << releasable_bytes
             << " < required=" << required_releasable_bytes
-            << " requested=" << requested_size
-            << " total_free=" << total_free << " max_free=" << max_free
-            << " tail_free=" << tail_free
+            << " requested=" << requested_size << " total_free=" << total_free
+            << " max_free=" << max_free << " tail_free=" << tail_free
             << " source_ranges=" << compact_source_ranges.size();
     return 0;
   }
@@ -330,8 +324,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
     VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
             << " compact skip: no releasable handles"
             << " (total_free=" << total_free << " max_free=" << max_free
-            << " tail_free=" << tail_free
-            << " requested=" << requested_size
+            << " tail_free=" << tail_free << " requested=" << requested_size
             << " releasable_handles=" << releasable_handles
             << " releasable_bytes=" << releasable_bytes
             << " source_ranges=" << compact_source_ranges.size() << ")";
@@ -340,30 +333,27 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
 
   VLOG(3) << "VMM V2 pool " << static_cast<int>(pool_type_)
           << " compact: total_free=" << total_free << " max_free=" << max_free
-          << " tail_free=" << tail_free
-          << " requested=" << requested_size
+          << " tail_free=" << tail_free << " requested=" << requested_size
           << " required_releasable_bytes=" << required_releasable_bytes
           << " releasable_handles=" << releasable_handles
           << " releasable_bytes=" << releasable_bytes
           << " source_ranges=" << compact_source_ranges.size()
           << ", proceeding with compaction";
 
-  auto commit_synthetic_allocation =
-      [this](DecoratedAllocationPtr allocation) {
-        TrackUnderlyingAllocation(std::move(allocation));
-      };
+  auto commit_synthetic_allocation = [this](DecoratedAllocationPtr allocation) {
+    TrackUnderlyingAllocation(std::move(allocation));
+  };
   auto can_prepare_synthetic_allocation = [this](void* ptr, size_t size) {
     return CanReleaseRemapDestinationUnderlyingAllocations(ptr, size);
   };
   auto prepare_synthetic_allocation = [this](void* ptr, size_t size) {
     return ReleaseRemapDestinationUnderlyingAllocations(ptr, size);
   };
-  FreeBlockRemapCompactor compactor(
-      underlying_allocator_,
-      pool_type_,
-      commit_synthetic_allocation,
-      can_prepare_synthetic_allocation,
-      prepare_synthetic_allocation);
+  FreeBlockRemapCompactor compactor(underlying_allocator_,
+                                    pool_type_,
+                                    commit_synthetic_allocation,
+                                    can_prepare_synthetic_allocation,
+                                    prepare_synthetic_allocation);
   const bool compact_all = FLAGS_vmm_v2_compact_all;
   const size_t compact_target = compact_all ? 0 : requested_size;
   const size_t remapped = compactor.Compact(&all_blocks_, compact_target);
@@ -377,15 +367,15 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
 
 void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   std::lock_guard<SpinLock> guard(spinlock_);
-  auto ptr = allocation->ptr();
-  auto found = allocated_blocks_.find(ptr);
+  auto* wrapped_allocation =
+      static_cast<VMMAutoGrowthBestFitBlockAllocationV2*>(allocation);
+  auto it = wrapped_allocation->block_it();
   PADDLE_ENFORCE_NE(
-      found,
-      allocated_blocks_.end(),
+      it,
+      all_blocks_.end(),
       common::errors::NotFound("Can not find active block for allocation %p in "
                                "VMMAutoGrowthBestFitAllocatorV2.",
-                               ptr));
-  auto it = found->second;
+                               allocation->ptr()));
   allocated_blocks_.erase(it->ptr_);
   it->MarkFree();
   TryMerge(it);
@@ -507,8 +497,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   block_it->MarkActive();
   EmplaceOrEnforce(
       &allocated_blocks_, block_it->ptr_, block_it, "allocated_blocks_");
-  return new Allocation(
-      block_it->ptr_, block_it->ptr_, block_it->size_, place_);
+  return new VMMAutoGrowthBestFitBlockAllocationV2(block_it, place_);
 }
 
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
@@ -524,9 +513,8 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
       continue;
     }
     if (RangeOverlapsUnderlyingAllocation(it->ptr_, backing_size)) {
-      VLOG(6)
-          << "VMM V2 AllocFromUnmappedFreeBlocks skip ownership-overlapped "
-             "unmapped-free ptr="
+      VLOG(6) << "VMM V2 AllocFromUnmappedFreeBlocks skip ownership-overlapped "
+                 "unmapped-free ptr="
               << it->ptr_ << " backing_size=" << backing_size
               << " block_size=" << it->size_;
       ++iter;
@@ -589,7 +577,8 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
         reinterpret_cast<uint8_t*>(best->ptr_) + backing_size,
         original_unmapped_free_size - backing_size,
         original_pool_type);
-    auto tail_it = all_blocks_.insert(insert_pos, std::move(tail_unmapped_free));
+    auto tail_it =
+        all_blocks_.insert(insert_pos, std::move(tail_unmapped_free));
     InsertUnmappedFreeBlock(tail_it);
   }
 
@@ -618,15 +607,15 @@ bool VMMAutoGrowthBestFitAllocatorV2::AllocationOwnedByRemapDestination(
 
 bool VMMAutoGrowthBestFitAllocatorV2::
     CanReleaseRemapDestinationUnderlyingAllocations(void* ptr,
-                                                   size_t size) const {
+                                                    size_t size) const {
   return underlying_allocations_.AllOverlapsSatisfy(
       ptr, size, [this, ptr, size](const DecoratedAllocationPtr& allocation) {
         return AllocationOwnedByRemapDestination(allocation, ptr, size);
       });
 }
 
-bool VMMAutoGrowthBestFitAllocatorV2::ReleaseRemapDestinationUnderlyingAllocations(
-    void* ptr, size_t size) {
+bool VMMAutoGrowthBestFitAllocatorV2::
+    ReleaseRemapDestinationUnderlyingAllocations(void* ptr, size_t size) {
   return underlying_allocations_.EraseOverlapsIf(
       ptr, size, [this, ptr, size](const DecoratedAllocationPtr& allocation) {
         if (!AllocationOwnedByRemapDestination(allocation, ptr, size)) {
@@ -667,8 +656,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::CanReleaseIdleUnderlyingAllocation(
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::TryReleaseIdleUnderlyingAllocation(
-    UnderlyingAllocationRegistry::iterator* alloc_it,
-    uint64_t* released) {
+    UnderlyingAllocationRegistry::iterator* alloc_it, uint64_t* released) {
   auto& allocation = **alloc_it;
   auto* base = reinterpret_cast<uint8_t*>(allocation->ptr());
   const size_t alloc_size = allocation->size();
