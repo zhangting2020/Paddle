@@ -75,6 +75,11 @@ class VMMRemapEventAllocation {
   virtual bool SetVMMRemapEvent(gpuStream_t stream,
                                 std::shared_ptr<CUDAEventGuard> event) = 0;
 };
+
+struct VMMBlockRemapState {
+  gpuStream_t stream{nullptr};
+  std::shared_ptr<CUDAEventGuard> event;
+};
 #endif
 
 // V2 keeps the bottom-layer shared types independent from the best-fit layer
@@ -437,15 +442,7 @@ struct BlockV2 {
     return EndPtr() == next.BeginPtr();
   }
   bool CanAbsorbAdjacentFreeBlock(const BlockV2& next) const {
-    if (!(IsFree() && next.IsFree() && IsAdjacentBefore(next))) {
-      return false;
-    }
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-    return owning_stream_ == next.owning_stream_ &&
-           remap_safe_event_.get() == next.remap_safe_event_.get();
-#else
-    return true;
-#endif
+    return IsFree() && next.IsFree() && IsAdjacentBefore(next);
   }
   bool CanAbsorbAdjacentUnmappedFreeBlock(const BlockV2& next) const {
     return IsUnmappedFree() && next.IsUnmappedFree() && IsAdjacentBefore(next);
@@ -455,8 +452,7 @@ struct BlockV2 {
         BeginPtr() + offset, len, parts_, offset, len, pool_type_);
     block.ipc_exported_ = ipc_exported_;
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-    block.owning_stream_ = owning_stream_;
-    block.remap_safe_event_ = remap_safe_event_;
+    block.CopyRemapSafetyFrom(*this);
 #endif
     return block;
   }
@@ -497,8 +493,7 @@ struct BlockV2 {
   void MarkActive() {
     type_ = BlockType::kActive;
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-    owning_stream_ = nullptr;
-    remap_safe_event_.reset();
+    ClearRemapSafety();
 #endif
   }
   void MarkFree() { type_ = BlockType::kFree; }
@@ -512,8 +507,7 @@ struct BlockV2 {
     ipc_exported_ = false;
     parts_.clear();
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-    owning_stream_ = nullptr;
-    remap_safe_event_.reset();
+    ClearRemapSafety();
 #endif
   }
   void ResetAsMappedBlock(BlockType type,
@@ -569,6 +563,9 @@ struct BlockV2 {
     size_ += src->size_;
     ipc_exported_ = ipc_exported_ || src->ipc_exported_;
     AppendPartsFrom(src);
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+    AppendRemapSafetyFrom(*src);
+#endif
   }
   void AbsorbAdjacentUnmappedFreeBlock(const BlockV2& src) {
     size_ += src.size_;
@@ -624,8 +621,52 @@ struct BlockV2 {
  public:
   PoolType pool_type_{PoolType::kLarge};
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+  void ClearRemapSafety() {
+    owning_stream_ = nullptr;
+    remap_safe_event_.reset();
+    remap_pending_states_.clear();
+  }
+  void SetRemapSafety(gpuStream_t stream,
+                      std::shared_ptr<CUDAEventGuard> event) {
+    ClearRemapSafety();
+    owning_stream_ = stream;
+    remap_safe_event_ = std::move(event);
+  }
+  void CopyRemapSafetyFrom(const BlockV2& src) {
+    owning_stream_ = src.owning_stream_;
+    remap_safe_event_ = src.remap_safe_event_;
+    remap_pending_states_ = src.remap_pending_states_;
+  }
+  void AppendRemapSafety(gpuStream_t stream,
+                         std::shared_ptr<CUDAEventGuard> event) {
+    if (stream == nullptr && event == nullptr) {
+      return;
+    }
+    if (owning_stream_ == stream && remap_safe_event_.get() == event.get()) {
+      return;
+    }
+    for (const auto& state : remap_pending_states_) {
+      if (state.stream == stream && state.event.get() == event.get()) {
+        return;
+      }
+    }
+    if (owning_stream_ == nullptr && remap_safe_event_ == nullptr) {
+      owning_stream_ = stream;
+      remap_safe_event_ = std::move(event);
+      return;
+    }
+    remap_pending_states_.push_back({stream, std::move(event)});
+  }
+  void AppendRemapSafetyFrom(const BlockV2& src) {
+    AppendRemapSafety(src.owning_stream_, src.remap_safe_event_);
+    for (const auto& state : src.remap_pending_states_) {
+      AppendRemapSafety(state.stream, state.event);
+    }
+  }
+
   gpuStream_t owning_stream_{nullptr};
   std::shared_ptr<CUDAEventGuard> remap_safe_event_;
+  std::vector<VMMBlockRemapState> remap_pending_states_;
 #endif
 };
 

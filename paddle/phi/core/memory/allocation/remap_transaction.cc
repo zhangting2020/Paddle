@@ -70,88 +70,118 @@ VMMDevicePtr AlignUp(VMMDevicePtr value, size_t alignment) {
   return remainder == 0 ? value : value + (alignment - remainder);
 }
 
-bool QueryBlockRemapEvent(BlockV2* block) {
+bool QueryRemapEvent(VMMBlockRemapState* state) {
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-  if (block->remap_safe_event_ == nullptr) {
+  if (state->event == nullptr) {
     return true;
   }
 #ifdef PADDLE_WITH_CUDA
-  auto err = cudaEventQuery(block->remap_safe_event_->event);
+  auto err = cudaEventQuery(state->event->event);
   if (err == cudaErrorNotReady) {
     return false;
   }
   PADDLE_ENFORCE_GPU_SUCCESS(err);
 #else
-  auto err = hipEventQuery(block->remap_safe_event_->event);
+  auto err = hipEventQuery(state->event->event);
   if (err == hipErrorNotReady) {
     return false;
   }
   PADDLE_ENFORCE_GPU_SUCCESS(err);
 #endif
-  block->remap_safe_event_.reset();
-  block->owning_stream_ = nullptr;
+  state->event.reset();
+  state->stream = nullptr;
 #endif
   return true;
 }
 
-bool RecordBlockRemapEvent(BlockV2* block) {
+bool RecordRemapEvent(VMMBlockRemapState* state) {
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-  if (block->owning_stream_ == nullptr || block->remap_safe_event_ != nullptr) {
+  if (state->stream == nullptr || state->event != nullptr) {
     return true;
   }
 #ifdef PADDLE_WITH_CUDA
   gpuEvent_t event = nullptr;
   PADDLE_ENFORCE_GPU_SUCCESS(
       cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
-  PADDLE_ENFORCE_GPU_SUCCESS(cudaEventRecord(event, block->owning_stream_));
+  PADDLE_ENFORCE_GPU_SUCCESS(cudaEventRecord(event, state->stream));
 #else
   gpuEvent_t event = nullptr;
   PADDLE_ENFORCE_GPU_SUCCESS(
       hipEventCreateWithFlags(&event, hipEventDisableTiming));
-  PADDLE_ENFORCE_GPU_SUCCESS(hipEventRecord(event, block->owning_stream_));
+  PADDLE_ENFORCE_GPU_SUCCESS(hipEventRecord(event, state->stream));
 #endif
-  block->remap_safe_event_ = std::make_shared<CUDAEventGuard>(event);
+  state->event = std::make_shared<CUDAEventGuard>(event);
   return false;
 #else
   return true;
 #endif
 }
 
-bool BlockOwningStreamReady(BlockV2* block) {
+bool RemapStateReady(VMMBlockRemapState* state) {
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-  if (block->owning_stream_ == nullptr) {
+  if (!QueryRemapEvent(state)) {
+    return false;
+  }
+  if (state->stream == nullptr) {
     return true;
   }
 #ifdef PADDLE_WITH_CUDA
-  auto err = cudaStreamQuery(block->owning_stream_);
+  auto err = cudaStreamQuery(state->stream);
   if (err == cudaSuccess) {
-    block->owning_stream_ = nullptr;
-    block->remap_safe_event_.reset();
+    state->stream = nullptr;
+    state->event.reset();
     return true;
   }
   if (err != cudaErrorNotReady) {
     PADDLE_ENFORCE_GPU_SUCCESS(err);
   }
 #else
-  auto err = hipStreamQuery(block->owning_stream_);
+  auto err = hipStreamQuery(state->stream);
   if (err == hipSuccess) {
-    block->owning_stream_ = nullptr;
-    block->remap_safe_event_.reset();
+    state->stream = nullptr;
+    state->event.reset();
     return true;
   }
   if (err != hipErrorNotReady) {
     PADDLE_ENFORCE_GPU_SUCCESS(err);
   }
 #endif
-  return RecordBlockRemapEvent(block) && QueryBlockRemapEvent(block);
+  return RecordRemapEvent(state) && QueryRemapEvent(state);
 #else
   return true;
 #endif
 }
 
 bool IsRemapSafe(BlockV2* block) {
-  return block->CanBeRemapSource() && QueryBlockRemapEvent(block) &&
-         BlockOwningStreamReady(block);
+  if (!block->CanBeRemapSource()) {
+    return false;
+  }
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+  bool ready = true;
+  VMMBlockRemapState primary{block->owning_stream_, block->remap_safe_event_};
+  if (!RemapStateReady(&primary)) {
+    ready = false;
+  }
+  block->owning_stream_ = primary.stream;
+  block->remap_safe_event_ = std::move(primary.event);
+
+  for (auto it = block->remap_pending_states_.begin();
+       it != block->remap_pending_states_.end();) {
+    if (!RemapStateReady(&*it)) {
+      ready = false;
+      ++it;
+      continue;
+    }
+    if (it->stream == nullptr && it->event == nullptr) {
+      it = block->remap_pending_states_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  return ready;
+#else
+  return true;
+#endif
 }
 
 void AppendMappedFreeSubRange(std::vector<BlockV2>* segments,

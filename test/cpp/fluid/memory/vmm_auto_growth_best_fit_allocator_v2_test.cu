@@ -233,6 +233,41 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, SplitFreeBlockAfterRemapEvent) {
   reused.reset();
 }
 
+TEST(VMMAutoGrowthBestFitAllocatorV2, MergeFreeBlocksWithDifferentStreams) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
+
+  auto first = allocator.Allocate(underlying->HandleSize());
+  auto second = allocator.Allocate(underlying->HandleSize());
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+
+  gpuStream_t first_stream;
+  gpuStream_t second_stream;
+  ASSERT_EQ(cudaStreamCreate(&first_stream), cudaSuccess);
+  ASSERT_EQ(cudaStreamCreate(&second_stream), cudaSuccess);
+
+  auto* first_remap = dynamic_cast<VMMRemapEventAllocation*>(first.get());
+  auto* second_remap = dynamic_cast<VMMRemapEventAllocation*>(second.get());
+  ASSERT_NE(first_remap, nullptr);
+  ASSERT_NE(second_remap, nullptr);
+  ASSERT_TRUE(first_remap->SetVMMRemapEvent(first_stream, nullptr));
+  ASSERT_TRUE(second_remap->SetVMMRemapEvent(second_stream, nullptr));
+
+  first.reset();
+  second.reset();
+
+  ASSERT_EQ(allocator.all_blocks().size(), 1UL);
+  const auto& merged = allocator.all_blocks().front();
+  EXPECT_EQ(merged.type_, BlockType::kFree);
+  EXPECT_EQ(merged.size_, 2UL * underlying->HandleSize());
+  EXPECT_EQ(merged.remap_pending_states_.size(), 1UL);
+
+  ASSERT_EQ(cudaStreamDestroy(first_stream), cudaSuccess);
+  ASSERT_EQ(cudaStreamDestroy(second_stream), cudaSuccess);
+}
+
 TEST(VMMAutoGrowthBestFitAllocatorV2, FreeBlockTooSmallFallsBackToGrow) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(

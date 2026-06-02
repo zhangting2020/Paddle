@@ -398,8 +398,7 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
             "Failed to attach explicit VMM V2 remap event for block %p.",
             it->ptr_));
   } else {
-    it->owning_stream_ = wrapped_allocation->remap_stream();
-    it->remap_safe_event_.reset();
+    it->SetRemapSafety(wrapped_allocation->remap_stream(), nullptr);
   }
 #endif
   it->MarkFree();
@@ -616,6 +615,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
     mapped_remain.owning_stream_ = nullptr;
     mapped_remain.remap_safe_event_.reset();
+    mapped_remain.remap_pending_states_.clear();
 #endif
     auto free_it = all_blocks_.insert(insert_pos, std::move(mapped_remain));
     InsertFreeBlock(free_it);
@@ -950,8 +950,7 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
         it->TrimToPrefix(left_size);
         InsertFreeBlock(it);
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-        right.owning_stream_ = it->owning_stream_;
-        right.remap_safe_event_ = it->remap_safe_event_;
+        right.CopyRemapSafetyFrom(*it);
 #endif
         auto right_it = all_blocks_.insert(std::next(it), std::move(right));
         InsertFreeBlock(right_it);
