@@ -68,7 +68,7 @@ class VirtualMemoryAutoGrowthBestFitAllocator : public Allocator {
 
   bool TryAllocateBatch(const std::vector<size_t> &sizes);
 
-  bool CollectTensorParts(void *ptr, std::vector<BlockPart> *parts);
+  bool CollectTensorParts(void *ptr, size_t size, std::vector<BlockPart> *parts);
 
  protected:
   phi::Allocation *AllocateImpl(size_t size) override;

@@ -41,7 +41,7 @@ PADDLE_API extern AllocationPtr Alloc(const Place& place, size_t size);
 
 PADDLE_API extern uint64_t Release(const Place& place);
 
-// Compact memory of free blocks held by the VmmAllocator.
+// Compact memory of free blocks held by the VMMAllocator.
 PADDLE_API extern size_t Compact(const GPUPlace& place);
 
 PADDLE_API extern std::shared_ptr<Allocation> AllocShared(

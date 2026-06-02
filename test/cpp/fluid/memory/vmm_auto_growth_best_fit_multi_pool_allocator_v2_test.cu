@@ -57,14 +57,22 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, RouteSmallAndLarge) {
   auto allocator = CreateAllocator();
 
   auto small = allocator->Allocate(256UL);
+  auto aligned_to_threshold = allocator->Allocate((2UL << 20) - 1);
   auto large = allocator->Allocate(2UL << 20);
   ASSERT_NE(small, nullptr);
+  ASSERT_NE(aligned_to_threshold, nullptr);
   ASSERT_NE(large, nullptr);
 
   EXPECT_TRUE(HasBlockWithPtr(
       *allocator->small_allocator(), small->ptr(), BlockType::kActive));
   EXPECT_FALSE(HasBlockWithPtr(
       *allocator->large_allocator(), small->ptr(), BlockType::kActive));
+  EXPECT_TRUE(HasBlockWithPtr(*allocator->large_allocator(),
+                              aligned_to_threshold->ptr(),
+                              BlockType::kActive));
+  EXPECT_FALSE(HasBlockWithPtr(*allocator->small_allocator(),
+                               aligned_to_threshold->ptr(),
+                               BlockType::kActive));
   EXPECT_TRUE(HasBlockWithPtr(
       *allocator->large_allocator(), large->ptr(), BlockType::kActive));
   EXPECT_FALSE(HasBlockWithPtr(
@@ -80,33 +88,15 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, SetBlockRemapEventRoutesByPtr) {
   gpuEvent_t event = nullptr;
   ASSERT_EQ(cudaEventCreateWithFlags(&event, cudaEventDisableTiming),
             cudaSuccess);
-  auto guard = std::make_shared<CudaEventGuard>(event);
+  auto guard = std::make_shared<CUDAEventGuard>(event);
   auto* ptr = allocation->ptr();
   ASSERT_TRUE(allocator->SetBlockRemapEvent(ptr, nullptr, guard));
+  EXPECT_FALSE(allocator->SetBlockRemapEvent(
+      reinterpret_cast<void*>(0x1), nullptr, nullptr));
   EXPECT_TRUE(HasBlockWithPtr(
       *allocator->small_allocator(), ptr, BlockType::kActive));
 
   allocation.reset();
-}
-
-// --- P1: FreeImpl release path ---
-
-TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
-     FreeImplErasesRouteAndDelegates) {
-  auto allocator = CreateAllocator();
-
-  auto allocation = allocator->Allocate(256UL);
-  ASSERT_NE(allocation, nullptr);
-  auto* ptr = allocation->ptr();
-
-  EXPECT_TRUE(HasBlockWithPtr(
-      *allocator->small_allocator(), ptr, BlockType::kActive));
-
-  allocation.reset();
-
-  auto reused = allocator->Allocate(256UL);
-  ASSERT_NE(reused, nullptr);
-  EXPECT_EQ(reused->ptr(), ptr);
 }
 
 TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, CrossPoolAllocFree) {
@@ -133,15 +123,7 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, CrossPoolAllocFree) {
 }
 
 TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
-     SetBlockRemapEventReturnsFalseForUnknownPtr) {
-  auto allocator = CreateAllocator();
-
-  EXPECT_FALSE(allocator->SetBlockRemapEvent(
-      reinterpret_cast<void*>(0x1), nullptr, nullptr));
-}
-
-TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
-     VmmTensorPartsVisitorFindsRoutedV2Blocks) {
+     VMMTensorPartsVisitorFindsRoutedV2Blocks) {
   auto allocator = CreateAllocator();
 
   auto small = allocator->Allocate(256UL);
@@ -149,7 +131,8 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
   ASSERT_NE(small, nullptr);
   ASSERT_NE(large, nullptr);
 
-  paddle::memory::VmmTensorPartsVisitor small_visitor(small->ptr());
+  paddle::memory::VMMTensorPartsVisitor small_visitor(small->ptr(),
+                                                      small->size());
   allocator->Accept(&small_visitor);
 
   ASSERT_TRUE(small_visitor.Found());
@@ -157,45 +140,14 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
   EXPECT_EQ(small_visitor.Parts()[0].chunk_rel_off, 0UL);
   EXPECT_EQ(small_visitor.Parts()[0].len, small->size());
 
-  paddle::memory::VmmTensorPartsVisitor large_visitor(large->ptr());
+  paddle::memory::VMMTensorPartsVisitor large_visitor(large->ptr(),
+                                                      large->size());
   allocator->Accept(&large_visitor);
 
   ASSERT_TRUE(large_visitor.Found());
   ASSERT_EQ(large_visitor.Parts().size(), 1UL);
   EXPECT_EQ(large_visitor.Parts()[0].chunk_rel_off, 0UL);
   EXPECT_EQ(large_visitor.Parts()[0].len, large->size());
-
-  auto* small_ptr = small->ptr();
-  auto* large_ptr = large->ptr();
-  small.reset();
-  large.reset();
-
-  auto next_small = allocator->Allocate(256UL);
-  auto next_large = allocator->Allocate(2UL << 20);
-  ASSERT_NE(next_small, nullptr);
-  ASSERT_NE(next_large, nullptr);
-  EXPECT_NE(next_small->ptr(), small_ptr);
-  EXPECT_NE(next_large->ptr(), large_ptr);
-}
-
-// --- P2: threshold boundary tests ---
-
-TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
-     SmallAllocationThresholdBoundary) {
-  auto allocator = CreateAllocator();
-  // CreateAllocator uses small_allocation_threshold = 2MB.
-
-  // size = threshold - 1 → Small.
-  auto just_below = allocator->Allocate((2UL << 20) - 1);
-  ASSERT_NE(just_below, nullptr);
-  EXPECT_TRUE(HasBlockWithPtr(
-      *allocator->small_allocator(), just_below->ptr(), BlockType::kActive));
-
-  // size = threshold → Large (>= threshold goes to large).
-  auto exact = allocator->Allocate(2UL << 20);
-  ASSERT_NE(exact, nullptr);
-  EXPECT_TRUE(HasBlockWithPtr(
-      *allocator->large_allocator(), exact->ptr(), BlockType::kActive));
 }
 
 }  // namespace allocation

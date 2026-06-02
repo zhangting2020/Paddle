@@ -16,6 +16,8 @@
 
 #if defined(PADDLE_WITH_CUDA)
 
+#include <limits>
+
 #include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
 #include "paddle/phi/core/memory/allocation/free_block_remap_compactor.h"
@@ -198,7 +200,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
     try {
       grow_alloc = underlying_allocator_->AllocateWithBlock(grow_size);
     } catch (...) {
-      // Grow failed — restore the tail FREE block before propagating.
+      // Grow failed: restore the tail FREE block before propagating.
       if (has_tail_reuse) {
         auto restored_it = all_blocks_.insert(all_blocks_.end(),
                                              std::move(combined_free_block));
@@ -245,7 +247,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
 size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
                                                     size_t requested_size) {
   // Defensive place validation: the call chain
-  // (RetryAllocator → StreamSafe → MultiPool → SinglePool) guarantees
+  // (RetryAllocator -> StreamSafe -> MultiPool -> SinglePool) guarantees
   // place consistency.  Log a warning on mismatch but do not throw,
   // since CompactImpl is called inside a try-catch that would silently
   // swallow the exception and skip compaction.
@@ -258,7 +260,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   size_t total_free = 0;
   size_t max_free = 0;
   size_t tail_free = 0;
-  std::vector<std::pair<VmmDevicePtr, size_t>> compact_source_ranges;
+  std::vector<std::pair<VMMDevicePtr, size_t>> compact_source_ranges;
   for (const auto& blk : all_blocks_) {
     if (blk.IsMappedFree()) {
       total_free += blk.size_;
@@ -305,12 +307,12 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   size_t releasable_handles = 0;
   for (const auto& page : source_pages) {
     if (page.remap_source_state ==
-        VmmBackingMap::RemapSourceState::kReady) {
+        VMMBackingMap::RemapSourceState::kReady) {
       ++releasable_handles;
     }
   }
   const size_t releasable_bytes =
-      releasable_handles * underlying_allocator_->handle_size();
+      releasable_handles * underlying_allocator_->HandleSize();
 
   if (requested_size > 0 && !FLAGS_vmm_v2_compact_all &&
       releasable_bytes < required_releasable_bytes) {
@@ -368,7 +370,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   // Always rebuild: Phase 1 may have replaced FREE blocks with
   // UNMAPPED-FREE/FREE
   // segments before Phase 2 fails.  Without rebuild, free_blocks_ holds
-  // stale iterators to erased list nodes → use-after-free on next alloc.
+  // stale iterators to erased list nodes, causing use-after-free on next alloc.
   RebuildFreeBlockIndex();
   return remapped;
 }
@@ -406,19 +408,35 @@ void VMMAutoGrowthBestFitAllocatorV2::GetFreeBlockStats(size_t* total_free,
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
-    void* ptr, std::vector<BlockPart>* parts) {
+    void* ptr, size_t size, std::vector<BlockPart>* parts) {
   std::lock_guard<SpinLock> guard(spinlock_);
-  auto found = allocated_blocks_.find(ptr);
-  if (found == allocated_blocks_.end()) {
+  auto target_va = reinterpret_cast<VMMDevicePtr>(ptr);
+  PADDLE_ENFORCE_LE(
+      size,
+      std::numeric_limits<VMMDevicePtr>::max() - target_va,
+      common::errors::InvalidArgument(
+          "Invalid VMM V2 tensor range: ptr %p plus size %zu overflows.",
+          ptr,
+          size));
+  BlockListIt block_it = all_blocks_.end();
+  for (const auto& entry : allocated_blocks_) {
+    auto candidate = entry.second;
+    if (candidate->ContainsVARange(target_va, size)) {
+      block_it = candidate;
+      break;
+    }
+  }
+  if (block_it == all_blocks_.end()) {
     return false;
   }
 
-  auto block_it = found->second;
+  const size_t block_offset = target_va - block_it->BeginVA();
+  BlockV2 tensor_block = block_it->MakeMappedActiveSubBlock(block_offset, size);
   std::vector<BlockPart> collected;
-  if (!underlying_allocator_->CollectBlockIpcParts(*block_it, &collected)) {
+  if (!underlying_allocator_->CollectBlockIpcParts(tensor_block, &collected)) {
     return false;
   }
-  if (!underlying_allocator_->MarkBlockIpcExported(*block_it)) {
+  if (!underlying_allocator_->MarkBlockIpcExported(tensor_block)) {
     return false;
   }
   if (parts != nullptr) {
@@ -431,7 +449,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
     void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
     gpuStream_t stream,
-    std::shared_ptr<CudaEventGuard> event
+    std::shared_ptr<CUDAEventGuard> event
 #else
     void* stream,
     void* event
@@ -496,7 +514,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
     size_t size) {
   const size_t backing_size =
-      AlignedSize(size, underlying_allocator_->handle_size());
+      AlignedSize(size, underlying_allocator_->HandleSize());
   BlockListIt best = all_blocks_.end();
   for (auto iter = unmapped_free_blocks_.lower_bound({backing_size, nullptr});
        iter != unmapped_free_blocks_.end();) {
@@ -526,7 +544,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
           << reinterpret_cast<void*>(unmapped_free_ptr) << " requested=" << size
           << " backing_size=" << backing_size
           << " original_unmapped_free_size=" << best->size_
-          << " tail_offset=" << underlying_allocator_->tail_offset();
+          << " tail_offset=" << underlying_allocator_->TailOffset();
   CUDAVirtualMemAllocatorV2::AllocationWithBlock unmapped_free_alloc;
   try {
     unmapped_free_alloc = underlying_allocator_->AllocateAtVAWithBlock(
@@ -645,7 +663,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::CanReleaseIdleUnderlyingAllocation(
     return false;
   }
   return underlying_allocator_->IsRangeReleasable(
-      reinterpret_cast<VmmDevicePtr>(base), size);
+      reinterpret_cast<VMMDevicePtr>(base), size);
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::TryReleaseIdleUnderlyingAllocation(
@@ -767,7 +785,7 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMergeUnmappedFree(BlockListIt it) {
 }
 
 // ---------------------------------------------------------------------------
-// ReleaseImpl / FreeIdleChunks – release underlying allocations whose entire
+// ReleaseImpl / FreeIdleChunks: release underlying allocations whose entire
 // VA range is covered by FREE blocks back to the CUDA VMM driver.
 //
 // Because TryMerge may have merged FREE blocks across allocation boundaries,
@@ -801,7 +819,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::ComputeTailOffset() const {
     return 0;
   }
   return static_cast<size_t>(all_blocks_.back().EndVA() -
-                             underlying_allocator_->virtual_mem_base());
+                             underlying_allocator_->VirtualMemBase());
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::IsRangeEntirelyFree(uint8_t* base,
@@ -843,7 +861,7 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
 
     const bool is_unmapped_free = it->IsUnmappedFree();
 
-    // Case 1: block entirely within [base, end) → remove it.
+    // Case 1: block entirely within [base, end): remove it.
     if (bptr >= base && bend <= end) {
       if (!is_unmapped_free) EraseFreeBlock(it);
       if (is_unmapped_free) EraseUnmappedFreeBlock(it);
@@ -851,7 +869,7 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
       continue;
     }
 
-    // Case 2: block straddles left boundary only → keep left remnant.
+    // Case 2: block straddles left boundary only: keep left remnant.
     if (bptr < base && bend <= end) {
       const size_t keep = static_cast<size_t>(base - bptr);
       if (!is_unmapped_free) {
@@ -867,7 +885,7 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
       continue;
     }
 
-    // Case 3: block straddles right boundary only → keep right remnant.
+    // Case 3: block straddles right boundary only: keep right remnant.
     if (bptr >= base && bend > end) {
       const size_t trim = static_cast<size_t>(end - bptr);
       const size_t keep = it->size_ - trim;
@@ -883,7 +901,7 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
       break;  // nothing more in range
     }
 
-    // Case 4: block fully encompasses [base, end) → split into two.
+    // Case 4: block fully encompasses [base, end): split into two.
     if (bptr < base && bend > end) {
       const size_t left_size = static_cast<size_t>(base - bptr);
       const size_t right_offset = static_cast<size_t>(end - bptr);

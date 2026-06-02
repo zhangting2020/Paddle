@@ -34,7 +34,7 @@ class RemapTransaction {
   using PrepareSyntheticAllocationFn = std::function<bool(void*, size_t)>;
   using RollbackMappedDestinationFn = std::function<void()>;
   using RollbackSourceMappingsFn = std::function<void()>;
-  using VaRanges = std::vector<std::pair<VmmDevicePtr, size_t>>;
+  using VaRanges = std::vector<std::pair<VMMDevicePtr, size_t>>;
   using BlockList = std::list<BlockV2>;
   using BlockIterator = BlockList::iterator;
   struct CandidateValidation {
@@ -60,7 +60,7 @@ class RemapTransaction {
     size_t backing_blocked_bytes{0};
   };
   struct DestinationPlacement {
-    static DestinationPlacement Tail(VmmDevicePtr dst, size_t count) {
+    static DestinationPlacement Tail(VMMDevicePtr dst, size_t count) {
       DestinationPlacement placement;
       placement.is_tail = true;
       placement.dst = dst;
@@ -69,7 +69,7 @@ class RemapTransaction {
     }
 
     static DestinationPlacement UnmappedFree(BlockIterator unmapped_free_it,
-                                             VmmDevicePtr dst,
+                                             VMMDevicePtr dst,
                                              size_t handle_start_idx,
                                              size_t count) {
       DestinationPlacement placement;
@@ -82,7 +82,7 @@ class RemapTransaction {
 
     bool is_tail{false};
     BlockIterator unmapped_free_it;
-    VmmDevicePtr dst{0};
+    VMMDevicePtr dst{0};
     size_t handle_start_idx{0};
     size_t count{0};
   };
@@ -122,9 +122,9 @@ class RemapTransaction {
   };
   struct SourceMovePlan {
     SourceCollectionStats stats;
-    std::vector<VmmAllocHandle> handles;
-    std::vector<std::shared_ptr<VmmHandleMeta>> metas;
-    std::vector<VmmBackingMap::MappedPage> source_pages;
+    std::vector<VMMAllocHandle> handles;
+    std::vector<std::shared_ptr<VMMHandleMeta>> metas;
+    std::vector<VMMBackingMap::MappedPage> source_pages;
     std::vector<PlannedSourceBlock> source_blocks;
   };
   struct PreScanResult {
@@ -168,7 +168,7 @@ class RemapTransaction {
                                          size_t requested_size,
                                          const char* source_context,
                                          const char* target_context);
-  const VmmBackingMap::CompactCandidates& candidates() const {
+  const VMMBackingMap::CompactCandidates& candidates() const {
     return candidates_;
   }
 
@@ -178,55 +178,55 @@ class RemapTransaction {
                                          const char* target_context) const;
 
   MaterializedRange MaterializeMappedRange(
-      VmmDevicePtr dst,
-      const std::vector<VmmAllocHandle>& handles,
+      VMMDevicePtr dst,
+      const std::vector<VMMAllocHandle>& handles,
       size_t start,
       size_t count,
       PoolType pool_type);
   MaterializedRange MaterializeDestinationPlacement(
       const DestinationPlacement& placement,
-      const std::vector<VmmAllocHandle>& handles,
+      const std::vector<VMMAllocHandle>& handles,
       PoolType pool_type);
   bool CollectTargetPagesForRange(
-      VmmDevicePtr dst,
+      VMMDevicePtr dst,
       size_t handle_count,
       const char* context,
-      std::vector<VmmBackingMap::UnmappedPage>* target_pages) const;
+      std::vector<VMMBackingMap::UnmappedPage>* target_pages) const;
   bool PrepareMoveDestinationPlacement(
       const DestinationPlacement& placement,
       const char* context,
-      std::vector<VmmBackingMap::UnmappedPage>* target_pages) const;
-  bool CanPrepareSyntheticAllocationRange(VmmDevicePtr dst, size_t size) const;
-  bool PrepareDestinationRange(VmmDevicePtr dst,
+      std::vector<VMMBackingMap::UnmappedPage>* target_pages) const;
+  bool CanPrepareSyntheticAllocationRange(VMMDevicePtr dst, size_t size) const;
+  bool PrepareDestinationRange(VMMDevicePtr dst,
                                size_t size,
                                const char* context) const;
-  bool PrepareSyntheticAllocationRange(VmmDevicePtr dst, size_t size) const;
+  bool PrepareSyntheticAllocationRange(VMMDevicePtr dst, size_t size) const;
   SourceMovePlan CollectRemapSourcePlan(BlockList* blocks,
                                         size_t requested_size,
                                         PoolType pool_type);
   void ApplyPlannedSourceBlocks(BlockList* blocks,
                                 std::vector<PlannedSourceBlock>* source_blocks)
       const;
-  bool TailIsUsable(VmmDevicePtr tail_va,
+  bool TailIsUsable(VMMDevicePtr tail_va,
                     size_t total_bytes,
-                    VmmDevicePtr va_limit) const;
-  size_t CountLeadingUnmappedBackingPages(VmmDevicePtr va,
+                    VMMDevicePtr va_limit) const;
+  size_t CountLeadingUnmappedBackingPages(VMMDevicePtr va,
                                           size_t size) const;
   UnmappedFreeDestinationPlan PlanUnmappedFreeDestinations(
       BlockList* blocks, size_t handle_count) const;
   DestinationPlan SelectDestinationPlan(BlockList* blocks,
-                                        VmmDevicePtr tail_va,
-                                        VmmDevicePtr va_limit,
+                                        VMMDevicePtr tail_va,
+                                        VMMDevicePtr va_limit,
                                         size_t handle_count,
                                         const char* log_prefix) const;
   bool TryCommitTailMovePlacement(BlockList* blocks,
-                                  VmmDevicePtr tail_va,
+                                  VMMDevicePtr tail_va,
                                   SourceMovePlan* plan,
                                   PoolType pool_type);
   bool MovePlannedPagesToTargets(
       BlockList* blocks,
       SourceMovePlan* plan,
-      const std::vector<VmmBackingMap::UnmappedPage>& target_pages);
+      const std::vector<VMMBackingMap::UnmappedPage>& target_pages);
   bool TryCommitSingleUnmappedFreeMovePlacement(BlockList* blocks,
                                                 BlockIterator unmapped_free_it,
                                                 SourceMovePlan* plan,
@@ -237,8 +237,8 @@ class RemapTransaction {
       const std::vector<DestinationPlacement>& placements,
       PoolType pool_type);
   PlacementResult ExecuteMovePlacementStrategy(BlockList* blocks,
-                                               VmmDevicePtr tail_va,
-                                               VmmDevicePtr va_limit,
+                                               VMMDevicePtr tail_va,
+                                               VMMDevicePtr va_limit,
                                                SourceMovePlan* plan,
                                                PoolType pool_type);
   CompactResult CompactFreeBlocks(BlockList* blocks,
@@ -261,27 +261,27 @@ class RemapTransaction {
   void NormalizeBlocks(BlockList* blocks) const;
   bool RestoreUnmappedFreeRangeToMappedFreeBlock(
       BlockList* blocks,
-      VmmDevicePtr va,
+      VMMDevicePtr va,
       size_t size,
-      const std::shared_ptr<VmmHandleMeta>& meta);
+      const std::shared_ptr<VMMHandleMeta>& meta);
   bool RestoreRemappedSourcesToFreeBlocks(
       BlockList* blocks,
-      const std::vector<VmmAllocHandle>& handles,
-      const std::vector<std::shared_ptr<VmmHandleMeta>>& metas);
+      const std::vector<VMMAllocHandle>& handles,
+      const std::vector<std::shared_ptr<VMMHandleMeta>>& metas);
   void Commit();
   void Rollback();
 
  private:
   // Record successfully mapped destination ranges so later bookkeeping
   // failures can still unmap every destination owned by this transaction.
-  void RecordMappedDestinationRange(VmmDevicePtr dst, size_t handle_count);
+  void RecordMappedDestinationRange(VMMDevicePtr dst, size_t handle_count);
   void RollbackMappedDestinations();
   void StageSyntheticAllocation(Allocation* allocation);
   bool HasPendingState() const;
 
   CUDAVirtualMemAllocatorV2* vmm_allocator_;
   size_t handle_size_;
-  VmmBackingMap::CompactCandidates candidates_;
+  VMMBackingMap::CompactCandidates candidates_;
   CommitSyntheticAllocationFn commit_synthetic_allocation_;
   CanPrepareSyntheticAllocationFn can_prepare_synthetic_allocation_;
   PrepareSyntheticAllocationFn prepare_synthetic_allocation_;

@@ -3775,16 +3775,16 @@ All parameter, weight, gradient are variables in Paddle.
 #endif
 #if defined(PADDLE_WITH_CUDA)
   m.def("vmm_max_free_size", [](int device_id) {
-    return memory::VmmMaxFreeSize(GPUPlace(device_id), 1);
+    return memory::VMMMaxFreeSize(GPUPlace(device_id), 1);
   });
   m.def("vmm_compact", [](int device_id) {
-    return paddle::memory::VmmCompact(GPUPlace(device_id));
+    return paddle::memory::VMMCompact(GPUPlace(device_id));
   });
   m.def("vmm_free_block_info", [](int device_id) {
-    return paddle::memory::FreeBlockInfoOfVmmAllocator(GPUPlace(device_id));
+    return paddle::memory::FreeBlockInfoOfVMMAllocator(GPUPlace(device_id));
   });
   m.def("vmm_all_block_info", [](int device_id) {
-    return paddle::memory::AllBlockInfoOfVmmAllocator(GPUPlace(device_id));
+    return paddle::memory::AllBlockInfoOfVMMAllocator(GPUPlace(device_id));
   });
   m.def("get_allocate_record", [](int device_id) {
     return paddle::memory::GetAllocateEvent(GPUPlace(device_id));
@@ -4422,7 +4422,7 @@ All parameter, weight, gradient are variables in Paddle.
         return py::make_tuple(dl_dtype.code, dl_dtype.bits, dl_dtype.lanes);
       });
   // Initialize the DataType singleton cache from the registered enum
-  // attributes. After this, all C++ → Python conversions of DataType (via
+  // attributes. After this, all C++ to Python conversions of DataType (via
   // pybind11 auto-cast or ToPyObject) will return cached singletons,
   // guaranteeing `paddle.float32 is value.dtype` for all code paths.
   DataTypeSingletonCache::Instance().Init(g_data_type_pytype);
