@@ -68,6 +68,13 @@ struct CUDAEventGuard {
   CUDAEventGuard(const CUDAEventGuard&) = delete;
   CUDAEventGuard& operator=(const CUDAEventGuard&) = delete;
 };
+
+class VMMRemapEventAllocation {
+ public:
+  virtual ~VMMRemapEventAllocation() = default;
+  virtual bool SetVMMRemapEvent(gpuStream_t stream,
+                                std::shared_ptr<CUDAEventGuard> event) = 0;
+};
 #endif
 
 // V2 keeps the bottom-layer shared types independent from the best-fit layer

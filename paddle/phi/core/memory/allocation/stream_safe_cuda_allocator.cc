@@ -21,6 +21,7 @@
 #include "paddle/phi/backends/gpu/gpu_info.h"
 #include "paddle/phi/core/memory/allocation/retry_allocator.h"
 #include "paddle/phi/core/memory/allocation/stat_allocator.h"
+#include "paddle/phi/core/memory/allocation/vmm_allocator_v2_types.h"
 #include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_multi_pool_allocator_v2.h"
 
 COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
@@ -55,12 +56,10 @@ VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVMMV2MultiPoolAllocator(
 
 void MarkVMMV2RemapPendingStream(StreamSafeCUDAAllocator* allocator,
                                  StreamSafeCUDAAllocation* allocation) {
-  auto* vmm = allocator->GetVMMV2Allocator();
-  if (vmm == nullptr) {
+  if (allocator->GetVMMV2Allocator() == nullptr) {
     return;
   }
-  if (!vmm->SetBlockRemapEvent(
-          allocation->ptr(), allocation->GetOwningStream(), nullptr)) {
+  if (!allocation->SetVMMV2RemapEvent()) {
     VLOG(0) << "VMM V2 failed to mark remap pending stream for allocation "
             << allocation->ptr()
             << "; compact/remap safety may be incomplete for this block";
@@ -171,6 +170,15 @@ void StreamSafeCUDAAllocation::RecordGraphCapturingStreams() {
     RecordStreamWithNoGraphCapturing(stream);
   }
   graph_capturing_stream_set_.clear();
+}
+
+bool StreamSafeCUDAAllocation::SetVMMV2RemapEvent() {
+  auto* remap_allocation =
+      dynamic_cast<VMMRemapEventAllocation*>(underlying_allocation_.get());
+  if (remap_allocation == nullptr) {
+    return false;
+  }
+  return remap_allocation->SetVMMRemapEvent(owning_stream_, nullptr);
 }
 
 void StreamSafeCUDAAllocation::RecordStreamWithNoGraphCapturing(

@@ -37,17 +37,25 @@ using BlockList = std::list<BlockV2>;
 using BlockListIt = BlockList::iterator;
 using PtrBlockMap = std::unordered_map<void*, BlockListIt>;
 
-class VMMAutoGrowthBestFitBlockAllocationV2 : public Allocation {
+class VMMAutoGrowthBestFitAllocatorV2;
+
+class VMMAutoGrowthBestFitBlockAllocationV2 : public Allocation,
+                                              public VMMRemapEventAllocation {
  public:
   VMMAutoGrowthBestFitBlockAllocationV2(BlockListIt block_it,
-                                        const Place& place)
+                                        const Place& place,
+                                        VMMAutoGrowthBestFitAllocatorV2* owner)
       : Allocation(block_it->ptr_, block_it->ptr_, block_it->size_, place),
-        block_it_(block_it) {}
+        block_it_(block_it),
+        owner_(owner) {}
 
   BlockListIt block_it() const { return block_it_; }
+  bool SetVMMRemapEvent(gpuStream_t stream,
+                        std::shared_ptr<CUDAEventGuard> event) override;
 
  private:
   BlockListIt block_it_;
+  VMMAutoGrowthBestFitAllocatorV2* owner_;
 };
 
 class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
@@ -75,6 +83,15 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
                           std::vector<BlockPart>* parts);
 
   bool SetBlockRemapEvent(void* ptr,
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+                          gpuStream_t stream,
+                          std::shared_ptr<CUDAEventGuard> event
+#else
+                          void* stream,
+                          void* event
+#endif
+  );
+  bool SetBlockRemapEvent(BlockListIt block_it,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
                           gpuStream_t stream,
                           std::shared_ptr<CUDAEventGuard> event

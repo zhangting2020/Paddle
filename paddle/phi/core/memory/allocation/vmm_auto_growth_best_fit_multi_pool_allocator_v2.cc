@@ -38,7 +38,9 @@ void EmplaceOrEnforce(Map* map,
           map_name));
 }
 
-class VMMAutoGrowthBestFitMultiPoolAllocationV2 : public Allocation {
+class VMMAutoGrowthBestFitMultiPoolAllocationV2
+    : public Allocation,
+      public VMMRemapEventAllocation {
  public:
   VMMAutoGrowthBestFitMultiPoolAllocationV2(
       AllocationPtr underlying_allocation,
@@ -59,6 +61,15 @@ class VMMAutoGrowthBestFitMultiPoolAllocationV2 : public Allocation {
 
   VMMAutoGrowthBestFitAllocatorV2* allocator() const { return allocator_; }
   PoolType pool_type() const { return pool_type_; }
+  bool SetVMMRemapEvent(gpuStream_t stream,
+                        std::shared_ptr<CUDAEventGuard> event) override {
+    auto* remap_allocation =
+        dynamic_cast<VMMRemapEventAllocation*>(underlying_allocation_.get());
+    if (remap_allocation == nullptr) {
+      return false;
+    }
+    return remap_allocation->SetVMMRemapEvent(stream, std::move(event));
+  }
 
  private:
   AllocationPtr underlying_allocation_;

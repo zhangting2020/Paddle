@@ -45,6 +45,7 @@ class StreamSafeCUDAAllocation : public Allocation {
   bool RecordStream(gpuStream_t stream);
   void EraseStream(gpuStream_t stream);
   bool CanBeFreed();
+  bool SetVMMV2RemapEvent();
   gpuStream_t GetOwningStream() const;
   void *ptr() const noexcept override { return underlying_allocation_->ptr(); }
   size_t size() const noexcept override {

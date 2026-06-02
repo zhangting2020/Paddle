@@ -156,6 +156,14 @@ VMMAutoGrowthBestFitAllocatorV2::VMMAutoGrowthBestFitAllocatorV2(
       place_(place),
       pool_type_(pool_type) {}
 
+bool VMMAutoGrowthBestFitBlockAllocationV2::SetVMMRemapEvent(
+    gpuStream_t stream, std::shared_ptr<CUDAEventGuard> event) {
+  if (owner_ == nullptr) {
+    return false;
+  }
+  return owner_->SetBlockRemapEvent(block_it_, stream, std::move(event));
+}
+
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   std::lock_guard<SpinLock> guard(spinlock_);
   const size_t requested_size = AlignedSize(size, alignment_);
@@ -238,7 +246,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
     InsertFreeBlock(remain_it);
   }
 
-  return new VMMAutoGrowthBestFitBlockAllocationV2(it, place_);
+  return new VMMAutoGrowthBestFitBlockAllocationV2(it, place_, this);
 }
 
 size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
@@ -452,7 +460,32 @@ bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
     return false;
   }
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-  return underlying_allocator_->SetBlockRemapEvent(*it->second, stream, event);
+  return underlying_allocator_->SetBlockRemapEvent(
+      *it->second, stream, std::move(event));
+#else
+  (void)stream;
+  (void)event;
+#endif
+  return true;
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
+    BlockListIt block_it,
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+    gpuStream_t stream,
+    std::shared_ptr<CUDAEventGuard> event
+#else
+    void* stream,
+    void* event
+#endif
+) {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  if (block_it == all_blocks_.end() || !block_it->IsActive()) {
+    return false;
+  }
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+  return underlying_allocator_->SetBlockRemapEvent(
+      *block_it, stream, std::move(event));
 #else
   (void)stream;
   (void)event;
@@ -498,7 +531,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   block_it->MarkActive();
   EmplaceOrEnforce(
       &allocated_blocks_, block_it->ptr_, block_it, "allocated_blocks_");
-  return new VMMAutoGrowthBestFitBlockAllocationV2(block_it, place_);
+  return new VMMAutoGrowthBestFitBlockAllocationV2(block_it, place_, this);
 }
 
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
@@ -583,7 +616,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
     InsertUnmappedFreeBlock(tail_it);
   }
 
-  return new Allocation(best->ptr_, best->ptr_, best->size_, place_);
+  return new VMMAutoGrowthBestFitBlockAllocationV2(best, place_, this);
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::TrackUnderlyingAllocation(
