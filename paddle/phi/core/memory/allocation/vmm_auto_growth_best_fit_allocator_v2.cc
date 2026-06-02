@@ -409,11 +409,17 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
           ptr,
           size));
   BlockListIt block_it = all_blocks_.end();
-  for (const auto& entry : allocated_blocks_) {
-    auto candidate = entry.second;
-    if (candidate->ContainsVARange(target_va, size)) {
-      block_it = candidate;
-      break;
+  auto exact_it = allocated_blocks_.find(ptr);
+  if (exact_it != allocated_blocks_.end() &&
+      exact_it->second->ContainsVARange(target_va, size)) {
+    block_it = exact_it->second;
+  } else {
+    for (const auto& entry : allocated_blocks_) {
+      auto candidate = entry.second;
+      if (candidate->ContainsVARange(target_va, size)) {
+        block_it = candidate;
+        break;
+      }
     }
   }
   if (block_it == all_blocks_.end()) {
