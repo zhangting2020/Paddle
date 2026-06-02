@@ -357,10 +357,11 @@ class VMMV2PoolStatsVisitor : public AllocatorComputeStreamVisitor {
       pool_stats_;
 };
 
-class VmmTensorPartsVisitor : public AllocatorVisitor {
+class VMMTensorPartsVisitor : public AllocatorVisitor {
  public:
   using BlockPart = allocation::BlockPart;
-  explicit VmmTensorPartsVisitor(void* ptr) : target_ptr_(ptr) {}
+  VMMTensorPartsVisitor(void* ptr, size_t size)
+      : target_ptr_(ptr), target_size_(size) {}
 
   void Visit(VirtualMemoryAutoGrowthBestFitAllocator* allocator) override;
   void Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) override;
@@ -370,6 +371,7 @@ class VmmTensorPartsVisitor : public AllocatorVisitor {
 
  private:
   void* target_ptr_{nullptr};
+  size_t target_size_{0};
   bool found_{false};
   std::vector<BlockPart> parts_;
 };

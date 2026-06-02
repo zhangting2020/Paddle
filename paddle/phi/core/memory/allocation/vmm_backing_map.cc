@@ -29,10 +29,10 @@ namespace allocation {
 
 namespace {
 
-bool ComputeOverlappedPages(VmmDevicePtr base,
+bool ComputeOverlappedPages(VMMDevicePtr base,
                             size_t backing_size,
                             size_t page_size,
-                            VmmDevicePtr va,
+                            VMMDevicePtr va,
                             size_t size,
                             const char* context,
                             size_t* start,
@@ -42,8 +42,7 @@ bool ComputeOverlappedPages(VmmDevicePtr base,
     VLOG(0) << "VMM V2 BackingMap invalid overlap range in " << context
             << ": va=" << reinterpret_cast<void*>(va) << " size=" << size
             << " base=" << reinterpret_cast<void*>(base)
-            << " backing_size=" << backing_size
-            << " page_size=" << page_size;
+            << " backing_size=" << backing_size << " page_size=" << page_size;
     return false;
   }
   const size_t begin_offset = va - base;
@@ -56,18 +55,19 @@ bool ComputeOverlappedPages(VmmDevicePtr base,
 
 }  // namespace
 
-void VmmBackingMap::Configure(VmmDevicePtr base,
+void VMMBackingMap::Configure(VMMDevicePtr base,
                               size_t size,
                               size_t page_size,
                               int device) {
-  std::lock_guard<SpinLock> guard(mu_);
+  std::lock_guard<SpinLock> guard(spinlock_);
   if (configured_) {
     if (base_ != base || size_ != size || page_size_ != page_size ||
         device_ != device) {
       VLOG(0) << "VMM V2 BackingMap reconfigure mismatch: old_base="
-              << reinterpret_cast<void*>(base_) << " new_base="
-              << reinterpret_cast<void*>(base) << " old_size=" << size_
-              << " new_size=" << size << " old_page_size=" << page_size_
+              << reinterpret_cast<void*>(base_)
+              << " new_base=" << reinterpret_cast<void*>(base)
+              << " old_size=" << size_ << " new_size=" << size
+              << " old_page_size=" << page_size_
               << " new_page_size=" << page_size << " old_device=" << device_
               << " new_device=" << device;
     }
@@ -83,7 +83,7 @@ void VmmBackingMap::Configure(VmmDevicePtr base,
   mapped_page_count_ = 0;
 }
 
-bool VmmBackingMap::CheckRangeLocked(VmmDevicePtr va,
+bool VMMBackingMap::CheckRangeLocked(VMMDevicePtr va,
                                      size_t size,
                                      const char* context,
                                      size_t* start,
@@ -94,8 +94,8 @@ bool VmmBackingMap::CheckRangeLocked(VmmDevicePtr va,
             << " size=" << size;
     return false;
   }
-  if (size == 0 || page_size_ == 0 || size % page_size_ != 0 ||
-      va < base_ || va + size < va || va + size > base_ + size_ ||
+  if (size == 0 || page_size_ == 0 || size % page_size_ != 0 || va < base_ ||
+      va + size < va || va + size > base_ + size_ ||
       (va - base_) % page_size_ != 0) {
     VLOG(0) << "VMM V2 BackingMap invalid range in " << context
             << ": va=" << reinterpret_cast<void*>(va) << " size=" << size
@@ -108,10 +108,10 @@ bool VmmBackingMap::CheckRangeLocked(VmmDevicePtr va,
   return true;
 }
 
-void VmmBackingMap::MarkMapped(VmmDevicePtr va,
-                               VmmAllocHandle handle,
+void VMMBackingMap::MarkMapped(VMMDevicePtr va,
+                               VMMAllocHandle handle,
                                size_t size) {
-  std::lock_guard<SpinLock> guard(mu_);
+  std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
   size_t count = 0;
   if (!CheckRangeLocked(va, size, "MarkMapped(handle)", &start, &count)) {
@@ -141,19 +141,17 @@ void VmmBackingMap::MarkMapped(VmmDevicePtr va,
   }
 }
 
-void VmmBackingMap::MarkMapped(
-    VmmDevicePtr va,
-    const std::shared_ptr<VmmHandleMeta>& meta,
-    size_t size) {
-  std::lock_guard<SpinLock> guard(mu_);
+void VMMBackingMap::MarkMapped(VMMDevicePtr va,
+                               const std::shared_ptr<VMMHandleMeta>& meta,
+                               size_t size) {
+  std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
   size_t count = 0;
   if (!CheckRangeLocked(va, size, "MarkMapped", &start, &count)) {
     return;
   }
-  const VmmAllocHandle handle =
-      meta == nullptr ? static_cast<VmmAllocHandle>(0)
-                      : meta->AllocationHandle();
+  const VMMAllocHandle handle = meta == nullptr ? static_cast<VMMAllocHandle>(0)
+                                                : meta->AllocationHandle();
   for (size_t i = 0; i < count; ++i) {
     auto& page = pages_[start + i];
     PADDLE_ENFORCE_EQ(
@@ -178,8 +176,8 @@ void VmmBackingMap::MarkMapped(
   }
 }
 
-void VmmBackingMap::MarkUnmapped(VmmDevicePtr va, size_t size) {
-  std::lock_guard<SpinLock> guard(mu_);
+void VMMBackingMap::MarkUnmapped(VMMDevicePtr va, size_t size) {
+  std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
   size_t count = 0;
   if (!CheckRangeLocked(va, size, "MarkUnmapped", &start, &count)) {
@@ -204,10 +202,10 @@ void VmmBackingMap::MarkUnmapped(VmmDevicePtr va, size_t size) {
   }
 }
 
-void VmmBackingMap::MarkReleased(VmmDevicePtr va,
-                                 VmmAllocHandle handle,
+void VMMBackingMap::MarkReleased(VMMDevicePtr va,
+                                 VMMAllocHandle handle,
                                  size_t size) {
-  std::lock_guard<SpinLock> guard(mu_);
+  std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
   size_t count = 0;
   if (!CheckRangeLocked(va, size, "MarkReleased", &start, &count)) {
@@ -235,12 +233,18 @@ void VmmBackingMap::MarkReleased(VmmDevicePtr va,
   }
 }
 
-void VmmBackingMap::MarkIpcExported(VmmDevicePtr va, size_t size) {
-  std::lock_guard<SpinLock> guard(mu_);
+void VMMBackingMap::MarkIpcExported(VMMDevicePtr va, size_t size) {
+  std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
   size_t count = 0;
-  if (!ComputeOverlappedPages(
-          base_, size_, page_size_, va, size, "MarkIpcExported", &start, &count)) {
+  if (!ComputeOverlappedPages(base_,
+                              size_,
+                              page_size_,
+                              va,
+                              size,
+                              "MarkIpcExported",
+                              &start,
+                              &count)) {
     return;
   }
   for (size_t i = 0; i < count; ++i) {
@@ -255,14 +259,14 @@ void VmmBackingMap::MarkIpcExported(VmmDevicePtr va, size_t size) {
 }
 
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-void VmmBackingMap::MarkPendingEvent(VmmDevicePtr va,
+void VMMBackingMap::MarkPendingEvent(VMMDevicePtr va,
                                      size_t size,
                                      gpuStream_t stream,
-                                     std::shared_ptr<CudaEventGuard> event) {
+                                     std::shared_ptr<CUDAEventGuard> event) {
   if (event == nullptr) {
     return;
   }
-  std::lock_guard<SpinLock> guard(mu_);
+  std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
   size_t count = 0;
   if (!CheckRangeLocked(va, size, "MarkPendingEvent", &start, &count)) {
@@ -274,12 +278,11 @@ void VmmBackingMap::MarkPendingEvent(VmmDevicePtr va,
       VLOG(6) << "VMM V2 BackingMap marks unmapped page event-pending at "
               << reinterpret_cast<void*>(va + i * page_size_);
     }
-    auto same_stream = std::find_if(
-        page.pending_events.begin(),
-        page.pending_events.end(),
-        [stream](const PendingEvent& pending) {
-          return pending.stream == stream;
-        });
+    auto same_stream = std::find_if(page.pending_events.begin(),
+                                    page.pending_events.end(),
+                                    [stream](const PendingEvent& pending) {
+                                      return pending.stream == stream;
+                                    });
     if (same_stream != page.pending_events.end()) {
       same_stream->event = event;
     } else {
@@ -290,14 +293,15 @@ void VmmBackingMap::MarkPendingEvent(VmmDevicePtr va,
 }
 #endif
 
-bool VmmBackingMap::ValidateLayout(const HandleLayout& layout,
+bool VMMBackingMap::ValidateLayout(const HandleLayout& layout,
                                    const char* context) const {
-  std::lock_guard<SpinLock> guard(mu_);
+  std::lock_guard<SpinLock> guard(spinlock_);
   bool ok = true;
   for (const auto& meta : layout) {
     size_t start = 0;
     size_t count = 0;
-    if (!CheckRangeLocked(meta->Base(), meta->Size(), context, &start, &count)) {
+    if (!CheckRangeLocked(
+            meta->Base(), meta->Size(), context, &start, &count)) {
       ok = false;
       continue;
     }
@@ -314,8 +318,7 @@ bool VmmBackingMap::ValidateLayout(const HandleLayout& layout,
         ok = false;
       }
       if (expected_mapped && page.handle != meta->AllocationHandle()) {
-        VLOG(0) << "VMM V2 BackingMap handle mismatch in " << context
-                << " va="
+        VLOG(0) << "VMM V2 BackingMap handle mismatch in " << context << " va="
                 << reinterpret_cast<void*>(meta->Base() + i * page_size_)
                 << " tracked=" << reinterpret_cast<void*>(page.handle)
                 << " meta="
@@ -327,22 +330,22 @@ bool VmmBackingMap::ValidateLayout(const HandleLayout& layout,
   return ok;
 }
 
-bool VmmBackingMap::CollectIpcPartDescriptors(
-    VmmDevicePtr va,
+bool VMMBackingMap::CollectIpcPartDescriptors(
+    VMMDevicePtr va,
     size_t size,
     std::vector<IpcBlockPartDescriptor>* descriptors) const {
-  std::lock_guard<SpinLock> guard(mu_);
+  std::lock_guard<SpinLock> guard(spinlock_);
   return CollectIpcPartDescriptorsLocked(va, size, descriptors);
 }
 
-bool VmmBackingMap::ForEachUniqueMappedHandle(
-    VmmDevicePtr va,
+bool VMMBackingMap::ForEachUniqueMappedHandle(
+    VMMDevicePtr va,
     size_t size,
-    const std::function<bool(const std::shared_ptr<VmmHandleMeta>&)>& fn)
+    const std::function<bool(const std::shared_ptr<VMMHandleMeta>&)>& fn)
     const {
-  std::vector<std::shared_ptr<VmmHandleMeta>> handles;
+  std::vector<std::shared_ptr<VMMHandleMeta>> handles;
   {
-    std::lock_guard<SpinLock> guard(mu_);
+    std::lock_guard<SpinLock> guard(spinlock_);
     size_t start = 0;
     size_t count = 0;
     if (!ComputeOverlappedPages(base_,
@@ -355,7 +358,7 @@ bool VmmBackingMap::ForEachUniqueMappedHandle(
                                 &count)) {
       return false;
     }
-    std::unordered_set<VmmHandleMeta*> seen;
+    std::unordered_set<VMMHandleMeta*> seen;
     handles.reserve(count);
     for (size_t i = 0; i < count; ++i) {
       const auto& page = pages_[start + i];
@@ -376,8 +379,8 @@ bool VmmBackingMap::ForEachUniqueMappedHandle(
   return true;
 }
 
-bool VmmBackingMap::IsRangeMapped(VmmDevicePtr va, size_t size) const {
-  std::lock_guard<SpinLock> guard(mu_);
+bool VMMBackingMap::IsRangeMapped(VMMDevicePtr va, size_t size) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
   size_t count = 0;
   if (!CheckRangeLocked(va, size, "IsRangeMapped", &start, &count)) {
@@ -391,8 +394,8 @@ bool VmmBackingMap::IsRangeMapped(VmmDevicePtr va, size_t size) const {
   return true;
 }
 
-bool VmmBackingMap::IsRangeUnmapped(VmmDevicePtr va, size_t size) const {
-  std::lock_guard<SpinLock> guard(mu_);
+bool VMMBackingMap::IsRangeUnmapped(VMMDevicePtr va, size_t size) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
   size_t count = 0;
   if (!CheckRangeLocked(va, size, "IsRangeUnmapped", &start, &count)) {
@@ -406,8 +409,8 @@ bool VmmBackingMap::IsRangeUnmapped(VmmDevicePtr va, size_t size) const {
   return true;
 }
 
-bool VmmBackingMap::IsRangeReleasable(VmmDevicePtr va, size_t size) const {
-  std::lock_guard<SpinLock> guard(mu_);
+bool VMMBackingMap::IsRangeReleasable(VMMDevicePtr va, size_t size) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
   size_t count = 0;
   if (!ComputeOverlappedPages(base_,
@@ -429,9 +432,9 @@ bool VmmBackingMap::IsRangeReleasable(VmmDevicePtr va, size_t size) const {
   return true;
 }
 
-bool VmmBackingMap::IsRangeReusableForAllocation(VmmDevicePtr va,
+bool VMMBackingMap::IsRangeReusableForAllocation(VMMDevicePtr va,
                                                  size_t size) const {
-  std::lock_guard<SpinLock> guard(mu_);
+  std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
   size_t count = 0;
   if (!ComputeOverlappedPages(base_,
@@ -454,8 +457,8 @@ bool VmmBackingMap::IsRangeReusableForAllocation(VmmDevicePtr va,
   return true;
 }
 
-bool VmmBackingMap::HasIpcExportedPages(VmmDevicePtr va, size_t size) const {
-  std::lock_guard<SpinLock> guard(mu_);
+bool VMMBackingMap::HasIpcExportedPages(VMMDevicePtr va, size_t size) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
   size_t count = 0;
   if (!ComputeOverlappedPages(base_,
@@ -476,23 +479,22 @@ bool VmmBackingMap::HasIpcExportedPages(VmmDevicePtr va, size_t size) const {
   return false;
 }
 
-std::vector<std::pair<VmmDevicePtr, size_t>>
-VmmBackingMap::CollectMappedRanges(VmmDevicePtr va, size_t size) const {
-  std::lock_guard<SpinLock> guard(mu_);
+std::vector<std::pair<VMMDevicePtr, size_t>> VMMBackingMap::CollectMappedRanges(
+    VMMDevicePtr va, size_t size) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
   return CollectRangesLocked(va, size, true, "CollectMappedRanges");
 }
 
-std::vector<std::pair<VmmDevicePtr, size_t>>
-VmmBackingMap::CollectUnmappedRanges(VmmDevicePtr va, size_t size) const {
-  std::lock_guard<SpinLock> guard(mu_);
+std::vector<std::pair<VMMDevicePtr, size_t>>
+VMMBackingMap::CollectUnmappedRanges(VMMDevicePtr va, size_t size) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
   return CollectRangesLocked(va, size, false, "CollectUnmappedRanges");
 }
 
-std::vector<std::pair<VmmDevicePtr, size_t>>
-VmmBackingMap::CollectMappedRanges(
-    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const {
-  std::lock_guard<SpinLock> guard(mu_);
-  std::vector<std::pair<VmmDevicePtr, size_t>> mapped_ranges;
+std::vector<std::pair<VMMDevicePtr, size_t>> VMMBackingMap::CollectMappedRanges(
+    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  std::vector<std::pair<VMMDevicePtr, size_t>> mapped_ranges;
   for (const auto& range : ranges) {
     AppendRangesLocked(
         range.first, range.second, true, "CollectMappedRanges", &mapped_ranges);
@@ -500,11 +502,11 @@ VmmBackingMap::CollectMappedRanges(
   return mapped_ranges;
 }
 
-std::vector<std::pair<VmmDevicePtr, size_t>>
-VmmBackingMap::CollectUnmappedRanges(
-    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const {
-  std::lock_guard<SpinLock> guard(mu_);
-  std::vector<std::pair<VmmDevicePtr, size_t>> unmapped_ranges;
+std::vector<std::pair<VMMDevicePtr, size_t>>
+VMMBackingMap::CollectUnmappedRanges(
+    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  std::vector<std::pair<VMMDevicePtr, size_t>> unmapped_ranges;
   for (const auto& range : ranges) {
     AppendRangesLocked(range.first,
                        range.second,
@@ -515,9 +517,9 @@ VmmBackingMap::CollectUnmappedRanges(
   return unmapped_ranges;
 }
 
-std::vector<VmmBackingMap::MappedPage> VmmBackingMap::CollectMappedPages(
-    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const {
-  std::lock_guard<SpinLock> guard(mu_);
+std::vector<VMMBackingMap::MappedPage> VMMBackingMap::CollectMappedPages(
+    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
   std::vector<MappedPage> mapped_pages;
   for (const auto& range : ranges) {
     AppendMappedPagesLocked(
@@ -526,10 +528,10 @@ std::vector<VmmBackingMap::MappedPage> VmmBackingMap::CollectMappedPages(
   return mapped_pages;
 }
 
-std::vector<VmmBackingMap::MappedPage> VmmBackingMap::CollectMappedPages(
-    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
+std::vector<VMMBackingMap::MappedPage> VMMBackingMap::CollectMappedPages(
+    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {
-  std::lock_guard<SpinLock> guard(mu_);
+  std::lock_guard<SpinLock> guard(spinlock_);
   std::vector<MappedPage> mapped_pages;
   if (target_bytes == 0 || page_size_ == 0) {
     return mapped_pages;
@@ -549,10 +551,10 @@ std::vector<VmmBackingMap::MappedPage> VmmBackingMap::CollectMappedPages(
   return mapped_pages;
 }
 
-std::vector<VmmBackingMap::MappedPage>
-VmmBackingMap::CollectMappedPagesFullyCoveredBy(
-    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const {
-  std::lock_guard<SpinLock> guard(mu_);
+std::vector<VMMBackingMap::MappedPage>
+VMMBackingMap::CollectMappedPagesFullyCoveredBy(
+    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
   std::vector<MappedPage> mapped_pages;
   for (const auto& range : ranges) {
     AppendMappedPagesFullyCoveredByLocked(range.first,
@@ -566,11 +568,11 @@ VmmBackingMap::CollectMappedPagesFullyCoveredBy(
   return mapped_pages;
 }
 
-std::vector<VmmBackingMap::MappedPage>
-VmmBackingMap::CollectMappedPagesFullyCoveredBy(
-    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
+std::vector<VMMBackingMap::MappedPage>
+VMMBackingMap::CollectMappedPagesFullyCoveredBy(
+    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {
-  std::lock_guard<SpinLock> guard(mu_);
+  std::lock_guard<SpinLock> guard(spinlock_);
   std::vector<MappedPage> mapped_pages;
   if (target_bytes == 0 || page_size_ == 0) {
     return mapped_pages;
@@ -592,11 +594,11 @@ VmmBackingMap::CollectMappedPagesFullyCoveredBy(
   return mapped_pages;
 }
 
-std::vector<VmmBackingMap::MappedPage>
-VmmBackingMap::CollectRemapSourcePagesFullyCoveredBy(
-    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
+std::vector<VMMBackingMap::MappedPage>
+VMMBackingMap::CollectRemapSourcePagesFullyCoveredBy(
+    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {
-  std::lock_guard<SpinLock> guard(mu_);
+  std::lock_guard<SpinLock> guard(spinlock_);
   std::vector<MappedPage> mapped_pages;
   const size_t target_pages =
       (target_bytes == 0 || page_size_ == 0)
@@ -642,10 +644,10 @@ VmmBackingMap::CollectRemapSourcePagesFullyCoveredBy(
   return mapped_pages;
 }
 
-std::vector<VmmBackingMap::UnmappedPage>
-VmmBackingMap::CollectUnmappedPagesFullyCoveredBy(
-    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges) const {
-  std::lock_guard<SpinLock> guard(mu_);
+std::vector<VMMBackingMap::UnmappedPage>
+VMMBackingMap::CollectUnmappedPagesFullyCoveredBy(
+    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
   std::vector<UnmappedPage> unmapped_pages;
   for (const auto& range : ranges) {
     AppendUnmappedPagesFullyCoveredByLocked(
@@ -658,11 +660,11 @@ VmmBackingMap::CollectUnmappedPagesFullyCoveredBy(
   return unmapped_pages;
 }
 
-std::vector<VmmBackingMap::UnmappedPage>
-VmmBackingMap::CollectUnmappedPagesFullyCoveredBy(
-    const std::vector<std::pair<VmmDevicePtr, size_t>>& ranges,
+std::vector<VMMBackingMap::UnmappedPage>
+VMMBackingMap::CollectUnmappedPagesFullyCoveredBy(
+    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {
-  std::lock_guard<SpinLock> guard(mu_);
+  std::lock_guard<SpinLock> guard(spinlock_);
   std::vector<UnmappedPage> unmapped_pages;
   if (target_bytes == 0 || page_size_ == 0) {
     return unmapped_pages;
@@ -683,16 +685,15 @@ VmmBackingMap::CollectUnmappedPagesFullyCoveredBy(
   return unmapped_pages;
 }
 
-VmmBackingMap::CompactCandidates VmmBackingMap::CollectCompactCandidates(
-    const std::vector<std::pair<VmmDevicePtr, size_t>>& source_ranges,
-    const std::vector<std::pair<VmmDevicePtr, size_t>>& target_ranges,
+VMMBackingMap::CompactCandidates VMMBackingMap::CollectCompactCandidates(
+    const std::vector<std::pair<VMMDevicePtr, size_t>>& source_ranges,
+    const std::vector<std::pair<VMMDevicePtr, size_t>>& target_ranges,
     size_t target_bytes) const {
-  std::lock_guard<SpinLock> guard(mu_);
+  std::lock_guard<SpinLock> guard(spinlock_);
   CompactCandidates candidates;
-  const size_t max_pages =
-      (target_bytes == 0 || page_size_ == 0)
-          ? 0
-          : (target_bytes + page_size_ - 1) / page_size_;
+  const size_t max_pages = (target_bytes == 0 || page_size_ == 0)
+                               ? 0
+                               : (target_bytes + page_size_ - 1) / page_size_;
 
   for (const auto& range : source_ranges) {
     AppendMappedPagesFullyCoveredByLocked(range.first,
@@ -719,9 +720,9 @@ VmmBackingMap::CompactCandidates VmmBackingMap::CollectCompactCandidates(
   return candidates;
 }
 
-bool VmmBackingMap::ValidateMappedPages(
+bool VMMBackingMap::ValidateMappedPages(
     const std::vector<MappedPage>& mapped_pages, const char* context) const {
-  std::lock_guard<SpinLock> guard(mu_);
+  std::lock_guard<SpinLock> guard(spinlock_);
   bool ok = true;
   for (const auto& mapped_page : mapped_pages) {
     size_t start = 0;
@@ -741,18 +742,16 @@ bool VmmBackingMap::ValidateMappedPages(
 
     const auto& page = pages_[start];
     if (!page.mapped) {
-      VLOG(0) << "VMM V2 BackingMap mapped page became unmapped in "
-              << context << ": va="
-              << reinterpret_cast<void*>(mapped_page.va)
+      VLOG(0) << "VMM V2 BackingMap mapped page became unmapped in " << context
+              << ": va=" << reinterpret_cast<void*>(mapped_page.va)
               << " snapshot_epoch=" << mapped_page.epoch
               << " current_epoch=" << page.epoch;
       ok = false;
       continue;
     }
     if (page.handle != mapped_page.handle) {
-      VLOG(0) << "VMM V2 BackingMap mapped page handle changed in "
-              << context << ": va="
-              << reinterpret_cast<void*>(mapped_page.va)
+      VLOG(0) << "VMM V2 BackingMap mapped page handle changed in " << context
+              << ": va=" << reinterpret_cast<void*>(mapped_page.va)
               << " snapshot_handle="
               << reinterpret_cast<void*>(mapped_page.handle)
               << " current_handle=" << reinterpret_cast<void*>(page.handle);
@@ -769,9 +768,10 @@ bool VmmBackingMap::ValidateMappedPages(
   return ok;
 }
 
-bool VmmBackingMap::ValidateUnmappedPages(
-    const std::vector<UnmappedPage>& unmapped_pages, const char* context) const {
-  std::lock_guard<SpinLock> guard(mu_);
+bool VMMBackingMap::ValidateUnmappedPages(
+    const std::vector<UnmappedPage>& unmapped_pages,
+    const char* context) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
   bool ok = true;
   for (const auto& unmapped_page : unmapped_pages) {
     size_t start = 0;
@@ -782,9 +782,8 @@ bool VmmBackingMap::ValidateUnmappedPages(
       continue;
     }
     if (count != 1) {
-      VLOG(0) << "VMM V2 BackingMap invalid unmapped page count in "
-              << context << ": va="
-              << reinterpret_cast<void*>(unmapped_page.va)
+      VLOG(0) << "VMM V2 BackingMap invalid unmapped page count in " << context
+              << ": va=" << reinterpret_cast<void*>(unmapped_page.va)
               << " count=" << count;
       ok = false;
       continue;
@@ -792,25 +791,22 @@ bool VmmBackingMap::ValidateUnmappedPages(
 
     const auto& page = pages_[start];
     if (page.mapped) {
-      VLOG(0) << "VMM V2 BackingMap unmapped page became mapped in "
-              << context << ": va="
-              << reinterpret_cast<void*>(unmapped_page.va)
+      VLOG(0) << "VMM V2 BackingMap unmapped page became mapped in " << context
+              << ": va=" << reinterpret_cast<void*>(unmapped_page.va)
               << " snapshot_epoch=" << unmapped_page.epoch
               << " current_epoch=" << page.epoch;
       ok = false;
       continue;
     }
     if (page.handle != 0) {
-      VLOG(0) << "VMM V2 BackingMap unmapped page retains handle in "
-              << context << ": va="
-              << reinterpret_cast<void*>(unmapped_page.va)
+      VLOG(0) << "VMM V2 BackingMap unmapped page retains handle in " << context
+              << ": va=" << reinterpret_cast<void*>(unmapped_page.va)
               << " handle=" << reinterpret_cast<void*>(page.handle);
       ok = false;
     }
     if (page.epoch != unmapped_page.epoch) {
-      VLOG(0) << "VMM V2 BackingMap unmapped page epoch changed in "
-              << context << ": va="
-              << reinterpret_cast<void*>(unmapped_page.va)
+      VLOG(0) << "VMM V2 BackingMap unmapped page epoch changed in " << context
+              << ": va=" << reinterpret_cast<void*>(unmapped_page.va)
               << " snapshot_epoch=" << unmapped_page.epoch
               << " current_epoch=" << page.epoch;
       ok = false;
@@ -819,22 +815,19 @@ bool VmmBackingMap::ValidateUnmappedPages(
   return ok;
 }
 
-std::vector<std::pair<VmmDevicePtr, size_t>>
-VmmBackingMap::CollectRangesLocked(VmmDevicePtr va,
-                                   size_t size,
-                                   bool mapped,
-                                   const char* context) const {
-  std::vector<std::pair<VmmDevicePtr, size_t>> ranges;
+std::vector<std::pair<VMMDevicePtr, size_t>> VMMBackingMap::CollectRangesLocked(
+    VMMDevicePtr va, size_t size, bool mapped, const char* context) const {
+  std::vector<std::pair<VMMDevicePtr, size_t>> ranges;
   AppendRangesLocked(va, size, mapped, context, &ranges);
   return ranges;
 }
 
-void VmmBackingMap::AppendRangesLocked(
-    VmmDevicePtr va,
+void VMMBackingMap::AppendRangesLocked(
+    VMMDevicePtr va,
     size_t size,
     bool mapped,
     const char* context,
-    std::vector<std::pair<VmmDevicePtr, size_t>>* ranges) const {
+    std::vector<std::pair<VMMDevicePtr, size_t>>* ranges) const {
   size_t start = 0;
   size_t count = 0;
   if (!CheckRangeLocked(va, size, context, &start, &count)) {
@@ -842,11 +835,11 @@ void VmmBackingMap::AppendRangesLocked(
   }
 
   bool in_range = false;
-  VmmDevicePtr range_begin = 0;
+  VMMDevicePtr range_begin = 0;
   size_t range_size = 0;
   for (size_t i = 0; i < count; ++i) {
     const bool selected = pages_[start + i].mapped == mapped;
-    const VmmDevicePtr page_va = va + i * page_size_;
+    const VMMDevicePtr page_va = va + i * page_size_;
     if (selected) {
       if (!in_range) {
         in_range = true;
@@ -877,8 +870,8 @@ void VmmBackingMap::AppendRangesLocked(
   }
 }
 
-void VmmBackingMap::AppendMappedPagesLocked(
-    VmmDevicePtr va,
+void VMMBackingMap::AppendMappedPagesLocked(
+    VMMDevicePtr va,
     size_t size,
     const char* context,
     size_t max_pages,
@@ -903,8 +896,8 @@ void VmmBackingMap::AppendMappedPagesLocked(
   }
 }
 
-void VmmBackingMap::AppendMappedPagesFullyCoveredByLocked(
-    VmmDevicePtr va,
+void VMMBackingMap::AppendMappedPagesFullyCoveredByLocked(
+    VMMDevicePtr va,
     size_t size,
     const char* context,
     size_t max_pages,
@@ -926,11 +919,10 @@ void VmmBackingMap::AppendMappedPagesFullyCoveredByLocked(
     return;
   }
 
-  const VmmDevicePtr range_end = va + size;
+  const VMMDevicePtr range_end = va + size;
   const size_t start_offset = va - base_;
   const size_t end_offset = range_end - base_;
-  const size_t first_page =
-      (start_offset + page_size_ - 1) / page_size_;
+  const size_t first_page = (start_offset + page_size_ - 1) / page_size_;
   const size_t end_page = end_offset / page_size_;
   if (first_page >= end_page) {
     return;
@@ -952,17 +944,16 @@ void VmmBackingMap::AppendMappedPagesFullyCoveredByLocked(
                !PageCanUseBackingLocked(&pages_[page_idx], context)) {
       continue;
     }
-    mapped_pages->push_back(MappedPage{
-        base_ + page_idx * page_size_,
-        page.handle,
-        page.meta,
-        page.epoch,
-        remap_source_state});
+    mapped_pages->push_back(MappedPage{base_ + page_idx * page_size_,
+                                       page.handle,
+                                       page.meta,
+                                       page.epoch,
+                                       remap_source_state});
   }
 }
 
-bool VmmBackingMap::CollectIpcPartDescriptorsLocked(
-    VmmDevicePtr va,
+bool VMMBackingMap::CollectIpcPartDescriptorsLocked(
+    VMMDevicePtr va,
     size_t size,
     std::vector<IpcBlockPartDescriptor>* descriptors) const {
   size_t start = 0;
@@ -988,9 +979,9 @@ bool VmmBackingMap::CollectIpcPartDescriptorsLocked(
       return false;
     }
     if (descriptors != nullptr) {
-      const VmmDevicePtr page_va = base_ + (start + i) * page_size_;
-      const VmmDevicePtr slice_begin = std::max(va, page_va);
-      const VmmDevicePtr slice_end = std::min(va + size, page_va + page_size_);
+      const VMMDevicePtr page_va = base_ + (start + i) * page_size_;
+      const VMMDevicePtr slice_begin = std::max(va, page_va);
+      const VMMDevicePtr slice_end = std::min(va + size, page_va + page_size_);
       descriptors->push_back(IpcBlockPartDescriptor{
           page.meta->Base(),
           page.meta->Size(),
@@ -1004,8 +995,8 @@ bool VmmBackingMap::CollectIpcPartDescriptorsLocked(
   return true;
 }
 
-void VmmBackingMap::AppendUnmappedPagesFullyCoveredByLocked(
-    VmmDevicePtr va,
+void VMMBackingMap::AppendUnmappedPagesFullyCoveredByLocked(
+    VMMDevicePtr va,
     size_t size,
     const char* context,
     size_t max_pages,
@@ -1025,7 +1016,7 @@ void VmmBackingMap::AppendUnmappedPagesFullyCoveredByLocked(
     return;
   }
 
-  const VmmDevicePtr range_end = va + size;
+  const VMMDevicePtr range_end = va + size;
   const size_t start_offset = va - base_;
   const size_t end_offset = range_end - base_;
   const size_t first_page = (start_offset + page_size_ - 1) / page_size_;
@@ -1048,7 +1039,7 @@ void VmmBackingMap::AppendUnmappedPagesFullyCoveredByLocked(
 }
 
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-bool VmmBackingMap::PageEventsReadyLocked(Page* page,
+bool VMMBackingMap::PageEventsReadyLocked(Page* page,
                                           const char* context) const {
   for (auto it = page->pending_events.begin();
        it != page->pending_events.end();) {
@@ -1077,15 +1068,14 @@ bool VmmBackingMap::PageEventsReadyLocked(Page* page,
       it = page->pending_events.erase(it);
       continue;
     }
-    VLOG(6) << "VMM V2 BackingMap page blocked by pending event in "
-            << context;
+    VLOG(6) << "VMM V2 BackingMap page blocked by pending event in " << context;
     return false;
   }
   return true;
 }
 #endif
 
-bool VmmBackingMap::PageCanUseBackingLocked(Page* page,
+bool VMMBackingMap::PageCanUseBackingLocked(Page* page,
                                             const char* context) const {
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
   return PageEventsReadyLocked(page, context);
@@ -1096,9 +1086,8 @@ bool VmmBackingMap::PageCanUseBackingLocked(Page* page,
 #endif
 }
 
-VmmBackingMap::RemapSourceState VmmBackingMap::GetRemapSourceStateLocked(
-    Page* page,
-    const char* context) const {
+VMMBackingMap::RemapSourceState VMMBackingMap::GetRemapSourceStateLocked(
+    Page* page, const char* context) const {
   if (page == nullptr || page->meta == nullptr) {
     return RemapSourceState::kPartialOrInvalid;
   }
@@ -1110,8 +1099,8 @@ VmmBackingMap::RemapSourceState VmmBackingMap::GetRemapSourceStateLocked(
              : RemapSourceState::kPendingEvent;
 }
 
-size_t VmmBackingMap::TotalMappedBytes() const {
-  std::lock_guard<SpinLock> guard(mu_);
+size_t VMMBackingMap::TotalMappedBytes() const {
+  std::lock_guard<SpinLock> guard(spinlock_);
   return mapped_page_count_ * page_size_;
 }
 

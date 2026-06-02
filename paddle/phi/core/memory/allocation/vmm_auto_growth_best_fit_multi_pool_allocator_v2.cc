@@ -122,7 +122,7 @@ bool VMMAutoGrowthBestFitMultiPoolAllocatorV2::SetBlockRemapEvent(
     void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
     gpuStream_t stream,
-    std::shared_ptr<CudaEventGuard> event
+    std::shared_ptr<CUDAEventGuard> event
 #else
     void* stream,
     void* event
@@ -151,7 +151,8 @@ uint64_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::ReleaseImpl(
 
 VMMAutoGrowthBestFitMultiPoolAllocatorV2::AllocationRoute
 VMMAutoGrowthBestFitMultiPoolAllocatorV2::RouteAllocation(size_t size) const {
-  if (size < small_allocation_threshold_) {
+  const size_t routed_size = AlignedSize(size, small_allocator_->Alignment());
+  if (routed_size < small_allocation_threshold_) {
     return {PoolType::kSmall, small_allocator_.get()};
   }
   return {PoolType::kLarge, large_allocator_.get()};

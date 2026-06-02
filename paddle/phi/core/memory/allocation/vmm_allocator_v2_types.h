@@ -17,18 +17,15 @@
 #include <algorithm>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
 
 #if defined(PADDLE_WITH_CUDA)
 #include "paddle/phi/backends/dynload/cuda_driver.h"
-using VmmDevicePtr = CUdeviceptr;
-using VmmAllocHandle = CUmemGenericAllocationHandle;
-#else
-using VmmDevicePtr = uintptr_t;
-using VmmAllocHandle = uint64_t;
 #endif
+#include "paddle/phi/core/enforce.h"
 
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
 #include "paddle/phi/core/platform/device/gpu/gpu_types.h"
@@ -38,6 +35,14 @@ namespace paddle {
 namespace memory {
 namespace allocation {
 
+#if defined(PADDLE_WITH_CUDA)
+using VMMDevicePtr = CUdeviceptr;
+using VMMAllocHandle = CUmemGenericAllocationHandle;
+#else
+using VMMDevicePtr = uintptr_t;
+using VMMAllocHandle = uint64_t;
+#endif
+
 // RAII wrapper around gpuEvent_t so that multiple blocks can share
 // ownership of the same event via shared_ptr.  The event is only
 // destroyed when the last reference is dropped, preventing the
@@ -45,11 +50,11 @@ namespace allocation {
 // were shallow-copied across split blocks and then independently
 // destroyed during merge.
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-struct CudaEventGuard {
+struct CUDAEventGuard {
   gpuEvent_t event{nullptr};
 
-  explicit CudaEventGuard(gpuEvent_t e) : event(e) {}
-  ~CudaEventGuard() {
+  explicit CUDAEventGuard(gpuEvent_t e) : event(e) {}
+  ~CUDAEventGuard() {
     if (event != nullptr) {
 #ifdef PADDLE_WITH_CUDA
       cudaEventDestroy(event);
@@ -59,9 +64,9 @@ struct CudaEventGuard {
     }
   }
 
-  // Non-copyable — ownership is shared via shared_ptr.
-  CudaEventGuard(const CudaEventGuard&) = delete;
-  CudaEventGuard& operator=(const CudaEventGuard&) = delete;
+  // Non-copyable: ownership is shared via shared_ptr.
+  CUDAEventGuard(const CUDAEventGuard&) = delete;
+  CUDAEventGuard& operator=(const CUDAEventGuard&) = delete;
 };
 #endif
 
@@ -75,51 +80,44 @@ enum class PoolType : uint8_t {
 // Fixed-size handle metadata returned by the bottom VMM provider. Upper layers
 // may later reference these handles from block-level views, remap metadata, or
 // IPC export state.
-struct VmmHandleMeta {
-  VmmHandleMeta() = default;
+struct VMMHandleMeta {
+  VMMHandleMeta() = default;
 
-  VmmHandleMeta(VmmDevicePtr base,
+  VMMHandleMeta(VMMDevicePtr base,
                 size_t size,
-                VmmAllocHandle handle,
+                VMMAllocHandle handle,
                 int device)
       : base_(base), size_(size), handle_(handle), device_(device) {}
 
-  VmmDevicePtr Base() const { return base_; }
+  VMMDevicePtr Base() const { return base_; }
   size_t Size() const { return size_; }
-  VmmAllocHandle AllocationHandle() const { return handle_; }
+  VMMAllocHandle AllocationHandle() const { return handle_; }
   int Device() const { return device_; }
 
-  bool IsOwnedByRemapDestination() const {
-    return owned_by_remap_destination_;
-  }
-  void MarkOwnedByRemapDestination() {
-    owned_by_remap_destination_ = true;
-  }
-  void RestoreOriginalOwnership() {
-    owned_by_remap_destination_ = false;
-  }
+  bool IsOwnedByRemapDestination() const { return owned_by_remap_destination_; }
+  void MarkOwnedByRemapDestination() { owned_by_remap_destination_ = true; }
+  void RestoreOriginalOwnership() { owned_by_remap_destination_ = false; }
 
  private:
-  VmmDevicePtr base_{0};
+  VMMDevicePtr base_{0};
   size_t size_{0};
-  VmmAllocHandle handle_{0};
+  VMMAllocHandle handle_{0};
   int device_{0};
   // Set while a handle's lifetime has moved from the original free block to a
   // synthetic destination block created by remap compaction. FreeImpl must skip
   // the original owner because the destination allocation now releases it.
   bool owned_by_remap_destination_{false};
-
 };
 
 // HandleLayout is a lightweight allocation-level handle list returned by the
 // bottom VMM provider. It is only used to bootstrap upper-layer block state or
 // answer allocation-level IPC/export queries.
-using HandleLayout = std::vector<std::shared_ptr<VmmHandleMeta>>;
+using HandleLayout = std::vector<std::shared_ptr<VMMHandleMeta>>;
 
 struct IpcBlockPartDescriptor {
-  VmmDevicePtr handle_base;
+  VMMDevicePtr handle_base;
   size_t handle_size;
-  VmmAllocHandle handle;
+  VMMAllocHandle handle;
   int device;
   size_t handle_rel_off;
   size_t len;
@@ -133,19 +131,21 @@ struct IpcBlockPartDescriptor {
 struct BlockPartV2 {
   BlockPartV2() = default;
 
-  BlockPartV2(std::shared_ptr<VmmHandleMeta> handle,
+  BlockPartV2(std::shared_ptr<VMMHandleMeta> handle,
               size_t handle_rel_off,
               size_t len)
-      : handle_(std::move(handle)), handle_rel_off_(handle_rel_off), len_(len) {}
+      : handle_(std::move(handle)),
+        handle_rel_off_(handle_rel_off),
+        len_(len) {}
 
   bool HasHandle() const { return handle_ != nullptr; }
-  const std::shared_ptr<VmmHandleMeta>& HandleMeta() const { return handle_; }
-  VmmDevicePtr HandleBase() const { return handle_->Base(); }
-  VmmDevicePtr SliceBase() const { return HandleBase() + handle_rel_off_; }
+  const std::shared_ptr<VMMHandleMeta>& HandleMeta() const { return handle_; }
+  VMMDevicePtr HandleBase() const { return handle_->Base(); }
+  VMMDevicePtr SliceBase() const { return HandleBase() + handle_rel_off_; }
   size_t HandleSize() const { return handle_->Size(); }
   size_t HandleRelOffset() const { return handle_rel_off_; }
   size_t ByteSize() const { return len_; }
-  VmmAllocHandle AllocationHandle() const {
+  VMMAllocHandle AllocationHandle() const {
     return handle_->AllocationHandle();
   }
   int Device() const { return handle_->Device(); }
@@ -177,7 +177,7 @@ struct BlockPartV2 {
   }
 
  private:
-  std::shared_ptr<VmmHandleMeta> handle_;
+  std::shared_ptr<VMMHandleMeta> handle_;
   size_t handle_rel_off_{0};
   size_t len_{0};
 };
@@ -203,9 +203,40 @@ inline std::vector<BlockPartV2> SliceBlockPartsForRange(
     return sliced_parts;
   }
 
+  PADDLE_ENFORCE_LE(
+      range_offset,
+      std::numeric_limits<size_t>::max() - range_len,
+      common::errors::InvalidArgument(
+          "Invalid VMM V2 block-part slice range: offset %zu plus length %zu "
+          "overflows.",
+          range_offset,
+          range_len));
+
+  if (parts.size() == 1) {
+    const auto& part = parts.front();
+    PADDLE_ENFORCE_LE(
+        range_offset,
+        part.ByteSize(),
+        common::errors::InvalidArgument(
+            "Invalid VMM V2 block-part slice offset %zu for part length %zu.",
+            range_offset,
+            part.ByteSize()));
+    PADDLE_ENFORCE_LE(
+        range_len,
+        part.ByteSize() - range_offset,
+        common::errors::InvalidArgument(
+            "Invalid VMM V2 block-part slice length %zu at offset %zu for "
+            "part length %zu.",
+            range_len,
+            range_offset,
+            part.ByteSize()));
+    return {part.Slice(range_offset, range_len)};
+  }
+
   sliced_parts.reserve(parts.size());
   const size_t range_end = range_offset + range_len;
   size_t cursor = 0;
+  size_t sliced_len = 0;
 
   for (const auto& part : parts) {
     const size_t part_block_begin = cursor;
@@ -223,11 +254,23 @@ inline std::vector<BlockPartV2> SliceBlockPartsForRange(
     const size_t slice_end = std::min(part_block_end, range_end);
     auto slice =
         part.Slice(slice_begin - part_block_begin, slice_end - slice_begin);
+    const size_t slice_len = slice.ByteSize();
 
     if (sliced_parts.empty() || !sliced_parts.back().TryExtend(slice)) {
       sliced_parts.push_back(std::move(slice));
     }
+    sliced_len += slice_len;
   }
+  PADDLE_ENFORCE_EQ(
+      sliced_len,
+      range_len,
+      common::errors::InvalidArgument(
+          "Invalid VMM V2 block-part slice range: requested %zu bytes at "
+          "offset %zu, but only sliced %zu bytes from %zu parts.",
+          range_len,
+          range_offset,
+          sliced_len,
+          parts.size()));
   return sliced_parts;
 }
 
@@ -267,23 +310,17 @@ struct BlockV2 {
                                  size_t parts_len,
                                  PoolType pool_type) {
     BlockV2 block;
-    block.ResetAsMappedBlock(type,
-                             ptr,
-                             size,
-                             parts,
-                             parts_offset,
-                             parts_len,
-                             pool_type);
+    block.ResetAsMappedBlock(
+        type, ptr, size, parts, parts_offset, parts_len, pool_type);
     return block;
   }
 
-  static BlockV2 MakeMappedActiveBlock(
-      void* ptr,
-      size_t size,
-      const std::vector<BlockPartV2>& parts,
-      size_t parts_offset,
-      size_t parts_len,
-      PoolType pool_type) {
+  static BlockV2 MakeMappedActiveBlock(void* ptr,
+                                       size_t size,
+                                       const std::vector<BlockPartV2>& parts,
+                                       size_t parts_offset,
+                                       size_t parts_len,
+                                       PoolType pool_type) {
     return MakeMappedBlock(BlockType::kActive,
                            ptr,
                            size,
@@ -293,20 +330,14 @@ struct BlockV2 {
                            pool_type);
   }
 
-  static BlockV2 MakeMappedFreeBlock(
-      void* ptr,
-      size_t size,
-      const std::vector<BlockPartV2>& parts,
-      size_t parts_offset,
-      size_t parts_len,
-      PoolType pool_type) {
-    return MakeMappedBlock(BlockType::kFree,
-                           ptr,
-                           size,
-                           parts,
-                           parts_offset,
-                           parts_len,
-                           pool_type);
+  static BlockV2 MakeMappedFreeBlock(void* ptr,
+                                     size_t size,
+                                     const std::vector<BlockPartV2>& parts,
+                                     size_t parts_offset,
+                                     size_t parts_len,
+                                     PoolType pool_type) {
+    return MakeMappedBlock(
+        BlockType::kFree, ptr, size, parts, parts_offset, parts_len, pool_type);
   }
 
   static BlockV2 MakeMappedFreeBlock(void* ptr,
@@ -338,11 +369,10 @@ struct BlockV2 {
   static BlockV2 MakeSinglePartMappedFreeBlock(
       void* ptr,
       size_t size,
-      std::shared_ptr<VmmHandleMeta> meta,
+      std::shared_ptr<VMMHandleMeta> meta,
       PoolType pool_type) {
     BlockV2 block;
-    block.ResetAsSinglePartMappedFree(
-        ptr, size, std::move(meta), pool_type);
+    block.ResetAsSinglePartMappedFree(ptr, size, std::move(meta), pool_type);
     return block;
   }
 
@@ -388,14 +418,12 @@ struct BlockV2 {
   PoolType Pool() const { return pool_type_; }
   uint8_t* BeginPtr() const { return reinterpret_cast<uint8_t*>(ptr_); }
   uint8_t* EndPtr() const { return BeginPtr() + size_; }
-  VmmDevicePtr BeginVA() const {
-    return reinterpret_cast<VmmDevicePtr>(BeginPtr());
+  VMMDevicePtr BeginVA() const {
+    return reinterpret_cast<VMMDevicePtr>(BeginPtr());
   }
-  VmmDevicePtr EndVA() const { return BeginVA() + size_; }
-  std::pair<VmmDevicePtr, size_t> VARange() const {
-    return {BeginVA(), size_};
-  }
-  bool ContainsVARange(VmmDevicePtr va, size_t size) const {
+  VMMDevicePtr EndVA() const { return BeginVA() + size_; }
+  std::pair<VMMDevicePtr, size_t> VARange() const { return {BeginVA(), size_}; }
+  bool ContainsVARange(VMMDevicePtr va, size_t size) const {
     return va >= BeginVA() && va <= EndVA() && size <= EndVA() - va;
   }
   bool IsAdjacentBefore(const BlockV2& next) const {
@@ -419,9 +447,9 @@ struct BlockV2 {
     return MakeUnmappedFreeBlock(BeginPtr() + offset, len, pool_type_);
   }
   BlockRestoreMappedFreeResult BuildRestoreMappedFreeSegments(
-      VmmDevicePtr va,
+      VMMDevicePtr va,
       size_t size,
-      const std::shared_ptr<VmmHandleMeta>& meta,
+      const std::shared_ptr<VMMHandleMeta>& meta,
       std::vector<BlockV2>* segments) const {
     if (!IsUnmappedFree() || va < BeginVA() || va >= EndVA()) {
       return BlockRestoreMappedFreeResult::kOutside;
@@ -447,10 +475,7 @@ struct BlockV2 {
   void MarkFree() { type_ = BlockType::kFree; }
   void MarkMappedFree() { MarkFree(); }
   void MarkUnmappedFree() { type_ = BlockType::kUnmappedFree; }
-  void Reset(void* ptr,
-             size_t size,
-             BlockType type,
-             PoolType pool_type) {
+  void Reset(void* ptr, size_t size, BlockType type, PoolType pool_type) {
     ptr_ = ptr;
     size_ = size;
     type_ = type;
@@ -478,7 +503,7 @@ struct BlockV2 {
            parts_.front().HandleRelOffset() == handle_rel_off &&
            parts_.front().ByteSize() == len;
   }
-  const std::shared_ptr<VmmHandleMeta>& FirstAllocationPartHandleMeta() const {
+  const std::shared_ptr<VMMHandleMeta>& FirstAllocationPartHandleMeta() const {
     return parts_.front().HandleMeta();
   }
   size_t AllocationPartHandleRelOffset(size_t index) const {
@@ -524,7 +549,7 @@ struct BlockV2 {
   }
   void ResetAsSinglePartMappedFree(void* ptr,
                                    size_t size,
-                                   std::shared_ptr<VmmHandleMeta> meta,
+                                   std::shared_ptr<VMMHandleMeta> meta,
                                    PoolType pool_type) {
     Reset(ptr, size, BlockType::kFree, pool_type);
     SetSinglePart(std::move(meta), size);
@@ -545,7 +570,7 @@ struct BlockV2 {
   void TrimPartsToRange(size_t offset, size_t len) {
     parts_ = SliceBlockPartsForRange(parts_, offset, len);
   }
-  void SetSinglePart(std::shared_ptr<VmmHandleMeta> meta, size_t len) {
+  void SetSinglePart(std::shared_ptr<VMMHandleMeta> meta, size_t len) {
     parts_.clear();
     parts_.push_back(BlockPartV2{std::move(meta), 0, len});
   }

@@ -26,7 +26,7 @@ namespace allocation {
 
 size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
                                         size_t requested_size) {
-  const size_t handle_size = vmm_allocator_->handle_size();
+  const size_t handle_size = vmm_allocator_->HandleSize();
   RemapTransaction transaction(vmm_allocator_.get(),
                                handle_size,
                                commit_synthetic_allocation_,
@@ -61,8 +61,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
       VLOG(4) << "VMM V2 compactor BackingMap pre-scan pool="
               << static_cast<int>(pool_type_)
               << " free_ranges=" << prescan.free_range_count
-              << " unmapped_free_ranges="
-              << prescan.unmapped_free_range_count
+              << " unmapped_free_ranges=" << prescan.unmapped_free_range_count
               << " mapped_pages=" << prescan.mapped_page_count
               << " mapped_bytes=" << prescan.mapped_page_count * handle_size
               << " target_unmapped_pages=" << prescan.target_page_count
@@ -91,7 +90,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
             << " remapped_blocked_bytes=" << stats.remapped_blocked_bytes
             << " backing_blocked=" << stats.backing_blocked_count
             << " backing_blocked_bytes=" << stats.backing_blocked_bytes;
-    LOG(INFO) << "VMM V2 compact summary: entering Compact; Phase 1 done"
+    LOG(INFO) << "VMM V2 compact summary: phase1 done"
               << " pool=" << static_cast<int>(pool_type_)
               << " requested=" << requested_size
               << " success=" << compact_result.success
@@ -99,8 +98,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
               << " remapped_bytes=" << compact_result.remapped_bytes
               << " used_tail=" << compact_result.used_tail
               << " source_collect_us=" << compact_result.source_collect_us
-              << " destination_plan_us="
-              << compact_result.destination_plan_us
+              << " destination_plan_us=" << compact_result.destination_plan_us
               << " move_commit_us=" << compact_result.move_commit_us
               << " free_blocks=" << stats.free_block_count
               << " safe_blocks=" << stats.safe_block_count
@@ -128,8 +126,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
     }
     return compact_result.remapped_bytes;
   } catch (const std::exception& e) {
-    VLOG(0) << "VMM V2 compactor: exception caught during Compact: "
-            << e.what() << "; rolling back transaction";
+    VLOG(0) << "VMM V2 compactor: exception caught during Compact: " << e.what()
+            << "; rolling back transaction";
     transaction.Rollback();
     return 0;
   } catch (...) {

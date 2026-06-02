@@ -35,7 +35,7 @@ namespace paddle::memory::allocation {
 
 namespace {
 
-VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVmmV2MultiPoolAllocator(
+VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVMMV2MultiPoolAllocator(
     const std::shared_ptr<Allocator>& allocator) {
   if (allocator == nullptr) {
     return nullptr;
@@ -45,17 +45,17 @@ VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVmmV2MultiPoolAllocator(
     return vmm;
   }
   if (auto* retry = dynamic_cast<RetryAllocator*>(allocator.get())) {
-    return GetVmmV2MultiPoolAllocator(retry->GetUnderLyingAllocator());
+    return GetVMMV2MultiPoolAllocator(retry->GetUnderLyingAllocator());
   }
   if (auto* stat = dynamic_cast<StatAllocator*>(allocator.get())) {
-    return GetVmmV2MultiPoolAllocator(stat->GetUnderLyingAllocator());
+    return GetVMMV2MultiPoolAllocator(stat->GetUnderLyingAllocator());
   }
   return nullptr;
 }
 
-void TrySetVmmV2RemapEvent(StreamSafeCUDAAllocator* allocator,
+void TrySetVMMV2RemapEvent(StreamSafeCUDAAllocator* allocator,
                            StreamSafeCUDAAllocation* allocation) {
-  auto* vmm = GetVmmV2MultiPoolAllocator(allocator->GetUnderLyingAllocator());
+  auto* vmm = GetVMMV2MultiPoolAllocator(allocator->GetUnderLyingAllocator());
   if (vmm == nullptr) {
     return;
   }
@@ -72,11 +72,11 @@ void TrySetVmmV2RemapEvent(StreamSafeCUDAAllocator* allocator,
   PADDLE_ENFORCE_GPU_SUCCESS(
       hipEventRecord(event, allocation->GetOwningStream()));
 #endif
-  auto guard = std::make_shared<CudaEventGuard>(event);
+  auto guard = std::make_shared<CUDAEventGuard>(event);
   if (!vmm->SetBlockRemapEvent(
           allocation->ptr(), allocation->GetOwningStream(), std::move(guard))) {
     // SetBlockRemapEvent failed (block not found); the shared_ptr destructor
-    // will call cudaEventDestroy automatically — no manual cleanup needed.
+    // will call cudaEventDestroy automatically; no manual cleanup needed.
   }
 }
 
@@ -281,11 +281,11 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
       // coordinated by RetryAllocator when it is enabled.
       //
       // During training, NEVER release physical memory in this base OOM path.
-      auto* vmm = GetVmmV2MultiPoolAllocator(underlying_allocator_);
+      auto* vmm = GetVMMV2MultiPoolAllocator(underlying_allocator_);
       if (vmm && FLAGS_vmm_v2_remap_on_oom) {
         size_t compacted = CompactImpl(place_, size);
-        VLOG(3) << "OOM dispatch: requested=" << size
-                << " compact returned " << compacted << " bytes";
+        VLOG(3) << "OOM dispatch: requested=" << size << " compact returned "
+                << compacted << " bytes";
         if (compacted > 0) {
           VLOG(3) << "OOM retry: compact returned " << compacted << " bytes";
           try {
@@ -327,7 +327,7 @@ void StreamSafeCUDAAllocator::FreeImpl(phi::Allocation* allocation) {
       static_cast<StreamSafeCUDAAllocation*>(allocation);
 
   VLOG(8) << "Try free allocation " << stream_safe_cuda_allocation->ptr();
-  TrySetVmmV2RemapEvent(this, stream_safe_cuda_allocation);
+  TrySetVMMV2RemapEvent(this, stream_safe_cuda_allocation);
   if (stream_safe_cuda_allocation->CanBeFreed()) {
     VLOG(9) << "Directly delete allocation";
     delete stream_safe_cuda_allocation;

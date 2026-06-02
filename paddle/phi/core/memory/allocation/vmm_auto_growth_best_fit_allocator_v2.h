@@ -50,19 +50,21 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
 
   const BlockList& all_blocks() const { return all_blocks_; }
   BlockList SnapshotAllBlocks() const;
-  PoolType pool_type() const { return pool_type_; }
-  size_t alignment() const { return alignment_; }
+  PoolType GetPoolType() const { return pool_type_; }
+  size_t Alignment() const { return alignment_; }
 
   // Query aggregate free-block statistics for OOM dispatch decisions.
   // total_free = sum of all FREE block sizes, max_free = largest FREE block.
   void GetFreeBlockStats(size_t* total_free, size_t* max_free);
 
-  bool CollectTensorParts(void* ptr, std::vector<BlockPart>* parts);
+  bool CollectTensorParts(void* ptr,
+                          size_t size,
+                          std::vector<BlockPart>* parts);
 
   bool SetBlockRemapEvent(void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
                           gpuStream_t stream,
-                          std::shared_ptr<CudaEventGuard> event
+                          std::shared_ptr<CUDAEventGuard> event
 #else
                           void* stream,
                           void* event
@@ -79,8 +81,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   struct UnderlyingAllocationRegistry {
     using List = std::list<DecoratedAllocationPtr>;
     using iterator = List::iterator;
-    using OverlapPredicate =
-        std::function<bool(const DecoratedAllocationPtr&)>;
+    using OverlapPredicate = std::function<bool(const DecoratedAllocationPtr&)>;
 
     void Add(DecoratedAllocationPtr allocation);
     bool Overlaps(void* ptr, size_t size) const;
@@ -121,8 +122,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   bool RangeOverlapsUnderlyingAllocation(void* ptr, size_t size) const;
   bool CanReleaseIdleUnderlyingAllocation(uint8_t* base, size_t size) const;
   bool TryReleaseIdleUnderlyingAllocation(
-      UnderlyingAllocationRegistry::iterator* alloc_it,
-      uint64_t* released);
+      UnderlyingAllocationRegistry::iterator* alloc_it, uint64_t* released);
   bool CanIndexFreeBlock(const BlockV2& block) const;
   void InsertFreeBlock(BlockListIt it);
   void EraseFreeBlock(BlockListIt it);

@@ -163,7 +163,7 @@ void VMMV2PoolStatsVisitor::Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) {
         break;
     }
   }
-  pool_stats_.emplace_back(static_cast<int>(allocator->pool_type()),
+  pool_stats_.emplace_back(static_cast<int>(allocator->GetPoolType()),
                            active_count,
                            active_bytes,
                            free_count,
@@ -182,13 +182,13 @@ void VMMV2PoolStatsVisitor::Visit(
   }
 }
 
-void VmmTensorPartsVisitor::Visit(
+void VMMTensorPartsVisitor::Visit(
     VirtualMemoryAutoGrowthBestFitAllocator* allocator) {
   if (found_) {
     return;
   }
   std::vector<BlockPart> parts;
-  if (allocator->CollectTensorParts(target_ptr_, &parts)) {
+  if (allocator->CollectTensorParts(target_ptr_, target_size_, &parts)) {
     found_ = true;
     parts_ = std::move(parts);
     return;
@@ -196,12 +196,12 @@ void VmmTensorPartsVisitor::Visit(
   allocator->GetUnderLyingAllocator()->Accept(this);
 }
 
-void VmmTensorPartsVisitor::Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) {
+void VMMTensorPartsVisitor::Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) {
   if (found_) {
     return;
   }
   std::vector<BlockPart> parts;
-  if (allocator->CollectTensorParts(target_ptr_, &parts)) {
+  if (allocator->CollectTensorParts(target_ptr_, target_size_, &parts)) {
     found_ = true;
     parts_ = std::move(parts);
   }
