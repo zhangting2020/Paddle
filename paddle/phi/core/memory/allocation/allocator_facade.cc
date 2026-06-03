@@ -106,6 +106,12 @@ PHI_DEFINE_EXPORTED_bool(
     false,
     "When true, VMM V2 compact remaps ALL releasable handles instead of "
     "stopping once requested_size is satisfied (bounded compact).");
+PHI_DEFINE_EXPORTED_uint64(vmm_v2_small_pool_handle_size_in_mb,
+                           2,
+                           "VMM V2 small-pool physical handle size in MiB.");
+PHI_DEFINE_EXPORTED_uint64(vmm_v2_large_pool_handle_size_in_mb,
+                           2,
+                           "VMM V2 large-pool physical handle size in MiB.");
 
 // NOTE(Ruibiao): This FLAGS is just to be compatible with
 // the old single-stream CUDA allocator. It will be removed
@@ -130,6 +136,8 @@ COMMON_DECLARE_string(allocator_strategy);
 COMMON_DECLARE_uint64(auto_growth_chunk_size_in_mb);
 COMMON_DECLARE_uint64(alignment_size);
 COMMON_DECLARE_uint64(vmm_small_pool_size_in_mb);
+COMMON_DECLARE_uint64(vmm_v2_small_pool_handle_size_in_mb);
+COMMON_DECLARE_uint64(vmm_v2_large_pool_handle_size_in_mb);
 COMMON_DECLARE_uint64(small_pool_size_in_mb);
 COMMON_DECLARE_bool(use_auto_growth_pinned_allocator);
 COMMON_DECLARE_bool(use_cuda_malloc_async_allocator);
@@ -138,8 +146,7 @@ COMMON_DECLARE_bool(auto_free_cudagraph_allocations_on_launch);
 namespace paddle::memory::allocation {
 namespace {
 
-constexpr size_t kVMMV2SmallHandleSize = 2UL << 20;
-constexpr size_t kVMMV2LargeHandleSize = 64UL << 20;
+constexpr size_t kVMMV2DefaultHandleSize = 2UL << 20;
 
 }  // namespace
 
@@ -1028,13 +1035,29 @@ class AllocatorFacadePrivate {
   }
 
   std::shared_ptr<Allocator> CreateVMMAutoGrowthBestFitAllocatorV2(GPUPlace p) {
+    PADDLE_ENFORCE_GT(
+        FLAGS_vmm_v2_small_pool_handle_size_in_mb,
+        0,
+        common::errors::InvalidArgument(
+            "FLAGS_vmm_v2_small_pool_handle_size_in_mb must be greater than "
+            "0."));
+    PADDLE_ENFORCE_GT(
+        FLAGS_vmm_v2_large_pool_handle_size_in_mb,
+        0,
+        common::errors::InvalidArgument(
+            "FLAGS_vmm_v2_large_pool_handle_size_in_mb must be greater than "
+            "0."));
+    const size_t small_handle_size = FLAGS_vmm_v2_small_pool_handle_size_in_mb
+                                     << 20;
+    const size_t large_handle_size = FLAGS_vmm_v2_large_pool_handle_size_in_mb
+                                     << 20;
     const size_t small_threshold = FLAGS_vmm_small_pool_size_in_mb
                                        ? (FLAGS_vmm_small_pool_size_in_mb << 20)
-                                       : kVMMV2SmallHandleSize;
+                                       : kVMMV2DefaultHandleSize;
     auto transient_small_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(
-        p, kVMMV2SmallHandleSize, PoolType::kSmall);
+        p, small_handle_size, PoolType::kSmall);
     auto transient_large_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(
-        p, kVMMV2LargeHandleSize, PoolType::kLarge);
+        p, large_handle_size, PoolType::kLarge);
     return std::make_shared<VMMAutoGrowthBestFitMultiPoolAllocatorV2>(
         transient_small_allocator,
         transient_large_allocator,

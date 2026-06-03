@@ -254,7 +254,8 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
   AllocationPtr underlying_allocation;
   try {
     underlying_allocation = underlying_allocator_->Allocate(size);
-  } catch (BadAlloc&) {
+  } catch (const BadAlloc& first_bad_alloc) {
+    const std::string first_failure = first_bad_alloc.what();
     VLOG(4) << "Allocation failed when allocating " << size << " bytes";
     // Base OOM path for all configurations (including retry_time == 0):
     // Step 1 reclaims cross-stream pending frees before retrying.
@@ -266,7 +267,8 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
     }
     try {
       underlying_allocation = underlying_allocator_->Allocate(size);
-    } catch (BadAlloc&) {
+    } catch (const BadAlloc& second_bad_alloc) {
+      const std::string second_failure = second_bad_alloc.what();
       // Step 2 handles allocator-internal fragmentation only.
       // CompactImpl performs all VMM V2 pre-checks internally:
       //   - total_free / max_free coarse filtering
@@ -286,22 +288,37 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
           VLOG(3) << "OOM retry: compact returned " << compacted << " bytes";
           try {
             underlying_allocation = underlying_allocator_->Allocate(size);
-          } catch (BadAlloc&) {
+          } catch (const BadAlloc& final_bad_alloc) {
             PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
                 "Allocation of %zu bytes failed after compact "
-                "(remap defrag, %zu bytes compacted).",
+                "(remap defrag, %zu bytes compacted).\n"
+                "Initial allocation failure:\n%s\n"
+                "Retry allocation failure before compact:\n%s\n"
+                "Retry allocation failure after compact:\n%s",
                 size,
-                compacted));
+                compacted,
+                first_failure.c_str(),
+                second_failure.c_str(),
+                final_bad_alloc.what()));
           }
         } else {
           PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
               "Allocation of %zu bytes failed after VMM V2 compact pre-check "
-              "found no useful remap work.",
-              size));
+              "found no useful remap work.\n"
+              "Initial allocation failure:\n%s\n"
+              "Retry allocation failure before compact:\n%s",
+              size,
+              first_failure.c_str(),
+              second_failure.c_str()));
         }
       } else {
         PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
-            "Allocation of %zu bytes failed.", size));
+            "Allocation of %zu bytes failed.\n"
+            "Initial allocation failure:\n%s\n"
+            "Retry allocation failure:\n%s",
+            size,
+            first_failure.c_str(),
+            second_failure.c_str()));
       }
     }
   }
