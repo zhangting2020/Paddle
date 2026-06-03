@@ -138,7 +138,8 @@ COMMON_DECLARE_bool(auto_free_cudagraph_allocations_on_launch);
 namespace paddle::memory::allocation {
 namespace {
 
-constexpr size_t kVMMV2TransientHandleSize = 2UL << 20;
+constexpr size_t kVMMV2SmallHandleSize = 2UL << 20;
+constexpr size_t kVMMV2LargeHandleSize = 64UL << 20;
 
 }  // namespace
 
@@ -1029,11 +1030,11 @@ class AllocatorFacadePrivate {
   std::shared_ptr<Allocator> CreateVMMAutoGrowthBestFitAllocatorV2(GPUPlace p) {
     const size_t small_threshold = FLAGS_vmm_small_pool_size_in_mb
                                        ? (FLAGS_vmm_small_pool_size_in_mb << 20)
-                                       : kVMMV2TransientHandleSize;
+                                       : kVMMV2SmallHandleSize;
     auto transient_small_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(
-        p, kVMMV2TransientHandleSize, PoolType::kSmall);
+        p, kVMMV2SmallHandleSize, PoolType::kSmall);
     auto transient_large_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(
-        p, kVMMV2TransientHandleSize, PoolType::kLarge);
+        p, kVMMV2LargeHandleSize, PoolType::kLarge);
     return std::make_shared<VMMAutoGrowthBestFitMultiPoolAllocatorV2>(
         transient_small_allocator,
         transient_large_allocator,
