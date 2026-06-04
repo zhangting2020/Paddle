@@ -308,18 +308,33 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
     tail_free = all_blocks_.back().size_;
   }
 
+  size_t compact_target = requested_size;
   if (requested_size > 0) {
-    if (total_free < requested_size) {
-      VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
-              << " compact skip: total_free=" << total_free
-              << " < requested=" << requested_size;
-      return 0;
-    }
     if (max_free >= requested_size) {
       VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
               << " compact skip: max_free=" << max_free
               << " >= requested=" << requested_size;
       return 0;
+    }
+
+    if (total_free < requested_size) {
+      if (total_free <= tail_free) {
+        VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+                << " compact skip: total_free=" << total_free
+                << " < requested=" << requested_size
+                << " and no non-tail free bytes are available"
+                << " (tail_free=" << tail_free << ")";
+        return 0;
+      }
+      // Partial compact: under tight training pressure, mapped-free bytes may
+      // be insufficient to cover the whole request but still reduce the next
+      // grow attempt. Move the non-tail free backing to tail/gaps and let the
+      // following allocation retry grow only the remaining deficit.
+      compact_target = total_free;
+      VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+              << " compact partial: total_free=" << total_free
+              << " < requested=" << requested_size << " tail_free=" << tail_free
+              << " compact_target=" << compact_target;
     }
   }
 
@@ -329,11 +344,11 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   // The source ranges include all mapped-free blocks. BackingMap page state
   // decides which individual handles are movable.
   const size_t required_releasable_bytes =
-      requested_size > tail_free ? requested_size - tail_free : 0;
+      compact_target > tail_free ? compact_target - tail_free : 0;
   const size_t releasable_target_bytes =
       requested_size > 0 && !FLAGS_vmm_v2_compact_all
           ? required_releasable_bytes
-          : requested_size;
+          : compact_target;
 
   auto source_pages = underlying_allocator_->CollectRemapSourcePages(
       compact_source_ranges, releasable_target_bytes);
@@ -353,6 +368,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
             << " < required=" << required_releasable_bytes
             << " requested=" << requested_size << " total_free=" << total_free
             << " max_free=" << max_free << " tail_free=" << tail_free
+            << " compact_target=" << compact_target
             << " source_ranges=" << compact_source_ranges.size();
     return 0;
   }
@@ -362,6 +378,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
             << " compact skip: no releasable handles"
             << " (total_free=" << total_free << " max_free=" << max_free
             << " tail_free=" << tail_free << " requested=" << requested_size
+            << " compact_target=" << compact_target
             << " releasable_handles=" << releasable_handles
             << " releasable_bytes=" << releasable_bytes
             << " source_ranges=" << compact_source_ranges.size() << ")";
@@ -371,6 +388,8 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   VLOG(3) << "VMM V2 pool " << static_cast<int>(pool_type_)
           << " compact: total_free=" << total_free << " max_free=" << max_free
           << " tail_free=" << tail_free << " requested=" << requested_size
+          << " compact_target=" << compact_target
+          << " partial=" << (compact_target < requested_size)
           << " required_releasable_bytes=" << required_releasable_bytes
           << " releasable_handles=" << releasable_handles
           << " releasable_bytes=" << releasable_bytes
@@ -392,8 +411,9 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
                                     can_prepare_synthetic_allocation,
                                     prepare_synthetic_allocation);
   const bool compact_all = FLAGS_vmm_v2_compact_all;
-  const size_t compact_target = compact_all ? 0 : requested_size;
-  const size_t remapped = compactor.Compact(&all_blocks_, compact_target);
+  const size_t bounded_compact_target = compact_all ? 0 : compact_target;
+  const size_t remapped =
+      compactor.Compact(&all_blocks_, bounded_compact_target);
   // Always rebuild: Phase 1 may have replaced FREE blocks with
   // UNMAPPED-FREE/FREE
   // segments before Phase 2 fails.  Without rebuild, free_blocks_ holds

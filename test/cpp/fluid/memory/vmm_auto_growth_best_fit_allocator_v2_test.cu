@@ -720,6 +720,44 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
+     BoundedCompactAllowsPartialRemapWhenFreeBytesAreInsufficient) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
+
+  const size_t handle_size = underlying->HandleSize();
+  auto first = allocator.Allocate(handle_size);
+  auto movable = allocator.Allocate(handle_size);
+  auto tail_guard = allocator.Allocate(handle_size);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(movable, nullptr);
+  ASSERT_NE(tail_guard, nullptr);
+
+  auto* movable_ptr = movable->ptr();
+  movable.reset();
+
+  const size_t requested_size = 3UL * handle_size;
+  const size_t remapped = allocator.Compact(phi::GPUPlace(), requested_size);
+  EXPECT_EQ(remapped, handle_size);
+
+  bool found_old_source = false;
+  bool found_tail_free = false;
+  for (const auto& block : allocator.all_blocks()) {
+    if (block.ptr_ == movable_ptr) {
+      found_old_source = true;
+      EXPECT_TRUE(block.IsUnmappedFree());
+      EXPECT_EQ(block.size_, handle_size);
+    }
+    if (block.IsMappedFree() && block.ptr_ != movable_ptr) {
+      found_tail_free = true;
+      EXPECT_EQ(block.size_, handle_size);
+    }
+  }
+  EXPECT_TRUE(found_old_source);
+  EXPECT_TRUE(found_tail_free);
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2,
      BoundedCompactUsesTailFreeDeficitForReleasablePrecheck) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
