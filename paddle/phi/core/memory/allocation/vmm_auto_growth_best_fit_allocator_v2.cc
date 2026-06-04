@@ -16,6 +16,7 @@
 
 #if defined(PADDLE_WITH_CUDA)
 
+#include <exception>
 #include <limits>
 
 #include "glog/logging.h"
@@ -207,6 +208,32 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   if (grow_size > 0) {
     try {
       grow_alloc = underlying_allocator_->AllocateWithBlock(grow_size);
+    } catch (const BadAlloc& bad_alloc) {
+      // Grow failed: restore the tail FREE block before propagating.
+      if (has_tail_reuse) {
+        auto restored_it = all_blocks_.insert(all_blocks_.end(),
+                                              std::move(combined_free_block));
+        InsertFreeBlock(restored_it);
+      }
+      PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+          "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes.\n"
+          "Underlying VMM allocation failure:\n%s",
+          static_cast<int>(pool_type_),
+          grow_size,
+          bad_alloc.what()));
+    } catch (const std::exception& e) {
+      // Grow failed: restore the tail FREE block before propagating.
+      if (has_tail_reuse) {
+        auto restored_it = all_blocks_.insert(all_blocks_.end(),
+                                              std::move(combined_free_block));
+        InsertFreeBlock(restored_it);
+      }
+      PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+          "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes.\n"
+          "Underlying VMM allocation exception:\n%s",
+          static_cast<int>(pool_type_),
+          grow_size,
+          e.what()));
     } catch (...) {
       // Grow failed: restore the tail FREE block before propagating.
       if (has_tail_reuse) {
@@ -215,7 +242,8 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
         InsertFreeBlock(restored_it);
       }
       PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
-          "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes.",
+          "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes "
+          "with an unknown underlying VMM allocation exception.",
           static_cast<int>(pool_type_),
           grow_size));
     }
