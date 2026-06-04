@@ -30,6 +30,8 @@ namespace allocation {
 
 namespace {
 
+constexpr size_t kVMMSetAccessChunkSize = 64UL << 20;
+
 size_t GetPoolVAMultiplier(PoolType pool_type) {
   switch (pool_type) {
     case PoolType::kSmall:
@@ -38,6 +40,32 @@ size_t GetPoolVAMultiplier(PoolType pool_type) {
       return 4;
   }
   return 1;
+}
+
+struct SetAccessResult {
+  CUresult status{CUDA_SUCCESS};
+  size_t failed_offset{0};
+  size_t failed_size{0};
+};
+
+SetAccessResult SetAccessInChunks(VMMDevicePtr ptr,
+                                  size_t size,
+                                  size_t handle_size,
+                                  const std::vector<CUmemAccessDesc>& desc) {
+  const size_t chunk_size =
+      std::max(handle_size, AlignedSize(kVMMSetAccessChunkSize, handle_size));
+  size_t offset = 0;
+  while (offset < size) {
+    const size_t remaining = size - offset;
+    const size_t current_size = std::min(chunk_size, remaining);
+    auto status = phi::dynload::cuMemSetAccess(
+        ptr + offset, current_size, desc.data(), desc.size());
+    if (status != CUDA_SUCCESS) {
+      return {status, offset, current_size};
+    }
+    offset += current_size;
+  }
+  return {};
 }
 
 template <typename Map, typename Key, typename Value>
@@ -198,15 +226,42 @@ CUDAVirtualMemAllocatorV2::AllocateWithLayout(size_t size) {
     layout.push_back(std::make_shared<VMMHandleMeta>(VMMHandleMeta{
         ptr + i * handle_size_, handle_size_, handle, place_.device}));
   }
-  auto access_status = phi::dynload::cuMemSetAccess(
-      ptr, aligned, access_desc_.data(), access_desc_.size());
-  if (access_status != CUDA_SUCCESS) {
+  auto access_result =
+      SetAccessInChunks(ptr, aligned, handle_size_, access_desc_);
+  if (access_result.status != CUDA_SUCCESS) {
     for (const auto& m : layout) {
       phi::dynload::cuMemUnmap(m->Base(), m->Size());
       platform::RecordedGpuMemRelease(
           m->AllocationHandle(), m->Size(), place_.device);
     }
-    PADDLE_ENFORCE_GPU_SUCCESS(access_status);
+    size_t actual_avail = 0;
+    size_t actual_total = 0;
+    PADDLE_ENFORCE_GPU_SUCCESS(cudaMemGetInfo(&actual_avail, &actual_total));
+    if (access_result.status == CUDA_ERROR_OUT_OF_MEMORY) {
+      PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+          "cuMemSetAccess failed: out of GPU memory at offset %zu/%zu "
+          "(failed_size=%zu, handle_size=%zu, handle_count=%zu, "
+          "actual_avail=%zu, actual_total=%zu).",
+          access_result.failed_offset,
+          aligned,
+          access_result.failed_size,
+          handle_size_,
+          num_handles,
+          actual_avail,
+          actual_total));
+    }
+    PADDLE_THROW(common::errors::External(
+        "cuMemSetAccess failed at offset %zu/%zu (failed_size=%zu, "
+        "handle_size=%zu, handle_count=%zu, status=%d, actual_avail=%zu, "
+        "actual_total=%zu).",
+        access_result.failed_offset,
+        aligned,
+        access_result.failed_size,
+        handle_size_,
+        num_handles,
+        static_cast<int>(access_result.status),
+        actual_avail,
+        actual_total));
   }
 
   for (const auto& m : layout) {
@@ -294,15 +349,42 @@ CUDAVirtualMemAllocatorV2::AllocateAtVAWithLayout(VMMDevicePtr ptr,
         VMMHandleMeta{dst, handle_size_, handle, place_.device}));
   }
 
-  auto access_status = phi::dynload::cuMemSetAccess(
-      ptr, aligned, access_desc_.data(), access_desc_.size());
-  if (access_status != CUDA_SUCCESS) {
+  auto access_result =
+      SetAccessInChunks(ptr, aligned, handle_size_, access_desc_);
+  if (access_result.status != CUDA_SUCCESS) {
     for (const auto& m : layout) {
       phi::dynload::cuMemUnmap(m->Base(), m->Size());
       platform::RecordedGpuMemRelease(
           m->AllocationHandle(), m->Size(), place_.device);
     }
-    PADDLE_ENFORCE_GPU_SUCCESS(access_status);
+    size_t actual_avail = 0;
+    size_t actual_total = 0;
+    PADDLE_ENFORCE_GPU_SUCCESS(cudaMemGetInfo(&actual_avail, &actual_total));
+    if (access_result.status == CUDA_ERROR_OUT_OF_MEMORY) {
+      PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+          "cuMemSetAccess failed in AllocateAtVA: out of GPU memory at "
+          "offset %zu/%zu (failed_size=%zu, handle_size=%zu, "
+          "handle_count=%zu, actual_avail=%zu, actual_total=%zu).",
+          access_result.failed_offset,
+          aligned,
+          access_result.failed_size,
+          handle_size_,
+          num_handles,
+          actual_avail,
+          actual_total));
+    }
+    PADDLE_THROW(common::errors::External(
+        "cuMemSetAccess failed in AllocateAtVA at offset %zu/%zu "
+        "(failed_size=%zu, handle_size=%zu, handle_count=%zu, status=%d, "
+        "actual_avail=%zu, actual_total=%zu).",
+        access_result.failed_offset,
+        aligned,
+        access_result.failed_size,
+        handle_size_,
+        num_handles,
+        static_cast<int>(access_result.status),
+        actual_avail,
+        actual_total));
   }
 
   for (const auto& m : layout) {
@@ -607,15 +689,20 @@ void CUDAVirtualMemAllocatorV2::MapHandlesToVA(
     }
     ++mapped_count;
   }
-  auto status = phi::dynload::cuMemSetAccess(
-      ptr, hs.size() * handle_size_, access_desc_.data(), access_desc_.size());
-  if (status != CUDA_SUCCESS) {
+  const size_t total_bytes = hs.size() * handle_size_;
+  auto access_result =
+      SetAccessInChunks(ptr, total_bytes, handle_size_, access_desc_);
+  if (access_result.status != CUDA_SUCCESS) {
     VLOG(0) << "cuMemSetAccess failed dst=" << reinterpret_cast<void*>(ptr)
-            << " total_bytes=" << hs.size() * handle_size_
-            << " access_desc_count=" << access_desc_.size();
+            << " total_bytes=" << total_bytes
+            << " failed_offset=" << access_result.failed_offset
+            << " failed_size=" << access_result.failed_size
+            << " handle_size=" << handle_size_
+            << " access_desc_count=" << access_desc_.size()
+            << " status=" << access_result.status;
     RollbackMappedHandleRange(ptr, mapped_count);
   }
-  PADDLE_ENFORCE_GPU_SUCCESS(status);
+  PADDLE_ENFORCE_GPU_SUCCESS(access_result.status);
 }
 
 CUDAVirtualMemAllocatorV2::AllocationWithLayout
