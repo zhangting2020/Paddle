@@ -16,10 +16,15 @@
 
 #if defined(PADDLE_WITH_CUDA)
 
-#include <algorithm>
-#include <iterator>
+#include <exception>
+#include <limits>
 
+#include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
+#include "paddle/phi/core/memory/allocation/free_block_remap_compactor.h"
+
+COMMON_DECLARE_bool(vmm_v2_compact_all);
+
 namespace paddle {
 namespace memory {
 namespace allocation {
@@ -42,94 +47,105 @@ void EmplaceOrEnforce(Map* map,
           map_name));
 }
 
-std::vector<BlockPartV2> SlicePartsForRange(
-    const std::vector<BlockPartV2>& parts,
-    size_t range_offset,
-    size_t range_len) {
-  // parts describes one logical block as an ordered list of handle slices.
-  // The target range is also expressed in that logical block address space.
-  //
-  // Example:
-  //   parts:        [part0 len=2][part1 len=3][part2 len=4]
-  //   logical idx:   0          2            5            9
-  //   range:              [------ range ------)
-  //                       1                    7
-  //
-  //   result:
-  //     - part0 contributes a right-side slice [1,2)
-  //     - part1 is fully covered and copied as-is
-  //     - part2 contributes a left-side slice [5,7)
-  //
-  // A block-level parts_ list always describes one contiguous logical range,
-  // but each element may only cover a slice of its underlying handle. Scan the
-  // logical range once, intersect each part with [range_offset, range_end),
-  // and rebuild the sliced view in order.
-  std::vector<BlockPartV2> sliced_parts;
-  if (range_len == 0 || parts.empty()) {
-    return sliced_parts;
-  }
+}  // namespace
 
-  sliced_parts.reserve(parts.size());
-  const size_t range_end = range_offset + range_len;
-  size_t cursor = 0;
-
-  for (const auto& part : parts) {
-    const size_t part_block_begin = cursor;
-    const size_t part_block_end = cursor + part.len;
-    cursor = part_block_end;
-
-    if (part_block_end <= range_offset) {
-      continue;
-    }
-    if (part_block_begin >= range_end) {
-      break;
-    }
-
-    const size_t slice_begin = std::max(part_block_begin, range_offset);
-    const size_t slice_end = std::min(part_block_end, range_end);
-    auto slice =
-        part.Slice(slice_begin - part_block_begin, slice_end - slice_begin);
-
-    if (sliced_parts.empty() || !sliced_parts.back().TryExtend(slice)) {
-      sliced_parts.push_back(std::move(slice));
-    }
-  }
-  return sliced_parts;
+void VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::Add(
+    DecoratedAllocationPtr allocation) {
+  allocations_.emplace_back(std::move(allocation));
+  auto it = std::prev(allocations_.end());
+  auto* begin = Begin(*it);
+  PADDLE_ENFORCE_EQ(
+      allocations_by_ptr_.emplace(begin, it).second,
+      true,
+      common::errors::AlreadyExists(
+          "Duplicate underlying allocation base %p in VMM V2 registry.",
+          begin));
 }
 
-std::vector<BlockPartV2> BuildBlockPartsFromHandleLayout(
-    const HandleLayout& layout) {
-  std::vector<BlockPartV2> parts;
-  parts.reserve(layout.size());
-  // The bottom allocator only returns the fixed-handle list for one raw
-  // allocation. Best-fit turns that list into block-level slices that will
-  // later be split/merged/remapped as BlockV2::parts_ evolves.
-  for (const auto& handle : layout) {
-    parts.push_back(BlockPartV2{handle, 0, handle->size});
-  }
-  return parts;
-}
+namespace {
 
-void AppendPartsTail(std::vector<BlockPartV2>* dst,
-                     std::vector<BlockPartV2>* src) {
-  // dst and src each describe one logical block. When merge joins two adjacent
-  // FREE blocks, concatenate their parts_ while collapsing the boundary if it
-  // happens to land in the middle of one handle. The source block is erased
-  // right after merge, so its parts_ can be moved instead of copied.
-  if (src->empty()) {
-    return;
-  }
-  dst->reserve(dst->size() + src->size());
-  auto begin = src->begin();
-  if (!dst->empty() && dst->back().TryExtend(src->front())) {
-    ++begin;
-  }
-  dst->insert(dst->end(),
-              std::make_move_iterator(begin),
-              std::make_move_iterator(src->end()));
+bool RangesOverlap(void* lhs_ptr,
+                   size_t lhs_size,
+                   void* rhs_ptr,
+                   size_t rhs_size) {
+  const auto* lhs_begin = reinterpret_cast<const uint8_t*>(lhs_ptr);
+  const auto* lhs_end = lhs_begin + lhs_size;
+  const auto* rhs_begin = reinterpret_cast<const uint8_t*>(rhs_ptr);
+  const auto* rhs_end = rhs_begin + rhs_size;
+  return lhs_end > rhs_begin && rhs_end > lhs_begin;
 }
 
 }  // namespace
+
+uint8_t* VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::Begin(
+    const DecoratedAllocationPtr& allocation) {
+  return reinterpret_cast<uint8_t*>(allocation->ptr());
+}
+
+uint8_t* VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::End(
+    const DecoratedAllocationPtr& allocation) {
+  return Begin(allocation) + allocation->size();
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::HasOverlap(
+    void* ptr, size_t size) const {
+  auto* begin = reinterpret_cast<uint8_t*>(ptr);
+  auto* end = begin + size;
+  auto it = allocations_by_ptr_.lower_bound(begin);
+  if (it != allocations_by_ptr_.begin()) {
+    auto prev = std::prev(it);
+    if (End(*prev->second) > begin) {
+      return true;
+    }
+  }
+  return it != allocations_by_ptr_.end() && it->first < end;
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::Overlaps(
+    void* ptr, size_t size) const {
+  return HasOverlap(ptr, size);
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::
+    AllOverlapsSatisfy(void* ptr,
+                       size_t size,
+                       const OverlapPredicate& predicate) const {
+  for (const auto& allocation : allocations_) {
+    if (!RangesOverlap(ptr, size, allocation->ptr(), allocation->size())) {
+      continue;
+    }
+    if (!predicate(allocation)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::
+    EraseOverlapsIf(void* ptr, size_t size, const OverlapPredicate& predicate) {
+  bool ok = true;
+  for (auto it = allocations_.begin(); it != allocations_.end();) {
+    if (!RangesOverlap(ptr, size, (*it)->ptr(), (*it)->size())) {
+      ++it;
+      continue;
+    }
+    if (!predicate(*it)) {
+      ok = false;
+      ++it;
+      continue;
+    }
+    allocations_by_ptr_.erase(Begin(*it));
+    it = allocations_.erase(it);
+  }
+  return ok;
+}
+
+VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::iterator
+VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::Erase(
+    iterator it) {
+  allocations_by_ptr_.erase(Begin(*it));
+  return allocations_.erase(it);
+}
 
 VMMAutoGrowthBestFitAllocatorV2::VMMAutoGrowthBestFitAllocatorV2(
     const std::shared_ptr<CUDAVirtualMemAllocatorV2>& underlying_allocator,
@@ -141,94 +157,360 @@ VMMAutoGrowthBestFitAllocatorV2::VMMAutoGrowthBestFitAllocatorV2(
       place_(place),
       pool_type_(pool_type) {}
 
+bool VMMAutoGrowthBestFitBlockAllocationV2::SetVMMRemapEvent(
+    gpuStream_t stream, std::shared_ptr<CUDAEventGuard> event) {
+  if (owner_ == nullptr) {
+    return false;
+  }
+  remap_stream_ = stream;
+  remap_event_ = std::move(event);
+  return true;
+}
+
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   std::lock_guard<SpinLock> guard(spinlock_);
   const size_t requested_size = AlignedSize(size, alignment_);
   if (auto* allocation = AllocFromFreeBlocks(requested_size)) {
     return allocation;
   }
+  if (auto* allocation = AllocFromUnmappedFreeBlocks(requested_size)) {
+    return allocation;
+  }
 
-  auto allocation = static_unique_ptr_cast<Allocation>(
-      underlying_allocator_->Allocate(requested_size));
-  HandleLayout layout;
-  PADDLE_ENFORCE_EQ(underlying_allocator_->CollectAllocationHandleLayout(
-                        allocation->ptr(), &layout),
-                    true,
-                    common::errors::NotFound(
-                        "Can not collect VMM handle layout for allocation %p.",
-                        allocation->ptr()));
-  auto parts = BuildBlockPartsFromHandleLayout(layout);
-  auto* raw_allocation = allocation.get();
-  underlying_allocations_.emplace_back(std::move(allocation));
-  const size_t raw_size = raw_allocation->size();
-  // Grow first obtains one raw allocation from the bottom VMM provider, then
-  // immediately converts it into block state. If the raw allocation is larger
-  // than the requested size (for example due to handle-size rounding), split
-  // it right away so the remainder becomes a reusable FREE block instead of
-  // being hidden inside one oversized ACTIVE block.
-  auto active_parts = SlicePartsForRange(parts, 0, requested_size);
-  const size_t remaining_size = raw_size - requested_size;
+  // Tail reuse: if the last block in the address space is FREE, detach it
+  // and only request the difference from the underlying allocator. The
+  // underlying VMM provider maps new handles at a monotonically increasing
+  // VA cursor, so the new allocation is guaranteed to be contiguous with
+  // the tail FREE block.
+  bool has_tail_reuse = false;
+  size_t tail_reuse_size = 0;
+  BlockV2 combined_free_block;
+  if (!all_blocks_.empty()) {
+    auto tail_it = std::prev(all_blocks_.end());
+    if (CanIndexFreeBlock(*tail_it)) {
+      has_tail_reuse = true;
+      tail_reuse_size = tail_it->size_;
+      EraseFreeBlock(tail_it);
+      combined_free_block = std::move(*tail_it);
+      all_blocks_.erase(tail_it);
+    }
+  }
 
-  BlockV2 block;
-  block.ptr_ = raw_allocation->ptr();
-  block.size_ = requested_size;
-  block.type_ = BlockType::kActive;
-  block.parts_ = std::move(active_parts);
-  block.pool_type_ = pool_type_;
+  const size_t grow_size = (requested_size > tail_reuse_size)
+                               ? (requested_size - tail_reuse_size)
+                               : 0;
+
+  // Grow: obtain a new raw allocation from the bottom VMM provider.
+  // If cuMemCreate fails due to physical memory exhaustion (CU error 2),
+  // the driver-level allocator throws EnforceNotMet.  Convert it to BadAlloc
+  // so that RetryAllocator can catch it and trigger try_remap / offload.
+  CUDAVirtualMemAllocatorV2::AllocationWithBlock grow_alloc;
+  if (grow_size > 0) {
+    try {
+      grow_alloc = underlying_allocator_->AllocateWithBlock(grow_size);
+    } catch (const BadAlloc& bad_alloc) {
+      // Grow failed: restore the tail FREE block before propagating.
+      if (has_tail_reuse) {
+        auto restored_it = all_blocks_.insert(all_blocks_.end(),
+                                              std::move(combined_free_block));
+        InsertFreeBlock(restored_it);
+      }
+      PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+          "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes.\n"
+          "Underlying VMM allocation failure:\n%s",
+          static_cast<int>(pool_type_),
+          grow_size,
+          bad_alloc.what()));
+    } catch (const std::exception& e) {
+      // Grow failed: restore the tail FREE block before propagating.
+      if (has_tail_reuse) {
+        auto restored_it = all_blocks_.insert(all_blocks_.end(),
+                                              std::move(combined_free_block));
+        InsertFreeBlock(restored_it);
+      }
+      PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+          "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes.\n"
+          "Underlying VMM allocation exception:\n%s",
+          static_cast<int>(pool_type_),
+          grow_size,
+          e.what()));
+    } catch (...) {
+      // Grow failed: restore the tail FREE block before propagating.
+      if (has_tail_reuse) {
+        auto restored_it = all_blocks_.insert(all_blocks_.end(),
+                                              std::move(combined_free_block));
+        InsertFreeBlock(restored_it);
+      }
+      PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+          "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes "
+          "with an unknown underlying VMM allocation exception.",
+          static_cast<int>(pool_type_),
+          grow_size));
+    }
+  }
+
+  size_t total_new_size = tail_reuse_size;
+
+  if (grow_alloc.HasAllocation()) {
+    BlockV2 grow_block = AdoptBackingBlock(&grow_alloc);
+    total_new_size += grow_block.size_;
+    if (has_tail_reuse) {
+      combined_free_block.AbsorbAdjacentBlock(&grow_block);
+    } else {
+      combined_free_block = std::move(grow_block);
+    }
+  }
+
+  const size_t remaining_size = total_new_size - requested_size;
+
+  BlockV2 block =
+      combined_free_block.MakeMappedActiveSubBlock(0, requested_size);
   auto it = all_blocks_.insert(all_blocks_.end(), std::move(block));
-  EmplaceOrEnforce(&allocated_blocks_, it->ptr_, it, "allocated_blocks_");
 
   if (remaining_size > 0) {
-    BlockV2 remaining_block;
-    remaining_block.ptr_ =
-        reinterpret_cast<uint8_t*>(raw_allocation->ptr()) + requested_size;
-    remaining_block.size_ = remaining_size;
-    remaining_block.type_ = BlockType::kFree;
-    remaining_block.parts_ =
-        SlicePartsForRange(parts, requested_size, remaining_size);
-    remaining_block.pool_type_ = pool_type_;
+    BlockV2 remaining_block = combined_free_block.MakeMappedFreeSubBlock(
+        requested_size, remaining_size);
     auto remain_it =
         all_blocks_.insert(std::next(it), std::move(remaining_block));
     InsertFreeBlock(remain_it);
   }
 
-  return new Allocation(it->ptr_, it->ptr_, it->size_, place_);
+  return new VMMAutoGrowthBestFitBlockAllocationV2(it, place_, this);
+}
+
+size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
+                                                    size_t requested_size) {
+  // Defensive place validation: the call chain
+  // (RetryAllocator -> StreamSafe -> MultiPool -> SinglePool) guarantees
+  // place consistency.  Log a warning on mismatch but do not throw,
+  // since CompactImpl is called inside a try-catch that would silently
+  // swallow the exception and skip compaction.
+  if (UNLIKELY(place != Place(place_))) {
+    LOG(WARNING) << "CompactImpl place mismatch: got " << place.DebugString()
+                 << " but allocator serves " << Place(place_).DebugString();
+  }
+  std::lock_guard<SpinLock> guard(spinlock_);
+
+  size_t total_free = 0;
+  size_t max_free = 0;
+  size_t tail_free = 0;
+  std::vector<std::pair<VMMDevicePtr, size_t>> compact_source_ranges;
+  for (const auto& blk : all_blocks_) {
+    if (blk.IsMappedFree()) {
+      total_free += blk.size_;
+      compact_source_ranges.emplace_back(blk.VARange());
+    }
+    if (CanIndexFreeBlock(blk)) {
+      max_free = std::max(max_free, blk.size_);
+    }
+  }
+  if (!all_blocks_.empty() && CanIndexFreeBlock(all_blocks_.back())) {
+    tail_free = all_blocks_.back().size_;
+  }
+
+  size_t compact_target = requested_size;
+  if (requested_size > 0) {
+    if (max_free >= requested_size) {
+      VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+              << " compact skip: max_free=" << max_free
+              << " >= requested=" << requested_size;
+      return 0;
+    }
+
+    if (total_free < requested_size) {
+      if (total_free <= tail_free) {
+        VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+                << " compact skip: total_free=" << total_free
+                << " < requested=" << requested_size
+                << " and no non-tail free bytes are available"
+                << " (tail_free=" << tail_free << ")";
+        return 0;
+      }
+      // Partial compact: under tight training pressure, mapped-free bytes may
+      // be insufficient to cover the whole request but still reduce the next
+      // grow attempt. Move the non-tail free backing to tail/gaps and let the
+      // following allocation retry grow only the remaining deficit.
+      compact_target = total_free;
+      VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+              << " compact partial: total_free=" << total_free
+              << " < requested=" << requested_size << " tail_free=" << tail_free
+              << " compact_target=" << compact_target;
+    }
+  }
+
+  // Count potentially movable source pages through the BackingMap mirror.
+  // Runtime event readiness remains in RemapTransaction; this precheck only
+  // verifies that free VA ranges fully cover mapped, reusable backing pages.
+  // The source ranges include all mapped-free blocks. BackingMap page state
+  // decides which individual handles are movable.
+  const size_t required_releasable_bytes =
+      compact_target > tail_free ? compact_target - tail_free : 0;
+  const size_t releasable_target_bytes =
+      requested_size > 0 && !FLAGS_vmm_v2_compact_all
+          ? required_releasable_bytes
+          : compact_target;
+
+  auto source_pages = underlying_allocator_->CollectRemapSourcePages(
+      compact_source_ranges, releasable_target_bytes);
+  size_t releasable_handles = 0;
+  for (const auto& page : source_pages) {
+    if (page.remap_source_state == VMMBackingMap::RemapSourceState::kReady) {
+      ++releasable_handles;
+    }
+  }
+  const size_t releasable_bytes =
+      releasable_handles * underlying_allocator_->handle_size();
+
+  if (requested_size > 0 && !FLAGS_vmm_v2_compact_all &&
+      releasable_bytes < required_releasable_bytes) {
+    VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+            << " compact skip: releasable_bytes=" << releasable_bytes
+            << " < required=" << required_releasable_bytes
+            << " requested=" << requested_size << " total_free=" << total_free
+            << " max_free=" << max_free << " tail_free=" << tail_free
+            << " compact_target=" << compact_target
+            << " source_ranges=" << compact_source_ranges.size();
+    return 0;
+  }
+
+  if (releasable_handles == 0) {
+    VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+            << " compact skip: no releasable handles"
+            << " (total_free=" << total_free << " max_free=" << max_free
+            << " tail_free=" << tail_free << " requested=" << requested_size
+            << " compact_target=" << compact_target
+            << " releasable_handles=" << releasable_handles
+            << " releasable_bytes=" << releasable_bytes
+            << " source_ranges=" << compact_source_ranges.size() << ")";
+    return 0;
+  }
+
+  VLOG(3) << "VMM V2 pool " << static_cast<int>(pool_type_)
+          << " compact: total_free=" << total_free << " max_free=" << max_free
+          << " tail_free=" << tail_free << " requested=" << requested_size
+          << " compact_target=" << compact_target
+          << " partial=" << (compact_target < requested_size)
+          << " required_releasable_bytes=" << required_releasable_bytes
+          << " releasable_handles=" << releasable_handles
+          << " releasable_bytes=" << releasable_bytes
+          << " source_ranges=" << compact_source_ranges.size()
+          << ", proceeding with compaction";
+
+  auto commit_synthetic_allocation = [this](DecoratedAllocationPtr allocation) {
+    TrackUnderlyingAllocation(std::move(allocation));
+  };
+  auto can_prepare_synthetic_allocation = [this](void* ptr, size_t size) {
+    return CanReleaseRemapDestinationUnderlyingAllocations(ptr, size);
+  };
+  auto prepare_synthetic_allocation = [this](void* ptr, size_t size) {
+    return ReleaseRemapDestinationUnderlyingAllocations(ptr, size);
+  };
+  FreeBlockRemapCompactor compactor(underlying_allocator_,
+                                    pool_type_,
+                                    commit_synthetic_allocation,
+                                    can_prepare_synthetic_allocation,
+                                    prepare_synthetic_allocation);
+  const bool compact_all = FLAGS_vmm_v2_compact_all;
+  const size_t bounded_compact_target = compact_all ? 0 : compact_target;
+  const size_t remapped =
+      compactor.Compact(&all_blocks_, bounded_compact_target);
+  // Always rebuild: Phase 1 may have replaced FREE blocks with
+  // UNMAPPED-FREE/FREE
+  // segments before Phase 2 fails.  Without rebuild, free_blocks_ holds
+  // stale iterators to erased list nodes, causing use-after-free on next alloc.
+  RebuildFreeBlockIndex();
+  return remapped;
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   std::lock_guard<SpinLock> guard(spinlock_);
-  auto ptr = allocation->ptr();
-  auto found = allocated_blocks_.find(ptr);
+  auto* wrapped_allocation =
+      static_cast<VMMAutoGrowthBestFitBlockAllocationV2*>(allocation);
+  auto it = wrapped_allocation->block_it();
   PADDLE_ENFORCE_NE(
-      found,
-      allocated_blocks_.end(),
+      it,
+      all_blocks_.end(),
       common::errors::NotFound("Can not find active block for allocation %p in "
                                "VMMAutoGrowthBestFitAllocatorV2.",
-                               ptr));
-  auto it = found->second;
-  allocated_blocks_.erase(it->ptr_);
-  it->type_ = BlockType::kFree;
+                               allocation->ptr()));
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+  auto remap_event = wrapped_allocation->TakeRemapEvent();
+  if (remap_event != nullptr) {
+    PADDLE_ENFORCE_EQ(
+        underlying_allocator_->SetBlockRemapEvent(
+            *it, wrapped_allocation->remap_stream(), remap_event),
+        true,
+        common::errors::InvalidArgument(
+            "Failed to attach explicit VMM V2 remap event for block %p.",
+            it->ptr_));
+  } else {
+    it->SetRemapSafety(wrapped_allocation->remap_stream(), nullptr);
+  }
+#endif
+  it->MarkFree();
   TryMerge(it);
   delete allocation;
 }
 
-bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(void* ptr,
+void VMMAutoGrowthBestFitAllocatorV2::GetFreeBlockStats(size_t* total_free,
+                                                        size_t* max_free) {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  size_t total = 0;
+  for (const auto& entry : free_blocks_) {
+    total += entry.first.first;
+  }
+  size_t max_sz = 0;
+  if (!free_blocks_.empty()) {
+    max_sz = free_blocks_.rbegin()->first.first;
+  }
+  *total_free = total;
+  *max_free = max_sz;
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
+    void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-                                                         gpuStream_t stream,
-                                                         gpuEvent_t event
+    gpuStream_t stream,
+    std::shared_ptr<CUDAEventGuard> event
 #else
-                                                         void* stream,
-                                                         void* event
+    void* stream,
+    void* event
 #endif
 ) {
   std::lock_guard<SpinLock> guard(spinlock_);
-  auto it = allocated_blocks_.find(ptr);
-  if (it == allocated_blocks_.end()) {
+  for (auto it = all_blocks_.begin(); it != all_blocks_.end(); ++it) {
+    if (!it->IsActive() || it->ptr_ != ptr) {
+      continue;
+    }
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+    return underlying_allocator_->SetBlockRemapEvent(
+        *it, stream, std::move(event));
+#else
+    (void)stream;
+    (void)event;
+    return true;
+#endif
+  }
+  return false;
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
+    BlockListIt block_it,
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+    gpuStream_t stream,
+    std::shared_ptr<CUDAEventGuard> event
+#else
+    void* stream,
+    void* event
+#endif
+) {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  if (block_it == all_blocks_.end() || !block_it->IsActive()) {
     return false;
   }
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-  it->second->last_use_stream_ = stream;
-  it->second->remap_safe_event_ = event;
+  return underlying_allocator_->SetBlockRemapEvent(
+      *block_it, stream, std::move(event));
 #else
   (void)stream;
   (void)event;
@@ -236,9 +518,17 @@ bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(void* ptr,
   return true;
 }
 
+BlockList VMMAutoGrowthBestFitAllocatorV2::SnapshotAllBlocks() const {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  return all_blocks_;
+}
+
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
     size_t size) {
   auto it = free_blocks_.lower_bound({size, nullptr});
+  while (it != free_blocks_.end() && !CanIndexFreeBlock(*it->second)) {
+    it = free_blocks_.erase(it);
+  }
   if (it == free_blocks_.end()) {
     return nullptr;
   }
@@ -248,54 +538,205 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
 
   if (block_it->size_ > size) {
     const size_t remaining_size = block_it->size_ - size;
-    BlockV2 remaining_block;
-    remaining_block.ptr_ = reinterpret_cast<uint8_t*>(block_it->ptr_) + size;
-    remaining_block.size_ = remaining_size;
-    remaining_block.type_ = BlockType::kFree;
-    remaining_block.parts_ =
-        SlicePartsForRange(block_it->parts_, size, remaining_size);
-    remaining_block.pool_type_ = block_it->pool_type_;
+    BlockV2 remaining_block =
+        block_it->MakeMappedFreeSubBlock(size, remaining_size);
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
-    // Inherit last_use_stream_ and remap_safe_event_ from the original block.
-    //
-    // Under fast-GC (same-stream reuse), StreamSafeCUDAAllocator hands this
-    // FREE block back without waiting on the recorded event — CUDA stream
-    // ordering alone guarantees that the NEW kernel (using the ACTIVE portion)
-    // runs after the old one.  However, the REMAINING free portion is still
-    // physically backed by memory the old kernel may still be touching.  If
-    // the Compactor saw remap_safe_event_ == nullptr it would assume "never
-    // used, safe to unmap" and cuMemUnmap while the old kernel is still
-    // reading — causing a GPU fault.
-    //
-    // Inheriting the event is correct because the event was recorded AFTER the
-    // last kernel that accessed the ENTIRE original block; the remaining
-    // portion is a subset, so the same event guards it.
-    //
-    // For grow-split (AllocateImpl), the remaining block comes from freshly
-    // allocated memory that was never used, so its event is naturally nullptr
-    // — which correctly means "safe to remap".
-    //
-    // owning_stream_ is cleared: nobody "owns" a free fragment.
-    remaining_block.owning_stream_ = nullptr;
-    remaining_block.last_use_stream_ = block_it->last_use_stream_;
-    remaining_block.remap_safe_event_ = block_it->remap_safe_event_;
+    // The free remainder keeps the source block's remap-safety stream. The
+    // reused prefix is cleared by MarkActive().
 #endif
 
-    block_it->size_ = size;
-    block_it->parts_ = SlicePartsForRange(block_it->parts_, 0, size);
+    block_it->TrimToPrefix(size);
     auto remain_it =
         all_blocks_.insert(std::next(block_it), std::move(remaining_block));
     InsertFreeBlock(remain_it);
   }
 
-  block_it->type_ = BlockType::kActive;
-  EmplaceOrEnforce(
-      &allocated_blocks_, block_it->ptr_, block_it, "allocated_blocks_");
-  return new Allocation(
-      block_it->ptr_, block_it->ptr_, block_it->size_, place_);
+  block_it->MarkActive();
+  return new VMMAutoGrowthBestFitBlockAllocationV2(block_it, place_, this);
+}
+
+phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
+    size_t size) {
+  const size_t backing_size =
+      AlignedSize(size, underlying_allocator_->handle_size());
+  BlockListIt best = all_blocks_.end();
+  for (auto iter = unmapped_free_blocks_.lower_bound({backing_size, nullptr});
+       iter != unmapped_free_blocks_.end();) {
+    auto it = iter->second;
+    if (!it->IsUnmappedFree()) {
+      iter = unmapped_free_blocks_.erase(iter);
+      continue;
+    }
+    if (RangeOverlapsUnderlyingAllocation(it->ptr_, backing_size)) {
+      VLOG(6) << "VMM V2 AllocFromUnmappedFreeBlocks skip ownership-overlapped "
+                 "unmapped-free ptr="
+              << it->ptr_ << " backing_size=" << backing_size
+              << " block_size=" << it->size_;
+      ++iter;
+      continue;
+    }
+    best = it;
+    break;
+  }
+  if (best == all_blocks_.end()) {
+    return nullptr;
+  }
+
+  const auto unmapped_free_ptr = best->BeginVA();
+  VLOG(6) << "VMM V2 AllocFromUnmappedFreeBlocks ptr="
+          << reinterpret_cast<void*>(unmapped_free_ptr) << " requested=" << size
+          << " backing_size=" << backing_size
+          << " original_unmapped_free_size=" << best->size_
+          << " tail_offset=" << underlying_allocator_->tail_offset();
+  CUDAVirtualMemAllocatorV2::AllocationWithBlock unmapped_free_alloc;
+  try {
+    unmapped_free_alloc = underlying_allocator_->AllocateAtVAWithBlock(
+        unmapped_free_ptr, backing_size);
+  } catch (...) {
+    // Do not mutate the allocation view if backing cannot be created in this
+    // unmapped-free range. The normal grow path will surface the allocation
+    // failure if needed.
+    return nullptr;
+  }
+
+  BlockV2 mapped_block = AdoptBackingBlock(&unmapped_free_alloc);
+  PADDLE_ENFORCE_EQ(
+      mapped_block.size_,
+      backing_size,
+      common::errors::InvalidArgument(
+          "Unexpected unmapped-free backing size: got %zu, expected %zu.",
+          mapped_block.size_,
+          backing_size));
+
+  const size_t original_unmapped_free_size = best->size_;
+  const PoolType original_pool_type = best->pool_type_;
+
+  EraseUnmappedFreeBlock(best);
+  *best = mapped_block.MakeMappedActiveSubBlock(0, size);
+
+  auto insert_pos = std::next(best);
+  if (backing_size > size) {
+    BlockV2 mapped_remain =
+        mapped_block.MakeMappedFreeSubBlock(size, backing_size - size);
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+    mapped_remain.owning_stream_ = nullptr;
+    mapped_remain.remap_safe_event_.reset();
+    mapped_remain.remap_pending_states_.clear();
+#endif
+    auto free_it = all_blocks_.insert(insert_pos, std::move(mapped_remain));
+    InsertFreeBlock(free_it);
+    insert_pos = std::next(free_it);
+  }
+
+  if (original_unmapped_free_size > backing_size) {
+    BlockV2 tail_unmapped_free = BlockV2::MakeUnmappedFreeBlock(
+        reinterpret_cast<uint8_t*>(best->ptr_) + backing_size,
+        original_unmapped_free_size - backing_size,
+        original_pool_type);
+    auto tail_it =
+        all_blocks_.insert(insert_pos, std::move(tail_unmapped_free));
+    InsertUnmappedFreeBlock(tail_it);
+  }
+
+  return new VMMAutoGrowthBestFitBlockAllocationV2(best, place_, this);
+}
+
+void VMMAutoGrowthBestFitAllocatorV2::TrackUnderlyingAllocation(
+    DecoratedAllocationPtr allocation) {
+  underlying_allocations_.Add(std::move(allocation));
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::AllocationOwnedByRemapDestination(
+    const DecoratedAllocationPtr& allocation,
+    void* target_ptr,
+    size_t target_size) const {
+  if (!underlying_allocator_->IsAllocationOwnedByRemapDestination(
+          allocation->ptr())) {
+    VLOG(0) << "VMM V2 synthetic allocation preparation: target range "
+            << target_ptr << " size=" << target_size
+            << " overlaps non-remap-destination underlying allocation "
+            << allocation->ptr() << " size=" << allocation->size();
+    return false;
+  }
+  return true;
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::
+    CanReleaseRemapDestinationUnderlyingAllocations(void* ptr,
+                                                    size_t size) const {
+  return underlying_allocations_.AllOverlapsSatisfy(
+      ptr, size, [this, ptr, size](const DecoratedAllocationPtr& allocation) {
+        return AllocationOwnedByRemapDestination(allocation, ptr, size);
+      });
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::
+    ReleaseRemapDestinationUnderlyingAllocations(void* ptr, size_t size) {
+  return underlying_allocations_.EraseOverlapsIf(
+      ptr, size, [this, ptr, size](const DecoratedAllocationPtr& allocation) {
+        if (!AllocationOwnedByRemapDestination(allocation, ptr, size)) {
+          return false;
+        }
+        VLOG(3) << "VMM V2 synthetic allocation preparation: releasing stale "
+                   "remap-destination allocation "
+                << allocation->ptr() << " size=" << allocation->size();
+        return true;
+      });
+}
+
+BlockV2 VMMAutoGrowthBestFitAllocatorV2::AdoptBackingBlock(
+    CUDAVirtualMemAllocatorV2::AllocationWithBlock* allocation_with_block) {
+  PADDLE_ENFORCE_NOT_NULL(
+      allocation_with_block,
+      common::errors::InvalidArgument(
+          "AllocationWithBlock must not be null when adopting block."));
+  BlockV2 block = allocation_with_block->TakeBlock();
+  auto allocation = static_unique_ptr_cast<Allocation>(
+      allocation_with_block->TakeAllocation());
+  TrackUnderlyingAllocation(std::move(allocation));
+  return block;
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::RangeOverlapsUnderlyingAllocation(
+    void* ptr, size_t size) const {
+  return underlying_allocations_.Overlaps(ptr, size);
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::CanReleaseIdleUnderlyingAllocation(
+    uint8_t* base, size_t size) const {
+  if (!IsRangeEntirelyFree(base, size)) {
+    return false;
+  }
+  return underlying_allocator_->IsRangeReleasable(
+      reinterpret_cast<VMMDevicePtr>(base), size);
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::TryReleaseIdleUnderlyingAllocation(
+    UnderlyingAllocationRegistry::iterator* alloc_it, uint64_t* released) {
+  auto& allocation = **alloc_it;
+  auto* base = reinterpret_cast<uint8_t*>(allocation->ptr());
+  const size_t alloc_size = allocation->size();
+  if (!CanReleaseIdleUnderlyingAllocation(base, alloc_size)) {
+    return false;
+  }
+
+  SplitAndReplaceRangeWithUnmappedFree(base, alloc_size);
+  *released += alloc_size;
+  VLOG(5) << "VMM V2 pool " << static_cast<int>(pool_type_)
+          << " released idle chunk: " << alloc_size << " bytes";
+  *alloc_it = underlying_allocations_.Erase(*alloc_it);
+  return true;
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::CanIndexFreeBlock(
+    const BlockV2& block) const {
+  return block.IsMappedFree() && !block.ipc_exported_;
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::InsertFreeBlock(BlockListIt it) {
+  if (!CanIndexFreeBlock(*it)) {
+    return;
+  }
   EmplaceOrEnforce(
       &free_blocks_, std::make_pair(it->size_, it->ptr_), it, "free_blocks_");
 }
@@ -304,35 +745,245 @@ void VMMAutoGrowthBestFitAllocatorV2::EraseFreeBlock(BlockListIt it) {
   free_blocks_.erase({it->size_, it->ptr_});
 }
 
+void VMMAutoGrowthBestFitAllocatorV2::InsertUnmappedFreeBlock(BlockListIt it) {
+  if (!it->IsUnmappedFree()) {
+    return;
+  }
+  EmplaceOrEnforce(&unmapped_free_blocks_,
+                   std::make_pair(it->size_, it->ptr_),
+                   it,
+                   "unmapped_free_blocks_");
+}
+
+void VMMAutoGrowthBestFitAllocatorV2::EraseUnmappedFreeBlock(BlockListIt it) {
+  unmapped_free_blocks_.erase({it->size_, it->ptr_});
+}
+
+void VMMAutoGrowthBestFitAllocatorV2::RebuildFreeBlockIndex() {
+  free_blocks_.clear();
+  unmapped_free_blocks_.clear();
+  for (auto it = all_blocks_.begin(); it != all_blocks_.end(); ++it) {
+    if (CanIndexFreeBlock(*it)) {
+      InsertFreeBlock(it);
+    }
+    if (it->IsUnmappedFree()) {
+      InsertUnmappedFreeBlock(it);
+    }
+  }
+}
+
 void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it) {
   // Only adjacent FREE blocks are merged here. ACTIVE blocks are never touched,
-  // and GAP blocks remain as explicit holes for later remap/GAP handling.
+  // and unmapped-free blocks remain as explicit holes for later remap/reuse.
   // all_blocks_ is the full VA-ordered block list, so adjacency is checked
   // against neighboring entries in that list.
   if (it != all_blocks_.begin()) {
     auto prev = std::prev(it);
-    if (prev->type_ == BlockType::kFree &&
-        reinterpret_cast<uint8_t*>(prev->ptr_) + prev->size_ ==
-            reinterpret_cast<uint8_t*>(it->ptr_)) {
+    if (prev->CanAbsorbAdjacentFreeBlock(*it)) {
       EraseFreeBlock(prev);
-      AppendPartsTail(&prev->parts_, &it->parts_);
-      prev->size_ += it->size_;
+      prev->AbsorbAdjacentBlock(&*it);
       all_blocks_.erase(it);
       it = prev;
     }
   }
 
   auto next = std::next(it);
-  if (next != all_blocks_.end() && next->type_ == BlockType::kFree &&
-      reinterpret_cast<uint8_t*>(it->ptr_) + it->size_ ==
-          reinterpret_cast<uint8_t*>(next->ptr_)) {
+  if (next != all_blocks_.end() && it->CanAbsorbAdjacentFreeBlock(*next)) {
     EraseFreeBlock(next);
-    AppendPartsTail(&it->parts_, &next->parts_);
-    it->size_ += next->size_;
+    it->AbsorbAdjacentBlock(&*next);
     all_blocks_.erase(next);
   }
 
-  InsertFreeBlock(it);
+  if (CanIndexFreeBlock(*it)) {
+    InsertFreeBlock(it);
+  }
+}
+
+void VMMAutoGrowthBestFitAllocatorV2::TryMergeUnmappedFree(BlockListIt it) {
+  if (it == all_blocks_.end() || !it->IsUnmappedFree()) {
+    return;
+  }
+
+  if (it != all_blocks_.begin()) {
+    auto prev = std::prev(it);
+    if (prev->CanAbsorbAdjacentUnmappedFreeBlock(*it)) {
+      EraseUnmappedFreeBlock(prev);
+      EraseUnmappedFreeBlock(it);
+      prev->AbsorbAdjacentUnmappedFreeBlock(*it);
+      all_blocks_.erase(it);
+      it = prev;
+      InsertUnmappedFreeBlock(it);
+    }
+  }
+
+  auto next = std::next(it);
+  if (next != all_blocks_.end() &&
+      it->CanAbsorbAdjacentUnmappedFreeBlock(*next)) {
+    EraseUnmappedFreeBlock(it);
+    EraseUnmappedFreeBlock(next);
+    it->AbsorbAdjacentUnmappedFreeBlock(*next);
+    all_blocks_.erase(next);
+    InsertUnmappedFreeBlock(it);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ReleaseImpl / FreeIdleChunks: release underlying allocations whose entire
+// VA range is covered by FREE blocks back to the CUDA VMM driver.
+//
+// Because TryMerge may have merged FREE blocks across allocation boundaries,
+// we must split the spanning block at the allocation edges, release the
+// backing, and keep the released VA range as explicit unmapped-free space for
+// later reuse.
+// ---------------------------------------------------------------------------
+
+uint64_t VMMAutoGrowthBestFitAllocatorV2::ReleaseImpl(
+    const Place& place UNUSED) {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  return FreeIdleChunks();
+}
+
+uint64_t VMMAutoGrowthBestFitAllocatorV2::FreeIdleChunks() {
+  uint64_t released = 0;
+
+  for (auto alloc_it = underlying_allocations_.begin();
+       alloc_it != underlying_allocations_.end();) {
+    if (!TryReleaseIdleUnderlyingAllocation(&alloc_it, &released)) {
+      ++alloc_it;
+    }
+  }
+
+  underlying_allocator_->SetTailOffset(Computetail_offset());
+  return released;
+}
+
+size_t VMMAutoGrowthBestFitAllocatorV2::Computetail_offset() const {
+  if (all_blocks_.empty()) {
+    return 0;
+  }
+  return static_cast<size_t>(all_blocks_.back().EndVA() -
+                             underlying_allocator_->virtual_mem_base());
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::IsRangeEntirelyFree(uint8_t* base,
+                                                          size_t size) const {
+  auto* end = base + size;
+  for (const auto& block : all_blocks_) {
+    auto* bptr = block.BeginPtr();
+    auto* bend = block.EndPtr();
+    if (bend <= base) continue;
+    if (bptr >= end) break;
+    if (block.IsActive()) {
+      return false;
+    }
+  }
+  // Returns true when the range contains only FREE/unmapped-free blocks or
+  // when
+  // blocks have already been removed by a prior FreeIdleChunks pass
+  // (unmapped-free scatter / single-unmapped-free path case: the original
+  // allocation's cleanup removes
+  // blocks in the overlapping VA range before the synthetic allocation
+  // is processed).  FreeImpl handles this safely: original allocation
+  // skips remapped handles; synthetic allocation unmaps+releases its own.
+  return true;
+}
+
+void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
+    uint8_t* base, size_t size) {
+  auto* end = base + size;
+
+  for (auto it = all_blocks_.begin(); it != all_blocks_.end();) {
+    auto* bptr = it->BeginPtr();
+    auto* bend = it->EndPtr();
+
+    if (bend <= base) {
+      ++it;
+      continue;
+    }
+    if (bptr >= end) break;
+
+    const bool is_unmapped_free = it->IsUnmappedFree();
+
+    // Case 1: block entirely within [base, end): remove it.
+    if (bptr >= base && bend <= end) {
+      if (!is_unmapped_free) EraseFreeBlock(it);
+      if (is_unmapped_free) EraseUnmappedFreeBlock(it);
+      it = all_blocks_.erase(it);
+      continue;
+    }
+
+    // Case 2: block straddles left boundary only: keep left remnant.
+    if (bptr < base && bend <= end) {
+      const size_t keep = static_cast<size_t>(base - bptr);
+      if (!is_unmapped_free) {
+        EraseFreeBlock(it);
+        it->TrimToPrefix(keep);
+        InsertFreeBlock(it);
+      } else {
+        EraseUnmappedFreeBlock(it);
+        it->TrimToPrefix(keep);
+        InsertUnmappedFreeBlock(it);
+      }
+      ++it;
+      continue;
+    }
+
+    // Case 3: block straddles right boundary only: keep right remnant.
+    if (bptr >= base && bend > end) {
+      const size_t trim = static_cast<size_t>(end - bptr);
+      const size_t keep = it->size_ - trim;
+      if (!is_unmapped_free) {
+        EraseFreeBlock(it);
+        it->TrimToSuffix(trim, keep);
+        InsertFreeBlock(it);
+      } else {
+        EraseUnmappedFreeBlock(it);
+        it->TrimToSuffix(trim, keep);
+        InsertUnmappedFreeBlock(it);
+      }
+      break;  // nothing more in range
+    }
+
+    // Case 4: block fully encompasses [base, end): split into two.
+    if (bptr < base && bend > end) {
+      const size_t left_size = static_cast<size_t>(base - bptr);
+      const size_t right_offset = static_cast<size_t>(end - bptr);
+      const size_t right_size = it->size_ - right_offset;
+
+      if (!is_unmapped_free) {
+        BlockV2 right = it->MakeMappedFreeSubBlock(right_offset, right_size);
+        EraseFreeBlock(it);
+        it->TrimToPrefix(left_size);
+        InsertFreeBlock(it);
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+        right.CopyRemapSafetyFrom(*it);
+#endif
+        auto right_it = all_blocks_.insert(std::next(it), std::move(right));
+        InsertFreeBlock(right_it);
+      } else {
+        // Unmapped-free: just shrink left and insert right unmapped-free
+        // block.
+        BlockV2 right = it->MakeUnmappedFreeSubBlock(right_offset, right_size);
+        EraseUnmappedFreeBlock(it);
+        it->TrimToPrefix(left_size);
+        InsertUnmappedFreeBlock(it);
+        auto right_it = all_blocks_.insert(std::next(it), std::move(right));
+        InsertUnmappedFreeBlock(right_it);
+      }
+      break;  // done
+    }
+
+    ++it;
+  }
+
+  auto insert_pos = all_blocks_.begin();
+  while (insert_pos != all_blocks_.end() && insert_pos->BeginPtr() < base) {
+    ++insert_pos;
+  }
+  auto unmapped_it = all_blocks_.insert(
+      insert_pos, BlockV2::MakeUnmappedFreeBlock(base, size, pool_type_));
+  InsertUnmappedFreeBlock(unmapped_it);
+  TryMergeUnmappedFree(unmapped_it);
 }
 
 }  // namespace allocation
