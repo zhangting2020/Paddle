@@ -489,6 +489,10 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
     }
   }
   if (block_it == all_blocks_.end()) {
+    VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit no active block for "
+            << "target_ptr=" << ptr << " target_size=" << size
+            << " pool=" << static_cast<int>(pool_type_)
+            << " block_count=" << all_blocks_.size();
     return false;
   }
 
@@ -496,9 +500,20 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
   BlockV2 tensor_block = block_it->MakeMappedActiveSubBlock(block_offset, size);
   std::vector<BlockPart> collected;
   if (!underlying_allocator_->CollectBlockIpcParts(tensor_block, &collected)) {
+    VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit failed to collect backing "
+            << "parts for active block ptr=" << block_it->ptr_
+            << " block_size=" << block_it->size_ << " target_ptr=" << ptr
+            << " target_size=" << size
+            << " pool=" << static_cast<int>(pool_type_)
+            << " part_count=" << tensor_block.AllocationPartCount();
     return false;
   }
   if (!underlying_allocator_->MarkBlockIpcExported(tensor_block)) {
+    VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit failed to mark IPC exported "
+            << "for active block ptr=" << block_it->ptr_
+            << " block_size=" << block_it->size_ << " target_ptr=" << ptr
+            << " target_size=" << size
+            << " pool=" << static_cast<int>(pool_type_);
     return false;
   }
   block_it->ipc_exported_ = true;

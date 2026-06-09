@@ -925,14 +925,34 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactUsesBlockListTailPlacement) {
   const size_t remapped = allocator.Compact(phi::GPUPlace());
   EXPECT_EQ(remapped, underlying->HandleSize());
 
+  void* remapped_free_ptr = nullptr;
   for (const auto& block : allocator.all_blocks()) {
     if (block.type_ == BlockType::kFree &&
         block.size_ == underlying->HandleSize()) {
       EXPECT_TRUE(block.HasSingleAllocationPart(0UL, underlying->HandleSize()));
-      return;
+      remapped_free_ptr = block.ptr_;
+      break;
     }
   }
-  FAIL() << "expected one remapped tail free block";
+  ASSERT_NE(remapped_free_ptr, nullptr)
+      << "expected one remapped tail free block";
+
+  auto remap_sources = underlying->CollectRemapSourcePages(
+      {{reinterpret_cast<VMMDevicePtr>(remapped_free_ptr),
+        underlying->HandleSize()}},
+      underlying->HandleSize());
+  ASSERT_EQ(remap_sources.size(), 1UL);
+  EXPECT_EQ(remap_sources[0].remap_source_state,
+            VMMBackingMap::RemapSourceState::kReady);
+
+  auto remapped_active = allocator.Allocate(underlying->HandleSize());
+  ASSERT_NE(remapped_active, nullptr);
+  std::vector<BlockPart> ipc_parts;
+  EXPECT_TRUE(allocator.CollectTensorParts(
+      remapped_active->ptr(), underlying->HandleSize(), &ipc_parts));
+  ASSERT_EQ(ipc_parts.size(), 1UL);
+  EXPECT_EQ(ipc_parts[0].chunk->base,
+            reinterpret_cast<VMMDevicePtr>(remapped_active->ptr()));
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2, CompactKeepsPartialSourceParts) {
