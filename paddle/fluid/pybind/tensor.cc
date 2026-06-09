@@ -198,7 +198,7 @@ namespace {
 #endif
 
 #if defined(__linux__)
-void ShareTensorViaVMM(const DenseTensor &self, py::tuple *out) {
+void ShareTensorViaVmm(const DenseTensor &self, py::tuple *out) {
   auto *holder =
       dynamic_cast<memory::allocation::Allocation *>(self.Holder().get());
   PADDLE_ENFORCE_NOT_NULL(
@@ -308,7 +308,7 @@ void ShareTensorViaVMM(const DenseTensor &self, py::tuple *out) {
                         device_id);
 }
 
-DenseTensor RebuildTensorFromVMMMeta(const py::tuple &meta) {
+DenseTensor RebuildTensorFromVmmMeta(const py::tuple &meta) {
   PADDLE_ENFORCE_EQ(
       meta.size(),
       5,
@@ -1035,7 +1035,7 @@ void BindTensor(pybind11::module &m) {  // NOLINT
              if (FLAGS_use_virtual_memory_auto_growth ||
                  FLAGS_use_vmm_auto_growth_best_fit_allocator_v2) {
                py::tuple meta;
-               ShareTensorViaVMM(self, &meta);
+               ShareTensorViaVmm(self, &meta);
                return meta;
              }
              void *base_ptr = holder->base_ptr();
@@ -1088,7 +1088,7 @@ void BindTensor(pybind11::module &m) {  // NOLINT
               if ((FLAGS_use_virtual_memory_auto_growth ||
                    FLAGS_use_vmm_auto_growth_best_fit_allocator_v2) &&
                   t.size() == 5) {
-                return RebuildTensorFromVMMMeta(t);
+                return RebuildTensorFromVmmMeta(t);
               }
              if (t.size() != 7)
                throw std::runtime_error(

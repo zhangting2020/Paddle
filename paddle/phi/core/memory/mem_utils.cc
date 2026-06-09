@@ -91,7 +91,7 @@ size_t TotalMemoryCompactor::Compact(std::list<Block>& blocks,
 }
 
 #if defined(PADDLE_WITH_CUDA)
-std::pair<size_t, size_t> VMMMaxFreeSize(const GPUPlace& place, int32_t n) {
+std::pair<size_t, size_t> VmmMaxFreeSize(const GPUPlace& place, int32_t n) {
   FreeMemoryMetricsVisitor free_memory_metrics_visitor(n);
   allocation::AllocatorFacade::Instance().Accept(place,
                                                  &free_memory_metrics_visitor);
@@ -105,10 +105,10 @@ bool TryAllocBatch(const GPUPlace& place, const std::vector<size_t>& sizes) {
   return try_alloc_visitor.IsTryAllocSuccess();
 }
 
-size_t VMMCompact(const GPUPlace& place) { return memory::Compact(place); }
+size_t VmmCompact(const GPUPlace& place) { return memory::Compact(place); }
 
 std::vector<std::vector<std::pair<size_t, uintptr_t>>>
-FreeBlockInfoOfVMMAllocator(const GPUPlace& place) {
+FreeBlockInfoOfVmmAllocator(const GPUPlace& place) {
   VMMFreeBlocksInfoVisitor free_blocks_info_visitor;
   allocation::AllocatorFacade::Instance().Accept(place,
                                                  &free_blocks_info_visitor);
@@ -116,7 +116,7 @@ FreeBlockInfoOfVMMAllocator(const GPUPlace& place) {
 }
 
 std::vector<std::vector<std::tuple<size_t, uintptr_t, bool>>>
-AllBlockInfoOfVMMAllocator(const GPUPlace& place) {
+AllBlockInfoOfVmmAllocator(const GPUPlace& place) {
   VMMAllBlocksInfoVisitor all_blocks_info_visitor;
   allocation::AllocatorFacade::Instance().Accept(place,
                                                  &all_blocks_info_visitor);
