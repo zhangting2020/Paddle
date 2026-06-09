@@ -752,6 +752,9 @@ CUDAVirtualMemAllocatorV2::CreateStagedRemapDestinationAllocationWithBlock(
     result.allocation = nullptr;
     throw;
   }
+  for (const auto& meta : layout) {
+    backing_map_.MarkMapped(meta->Base(), meta, meta->Size());
+  }
   return result;
 }
 
