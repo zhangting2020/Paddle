@@ -338,12 +338,12 @@ TEST(CUDAVirtualMemAllocatorV2, DetectsDriverVaRangeMapping) {
   EXPECT_TRUE(allocator.IsDriverVaRangeUnmapped(va, allocator.handle_size()));
 }
 
-TEST(CUDAVirtualMemAllocatorV2, AllocateWithBlockReturnsMappedFreeBlock) {
+TEST(CUDAVirtualMemAllocatorV2, AppendWithBlockReturnsMappedFreeBlock) {
   CUDAVirtualMemAllocatorV2 allocator(
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
   auto allocation_with_block =
-      allocator.AllocateWithBlock(allocator.handle_size() * 2);
+      allocator.AppendWithBlock(allocator.handle_size() * 2);
   ASSERT_NE(allocation_with_block.allocation, nullptr);
 
   const auto& block = allocation_with_block.block;
@@ -370,14 +370,14 @@ TEST(CUDAVirtualMemAllocatorV2, FreeRemovesHandleRegistration) {
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
   auto allocation_with_block =
-      allocator.AllocateWithBlock(allocator.handle_size());
+      allocator.AppendWithBlock(allocator.handle_size());
   ASSERT_NE(allocation_with_block.allocation, nullptr);
   void* ptr = allocation_with_block.allocation->ptr();
   ASSERT_EQ(allocation_with_block.block.AllocationPartCount(), 1UL);
 
   allocation_with_block.allocation.reset();
 
-  auto reused = allocator.AllocateAtVAWithBlock(
+  auto reused = allocator.PlaceAtVAWithBlock(
       reinterpret_cast<VMMDevicePtr>(ptr), allocator.handle_size());
   ASSERT_NE(reused.allocation, nullptr);
   EXPECT_EQ(reused.allocation->ptr(), ptr);
@@ -389,7 +389,7 @@ TEST(CUDAVirtualMemAllocatorV2, MoveBackingPageRoundTripsHandle) {
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
   auto allocation_with_block =
-      allocator.AllocateWithBlock(allocator.handle_size());
+      allocator.AppendWithBlock(allocator.handle_size());
   ASSERT_NE(allocation_with_block.allocation, nullptr);
   ASSERT_EQ(allocation_with_block.block.AllocationPartCount(), 1UL);
 
@@ -435,7 +435,7 @@ TEST(CUDAVirtualMemAllocatorV2, DetectsRemapDestinationOwnedLayouts) {
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
   auto allocation_with_block =
-      allocator.AllocateWithBlock(allocator.handle_size());
+      allocator.AppendWithBlock(allocator.handle_size());
   ASSERT_NE(allocation_with_block.allocation, nullptr);
   auto* ptr = allocation_with_block.allocation->ptr();
   EXPECT_FALSE(allocator.IsAllocationOwnedByRemapDestination(ptr));
@@ -452,7 +452,7 @@ TEST(CUDAVirtualMemAllocatorV2, DetectsReusableBlockBacking) {
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
   auto allocation_with_block =
-      allocator.AllocateWithBlock(allocator.handle_size() * 2);
+      allocator.AppendWithBlock(allocator.handle_size() * 2);
   ASSERT_NE(allocation_with_block.allocation, nullptr);
   BlockV2 block = allocation_with_block.block;
   EXPECT_TRUE(allocator.IsBlockReusableForAllocation(block));
@@ -470,7 +470,7 @@ TEST(CUDAVirtualMemAllocatorV2, CollectsAndPinsIpcBlockBacking) {
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
   auto allocation_with_block =
-      allocator.AllocateWithBlock(allocator.handle_size() * 2);
+      allocator.AppendWithBlock(allocator.handle_size() * 2);
   ASSERT_NE(allocation_with_block.allocation, nullptr);
   ASSERT_EQ(allocation_with_block.block.AllocationPartCount(), 2UL);
 
@@ -516,7 +516,7 @@ TEST(CUDAVirtualMemAllocatorV2, SetsBlockBackingRemapEvent) {
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
   auto allocation_with_block =
-      allocator.AllocateWithBlock(allocator.handle_size());
+      allocator.AppendWithBlock(allocator.handle_size());
   ASSERT_NE(allocation_with_block.allocation, nullptr);
   ASSERT_EQ(allocation_with_block.block.AllocationPartCount(), 1UL);
 
@@ -537,7 +537,7 @@ TEST(CUDAVirtualMemAllocatorV2, LazyPendingStreamBlocksRemapAndRelease) {
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
   auto allocation_with_block =
-      allocator.AllocateWithBlock(allocator.handle_size());
+      allocator.AppendWithBlock(allocator.handle_size());
   ASSERT_NE(allocation_with_block.allocation, nullptr);
   ASSERT_EQ(allocation_with_block.block.AllocationPartCount(), 1UL);
 

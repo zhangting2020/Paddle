@@ -27,7 +27,7 @@
 #endif
 #include "paddle/phi/core/enforce.h"
 
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
 #include "paddle/phi/core/platform/device/gpu/gpu_types.h"
 #endif
 
@@ -49,18 +49,14 @@ using VMMAllocHandle = uint64_t;
 // double-destroy SIGSEGV that occurred when raw gpuEvent_t pointers
 // were shallow-copied across split blocks and then independently
 // destroyed during merge.
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
 struct CUDAEventGuard {
   gpuEvent_t event{nullptr};
 
   explicit CUDAEventGuard(gpuEvent_t e) : event(e) {}
   ~CUDAEventGuard() {
     if (event != nullptr) {
-#ifdef PADDLE_WITH_CUDA
       cudaEventDestroy(event);
-#else
-      hipEventDestroy(event);
-#endif
     }
   }
 
@@ -451,7 +447,7 @@ struct BlockV2 {
     auto block = MakeMappedFreeBlock(
         BeginPtr() + offset, len, parts_, offset, len, pool_type_);
     block.ipc_exported_ = ipc_exported_;
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     block.CopyRemapSafetyFrom(*this);
 #endif
     return block;
@@ -492,7 +488,7 @@ struct BlockV2 {
   }
   void MarkActive() {
     type_ = BlockType::kActive;
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     ClearRemapSafety();
 #endif
   }
@@ -506,7 +502,7 @@ struct BlockV2 {
     pool_type_ = pool_type;
     ipc_exported_ = false;
     parts_.clear();
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     ClearRemapSafety();
 #endif
   }
@@ -563,7 +559,7 @@ struct BlockV2 {
     size_ += src->size_;
     ipc_exported_ = ipc_exported_ || src->ipc_exported_;
     AppendPartsFrom(src);
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     AppendRemapSafetyFrom(*src);
 #endif
   }
@@ -620,7 +616,7 @@ struct BlockV2 {
 
  public:
   PoolType pool_type_{PoolType::kLarge};
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
   void ClearRemapSafety() {
     owning_stream_ = nullptr;
     remap_safe_event_.reset();

@@ -131,7 +131,7 @@ void VMMAutoGrowthBestFitMultiPoolAllocatorV2::GetFreeBlockStats(
 
 bool VMMAutoGrowthBestFitMultiPoolAllocatorV2::SetBlockRemapEvent(
     void* ptr,
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     gpuStream_t stream,
     std::shared_ptr<CUDAEventGuard> event
 #else

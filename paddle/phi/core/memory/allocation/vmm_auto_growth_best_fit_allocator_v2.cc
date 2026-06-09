@@ -207,7 +207,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   CUDAVirtualMemAllocatorV2::AllocationWithBlock grow_alloc;
   if (grow_size > 0) {
     try {
-      grow_alloc = underlying_allocator_->AllocateWithBlock(grow_size);
+      grow_alloc = underlying_allocator_->AppendWithBlock(grow_size);
     } catch (const BadAlloc& bad_alloc) {
       // Grow failed: restore the tail FREE block before propagating.
       if (has_tail_reuse) {
@@ -433,7 +433,7 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
       common::errors::NotFound("Can not find active block for allocation %p in "
                                "VMMAutoGrowthBestFitAllocatorV2.",
                                allocation->ptr()));
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
   auto remap_event = wrapped_allocation->TakeRemapEvent();
   if (remap_event != nullptr) {
     PADDLE_ENFORCE_EQ(
@@ -510,7 +510,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
 
 bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
     void* ptr,
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     gpuStream_t stream,
     std::shared_ptr<CUDAEventGuard> event
 #else
@@ -523,7 +523,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
     if (!it->IsActive() || it->ptr_ != ptr) {
       continue;
     }
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     return underlying_allocator_->SetBlockRemapEvent(
         *it, stream, std::move(event));
 #else
@@ -537,7 +537,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
 
 bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
     BlockListIt block_it,
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     gpuStream_t stream,
     std::shared_ptr<CUDAEventGuard> event
 #else
@@ -549,7 +549,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
   if (block_it == all_blocks_.end() || !block_it->IsActive()) {
     return false;
   }
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
   return underlying_allocator_->SetBlockRemapEvent(
       *block_it, stream, std::move(event));
 #else
@@ -581,7 +581,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
     const size_t remaining_size = block_it->size_ - size;
     BlockV2 remaining_block =
         block_it->MakeMappedFreeSubBlock(size, remaining_size);
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     // The free remainder keeps the source block's remap-safety stream. The
     // reused prefix is cleared by MarkActive().
 #endif
@@ -631,7 +631,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
           << " tail_offset=" << underlying_allocator_->tail_offset();
   CUDAVirtualMemAllocatorV2::AllocationWithBlock unmapped_free_alloc;
   try {
-    unmapped_free_alloc = underlying_allocator_->AllocateAtVAWithBlock(
+    unmapped_free_alloc = underlying_allocator_->PlaceAtVAWithBlock(
         unmapped_free_ptr, backing_size);
   } catch (...) {
     // Do not mutate the allocation view if backing cannot be created in this
@@ -659,7 +659,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
   if (backing_size > size) {
     BlockV2 mapped_remain =
         mapped_block.MakeMappedFreeSubBlock(size, backing_size - size);
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     mapped_remain.owning_stream_ = nullptr;
     mapped_remain.remap_safe_event_.reset();
     mapped_remain.remap_pending_states_.clear();
@@ -996,7 +996,7 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
         EraseFreeBlock(it);
         it->TrimToPrefix(left_size);
         InsertFreeBlock(it);
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
         right.CopyRemapSafetyFrom(*it);
 #endif
         auto right_it = all_blocks_.insert(std::next(it), std::move(right));

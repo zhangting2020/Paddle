@@ -36,7 +36,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
   VLOG(3) << "VMM V2 compactor: entering Compact, blocks=" << blocks->size()
           << " handle_size=" << handle_size;
 
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
   // Clear any sticky CUDA error before we start.
   cudaGetLastError();
   // No cudaDeviceSynchronize here. Source collection uses per-event query

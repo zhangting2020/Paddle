@@ -998,7 +998,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   auto tail_active = allocator.Allocate(2UL * handle_size);
   ASSERT_NE(tail_active, nullptr);
 
-  auto hidden_tail_mapping = underlying->AllocateWithBlock(handle_size);
+  auto hidden_tail_mapping = underlying->AppendWithBlock(handle_size);
   ASSERT_TRUE(hidden_tail_mapping.HasAllocation());
 
   source_a.reset();

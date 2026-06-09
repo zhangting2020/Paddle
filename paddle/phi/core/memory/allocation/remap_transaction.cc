@@ -71,23 +71,15 @@ VMMDevicePtr AlignUp(VMMDevicePtr value, size_t alignment) {
 }
 
 bool QueryRemapEvent(VMMBlockRemapState* state) {
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
   if (state->event == nullptr) {
     return true;
   }
-#ifdef PADDLE_WITH_CUDA
   auto err = cudaEventQuery(state->event->event);
   if (err == cudaErrorNotReady) {
     return false;
   }
   PADDLE_ENFORCE_GPU_SUCCESS(err);
-#else
-  auto err = hipEventQuery(state->event->event);
-  if (err == hipErrorNotReady) {
-    return false;
-  }
-  PADDLE_ENFORCE_GPU_SUCCESS(err);
-#endif
   state->event.reset();
   state->stream = nullptr;
 #endif
@@ -95,21 +87,14 @@ bool QueryRemapEvent(VMMBlockRemapState* state) {
 }
 
 bool RecordRemapEvent(VMMBlockRemapState* state) {
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
   if (state->stream == nullptr || state->event != nullptr) {
     return true;
   }
-#ifdef PADDLE_WITH_CUDA
   gpuEvent_t event = nullptr;
   PADDLE_ENFORCE_GPU_SUCCESS(
       cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
   PADDLE_ENFORCE_GPU_SUCCESS(cudaEventRecord(event, state->stream));
-#else
-  gpuEvent_t event = nullptr;
-  PADDLE_ENFORCE_GPU_SUCCESS(
-      hipEventCreateWithFlags(&event, hipEventDisableTiming));
-  PADDLE_ENFORCE_GPU_SUCCESS(hipEventRecord(event, state->stream));
-#endif
   state->event = std::make_shared<CUDAEventGuard>(event);
   return false;
 #else
@@ -118,14 +103,13 @@ bool RecordRemapEvent(VMMBlockRemapState* state) {
 }
 
 bool RemapStateReady(VMMBlockRemapState* state) {
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
   if (!QueryRemapEvent(state)) {
     return false;
   }
   if (state->stream == nullptr) {
     return true;
   }
-#ifdef PADDLE_WITH_CUDA
   auto err = cudaStreamQuery(state->stream);
   if (err == cudaSuccess) {
     state->stream = nullptr;
@@ -135,17 +119,6 @@ bool RemapStateReady(VMMBlockRemapState* state) {
   if (err != cudaErrorNotReady) {
     PADDLE_ENFORCE_GPU_SUCCESS(err);
   }
-#else
-  auto err = hipStreamQuery(state->stream);
-  if (err == hipSuccess) {
-    state->stream = nullptr;
-    state->event.reset();
-    return true;
-  }
-  if (err != hipErrorNotReady) {
-    PADDLE_ENFORCE_GPU_SUCCESS(err);
-  }
-#endif
   return RecordRemapEvent(state) && QueryRemapEvent(state);
 #else
   return true;
@@ -156,7 +129,7 @@ bool IsRemapSafe(BlockV2* block) {
   if (!block->CanBeRemapSource()) {
     return false;
   }
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
   bool ready = true;
   VMMBlockRemapState primary{block->owning_stream_, block->remap_safe_event_};
   if (!RemapStateReady(&primary)) {
@@ -585,10 +558,10 @@ void RemapTransaction::ApplyPlannedSourceBlocks(
 bool RemapTransaction::TailIsUsable(VMMDevicePtr tail_va,
                                     size_t total_bytes,
                                     VMMDevicePtr va_limit) const {
-  if (tail_va + total_bytes > va_limit) {
+  if (tail_va > va_limit || total_bytes > va_limit - tail_va) {
     return false;
   }
-  return vmm_allocator_->IsDriverVaRangeUnmapped(tail_va, total_bytes);
+  return vmm_allocator_->IsBackingRangeUnmapped(tail_va, total_bytes);
 }
 
 size_t RemapTransaction::CountLeadingUnmappedBackingPages(VMMDevicePtr va,

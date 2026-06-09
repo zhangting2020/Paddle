@@ -21,10 +21,12 @@
 #include "paddle/phi/backends/gpu/gpu_info.h"
 #include "paddle/phi/core/memory/allocation/retry_allocator.h"
 #include "paddle/phi/core/memory/allocation/stat_allocator.h"
+#ifdef PADDLE_WITH_CUDA
 #include "paddle/phi/core/memory/allocation/vmm_allocator_v2_types.h"
 #include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_multi_pool_allocator_v2.h"
 
 COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
+#endif
 
 #if defined(PADDLE_WITH_CUDA)
 #include "paddle/phi/backends/gpu/cuda/cuda_graph.h"
@@ -36,6 +38,7 @@ namespace paddle::memory::allocation {
 
 namespace {
 
+#ifdef PADDLE_WITH_CUDA
 VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVMMV2MultiPoolAllocator(
     const std::shared_ptr<Allocator>& allocator) {
   if (allocator == nullptr) {
@@ -65,6 +68,7 @@ void MarkVMMV2RemapPendingStream(StreamSafeCUDAAllocator* allocator,
             << "; compact/remap safety may be incomplete for this block";
   }
 }
+#endif
 
 }  // namespace
 
@@ -77,10 +81,13 @@ StreamSafeCUDAAllocation::StreamSafeCUDAAllocation(
                  underlying_allocation->size(),
                  underlying_allocation->place()),
       underlying_allocation_(std::move(underlying_allocation)),
+#ifdef PADDLE_WITH_CUDA
       vmm_v2_remap_allocation_(
           dynamic_cast<VMMRemapEventAllocation*>(underlying_allocation_.get())),
+#endif
       owning_stream_(owning_stream),
-      allocator_(allocator->shared_from_this()) {}
+      allocator_(allocator->shared_from_this()) {
+}
 
 bool StreamSafeCUDAAllocation::RecordStream(gpuStream_t stream) {
   VLOG(8) << "Try record stream " << stream << " for address " << ptr();
@@ -174,12 +181,14 @@ void StreamSafeCUDAAllocation::RecordGraphCapturingStreams() {
   graph_capturing_stream_set_.clear();
 }
 
+#ifdef PADDLE_WITH_CUDA
 bool StreamSafeCUDAAllocation::SetVMMV2RemapEvent() {
   if (vmm_v2_remap_allocation_ == nullptr) {
     return false;
   }
   return vmm_v2_remap_allocation_->SetVMMRemapEvent(owning_stream_, nullptr);
 }
+#endif
 
 void StreamSafeCUDAAllocation::RecordStreamWithNoGraphCapturing(
     gpuStream_t stream) {
@@ -216,7 +225,9 @@ StreamSafeCUDAAllocator::StreamSafeCUDAAllocator(
     gpuStream_t default_stream,
     bool in_cuda_graph_capturing)
     : underlying_allocator_(std::move(underlying_allocator)),
+#ifdef PADDLE_WITH_CUDA
       vmm_v2_allocator_(GetVMMV2MultiPoolAllocator(underlying_allocator_)),
+#endif
       place_(place),
       default_stream_(default_stream),
       in_cuda_graph_capturing_(in_cuda_graph_capturing) {
@@ -279,6 +290,7 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
       // coordinated by RetryAllocator when it is enabled.
       //
       // During training, NEVER release physical memory in this base OOM path.
+#ifdef PADDLE_WITH_CUDA
       auto* vmm = GetVMMV2MultiPoolAllocator(underlying_allocator_);
       if (vmm && FLAGS_vmm_v2_remap_on_oom) {
         size_t compacted = CompactImpl(place_, size);
@@ -312,6 +324,7 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
               second_failure.c_str()));
         }
       } else {
+#endif
         PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
             "Allocation of %zu bytes failed.\n"
             "Initial allocation failure:\n%s\n"
@@ -319,7 +332,9 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
             size,
             first_failure.c_str(),
             second_failure.c_str()));
+#ifdef PADDLE_WITH_CUDA
       }
+#endif
     }
   }
   StreamSafeCUDAAllocation* allocation = new StreamSafeCUDAAllocation(
@@ -342,7 +357,9 @@ void StreamSafeCUDAAllocator::FreeImpl(phi::Allocation* allocation) {
   VLOG(8) << "Try free allocation " << stream_safe_cuda_allocation->ptr();
   if (stream_safe_cuda_allocation->CanBeFreed()) {
     VLOG(9) << "Directly delete allocation";
+#ifdef PADDLE_WITH_CUDA
     MarkVMMV2RemapPendingStream(this, stream_safe_cuda_allocation);
+#endif
     delete stream_safe_cuda_allocation;
   } else {
     VLOG(9) << "Put into unfreed_allocation list";
@@ -398,7 +415,9 @@ void StreamSafeCUDAAllocator::ProcessUnfreedAllocations() {
   for (auto it = unfreed_allocations_.begin();
        it != unfreed_allocations_.end();) {
     if ((*it)->CanBeFreed()) {
+#ifdef PADDLE_WITH_CUDA
       MarkVMMV2RemapPendingStream(this, *it);
+#endif
       delete *it;
       it = unfreed_allocations_.erase(it);
     } else {

@@ -18,7 +18,6 @@
 
 #include <algorithm>
 #include <mutex>
-#include <unordered_set>
 
 #include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
@@ -134,7 +133,7 @@ void VMMBackingMap::MarkMapped(VMMDevicePtr va,
     page.handle = handle;
     page.meta.reset();
     page.mapped = true;
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     page.pending_events.clear();
 #endif
     page.epoch++;
@@ -169,7 +168,7 @@ void VMMBackingMap::MarkMapped(VMMDevicePtr va,
     page.handle = handle;
     page.meta = meta;
     page.mapped = true;
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     page.pending_events.clear();
 #endif
     page.epoch++;
@@ -195,7 +194,7 @@ void VMMBackingMap::MarkUnmapped(VMMDevicePtr va, size_t size) {
     page.handle = 0;
     page.meta.reset();
     page.mapped = false;
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     page.pending_events.clear();
 #endif
     page.epoch++;
@@ -226,7 +225,7 @@ void VMMBackingMap::MarkReleased(VMMDevicePtr va,
     page.meta.reset();
     page.mapped = false;
     page.ipc_exported = false;
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     page.pending_events.clear();
 #endif
     page.epoch++;
@@ -258,7 +257,7 @@ void VMMBackingMap::MarkIpcExported(VMMDevicePtr va, size_t size) {
   }
 }
 
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
 void VMMBackingMap::MarkPendingEvent(VMMDevicePtr va,
                                      size_t size,
                                      gpuStream_t stream,
@@ -372,47 +371,6 @@ bool VMMBackingMap::CollectIpcPartDescriptors(
     std::vector<IpcBlockPartDescriptor>* descriptors) const {
   std::lock_guard<SpinLock> guard(spinlock_);
   return CollectIpcPartDescriptorsLocked(va, size, descriptors);
-}
-
-bool VMMBackingMap::ForEachUniqueMappedHandle(
-    VMMDevicePtr va,
-    size_t size,
-    const std::function<bool(const std::shared_ptr<VMMHandleMeta>&)>& fn)
-    const {
-  std::vector<std::shared_ptr<VMMHandleMeta>> handles;
-  {
-    std::lock_guard<SpinLock> guard(spinlock_);
-    size_t start = 0;
-    size_t count = 0;
-    if (!ComputeOverlappedPages(base_,
-                                size_,
-                                page_size_,
-                                va,
-                                size,
-                                "ForEachUniqueMappedHandle",
-                                &start,
-                                &count)) {
-      return false;
-    }
-    std::unordered_set<VMMHandleMeta*> seen;
-    handles.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-      const auto& page = pages_[start + i];
-      if (!page.mapped || page.meta == nullptr) {
-        return false;
-      }
-      if (!seen.insert(page.meta.get()).second) {
-        continue;
-      }
-      handles.push_back(page.meta);
-    }
-  }
-  for (const auto& handle : handles) {
-    if (!fn(handle)) {
-      return false;
-    }
-  }
-  return true;
 }
 
 bool VMMBackingMap::IsRangeMapped(VMMDevicePtr va, size_t size) const {
@@ -1073,45 +1031,26 @@ void VMMBackingMap::AppendUnmappedPagesFullyCoveredByLocked(
   }
 }
 
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
 bool VMMBackingMap::PageEventsReadyLocked(Page* page,
                                           const char* context) const {
   for (auto it = page->pending_events.begin();
        it != page->pending_events.end();) {
     if (it->event == nullptr || it->event->event == nullptr) {
       gpuEvent_t event;
-#ifdef PADDLE_WITH_CUDA
       PADDLE_ENFORCE_GPU_SUCCESS(
           cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
       PADDLE_ENFORCE_GPU_SUCCESS(cudaEventRecord(event, it->stream));
-#else
-      PADDLE_ENFORCE_GPU_SUCCESS(
-          hipEventCreateWithFlags(&event, hipEventDisableTiming));
-      PADDLE_ENFORCE_GPU_SUCCESS(hipEventRecord(event, it->stream));
-#endif
       it->event = std::make_shared<CUDAEventGuard>(event);
       VLOG(6) << "VMM V2 BackingMap lazily recorded pending event in "
               << context;
       return false;
     }
-#ifdef PADDLE_WITH_CUDA
     gpuError_t err = cudaEventQuery(it->event->event);
     if (err != cudaSuccess && err != cudaErrorNotReady) {
       PADDLE_ENFORCE_GPU_SUCCESS(err);
     }
-#else
-    gpuError_t err = hipEventQuery(it->event->event);
-    if (err != hipSuccess && err != hipErrorNotReady) {
-      PADDLE_ENFORCE_GPU_SUCCESS(err);
-    }
-#endif
-    if (
-#ifdef PADDLE_WITH_CUDA
-        err == cudaSuccess
-#else
-        err == hipSuccess
-#endif
-    ) {
+    if (err == cudaSuccess) {
       it = page->pending_events.erase(it);
       continue;
     }
@@ -1124,7 +1063,7 @@ bool VMMBackingMap::PageEventsReadyLocked(Page* page,
 
 bool VMMBackingMap::PageCanUseBackingLocked(Page* page,
                                             const char* context) const {
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
   return PageEventsReadyLocked(page, context);
 #else
   (void)page;

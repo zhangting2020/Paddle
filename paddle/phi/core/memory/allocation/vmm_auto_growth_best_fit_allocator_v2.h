@@ -87,7 +87,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
                           std::vector<BlockPart>* parts);
 
   bool SetBlockRemapEvent(void* ptr,
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
                           gpuStream_t stream,
                           std::shared_ptr<CUDAEventGuard> event
 #else
@@ -96,7 +96,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
 #endif
   );
   bool SetBlockRemapEvent(BlockListIt block_it,
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
                           gpuStream_t stream,
                           std::shared_ptr<CUDAEventGuard> event
 #else

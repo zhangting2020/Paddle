@@ -365,6 +365,7 @@ class VMMTensorPartsVisitor : public AllocatorVisitor {
 
   void Visit(VirtualMemoryAutoGrowthBestFitAllocator* allocator) override;
   void Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) override;
+  void Visit(VMMAutoGrowthBestFitMultiPoolAllocatorV2* allocator) override;
 
   bool Found() const { return found_; }
   const std::vector<BlockPart>& Parts() const { return parts_; }

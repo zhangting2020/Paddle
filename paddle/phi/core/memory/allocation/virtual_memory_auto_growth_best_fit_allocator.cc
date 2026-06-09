@@ -70,8 +70,8 @@ bool NeedSplit(size_t block_size, size_t alignment, size_t alloc_size) {
 }
 
 static BlockPart MakeBlockPart(void *ptr, size_t size, int device) {
-  auto chunk = std::make_shared<VmmChunkMeta>();
-  chunk->base = reinterpret_cast<VmmDevicePtr>(ptr);
+  auto chunk = std::make_shared<VMMChunkMeta>();
+  chunk->base = reinterpret_cast<VMMDevicePtr>(ptr);
   chunk->size = size;
 #ifdef PADDLE_WITH_CUDA
   auto handle = CUDAVirtualMemAllocator::GetHandleFromBasePtr(ptr);

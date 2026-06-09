@@ -206,6 +206,22 @@ void VMMTensorPartsVisitor::Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) {
     parts_ = std::move(parts);
   }
 }
+
+void VMMTensorPartsVisitor::Visit(
+    VMMAutoGrowthBestFitMultiPoolAllocatorV2* allocator) {
+  if (found_) {
+    return;
+  }
+  if (allocator->small_allocator()) {
+    allocator->small_allocator()->Accept(this);
+  }
+  if (found_) {
+    return;
+  }
+  if (allocator->large_allocator()) {
+    allocator->large_allocator()->Accept(this);
+  }
+}
 #endif
 }  // namespace memory
 }  // namespace paddle

@@ -68,7 +68,7 @@ class VMMBackingMap {
   void MarkUnmapped(VMMDevicePtr va, size_t size);
   void MarkReleased(VMMDevicePtr va, VMMAllocHandle handle, size_t size);
   void MarkIpcExported(VMMDevicePtr va, size_t size);
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
   void MarkPendingEvent(VMMDevicePtr va,
                         size_t size,
                         gpuStream_t stream,
@@ -84,11 +84,6 @@ class VMMBackingMap {
       VMMDevicePtr va,
       size_t size,
       std::vector<IpcBlockPartDescriptor>* descriptors) const;
-  bool ForEachUniqueMappedHandle(
-      VMMDevicePtr va,
-      size_t size,
-      const std::function<bool(const std::shared_ptr<VMMHandleMeta>&)>& fn)
-      const;
 
   bool IsRangeMapped(VMMDevicePtr va, size_t size) const;
   bool IsRangeUnmapped(VMMDevicePtr va, size_t size) const;
@@ -132,7 +127,7 @@ class VMMBackingMap {
   size_t TotalMappedBytes() const;
 
  private:
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
   struct PendingEvent {
     gpuStream_t stream{nullptr};
     std::shared_ptr<CUDAEventGuard> event;
@@ -144,7 +139,7 @@ class VMMBackingMap {
     std::shared_ptr<VMMHandleMeta> meta;
     bool mapped{false};
     bool ipc_exported{false};
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
     std::vector<PendingEvent> pending_events;
 #endif
     uint64_t epoch{0};
@@ -186,7 +181,7 @@ class VMMBackingMap {
       const char* context,
       size_t max_pages,
       std::vector<UnmappedPage>* pages) const;
-#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+#ifdef PADDLE_WITH_CUDA
   bool PageEventsReadyLocked(Page* page, const char* context) const;
 #endif
   bool PageCanUseBackingLocked(Page* page, const char* context) const;
