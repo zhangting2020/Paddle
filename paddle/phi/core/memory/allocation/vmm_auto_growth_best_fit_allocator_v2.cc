@@ -207,7 +207,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   CUDAVirtualMemAllocatorV2::AllocationWithBlock grow_alloc;
   if (grow_size > 0) {
     try {
-      grow_alloc = underlying_allocator_->AllocateWithBlock(grow_size);
+      grow_alloc = underlying_allocator_->AppendWithBlock(grow_size);
     } catch (const BadAlloc& bad_alloc) {
       // Grow failed: restore the tail FREE block before propagating.
       if (has_tail_reuse) {
@@ -616,7 +616,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
           << " tail_offset=" << underlying_allocator_->TailOffset();
   CUDAVirtualMemAllocatorV2::AllocationWithBlock unmapped_free_alloc;
   try {
-    unmapped_free_alloc = underlying_allocator_->AllocateAtVAWithBlock(
+    unmapped_free_alloc = underlying_allocator_->PlaceAtVAWithBlock(
         unmapped_free_ptr, backing_size);
   } catch (...) {
     // Do not mutate the allocation view if backing cannot be created in this

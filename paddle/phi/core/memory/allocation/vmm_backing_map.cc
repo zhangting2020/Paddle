@@ -18,7 +18,6 @@
 
 #include <algorithm>
 #include <mutex>
-#include <unordered_set>
 
 #include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
@@ -29,6 +28,8 @@ namespace allocation {
 
 namespace {
 
+bool AddOverflow(VMMDevicePtr base, size_t size) { return base + size < base; }
+
 bool ComputeOverlappedPages(VMMDevicePtr base,
                             size_t backing_size,
                             size_t page_size,
@@ -37,8 +38,8 @@ bool ComputeOverlappedPages(VMMDevicePtr base,
                             const char* context,
                             size_t* start,
                             size_t* count) {
-  if (size == 0 || page_size == 0 || va < base || va + size < va ||
-      va + size > base + backing_size) {
+  if (size == 0 || page_size == 0 || AddOverflow(base, backing_size) ||
+      va < base || va + size < va || va + size > base + backing_size) {
     VLOG(0) << "VMM V2 BackingMap invalid overlap range in " << context
             << ": va=" << reinterpret_cast<void*>(va) << " size=" << size
             << " base=" << reinterpret_cast<void*>(base)
@@ -60,6 +61,17 @@ void VMMBackingMap::Configure(VMMDevicePtr base,
                               size_t page_size,
                               int device) {
   std::lock_guard<SpinLock> guard(spinlock_);
+  PADDLE_ENFORCE_GT(page_size,
+                    0UL,
+                    common::errors::InvalidArgument(
+                        "VMM V2 BackingMap page_size must be positive."));
+  PADDLE_ENFORCE_EQ(
+      size % page_size,
+      0UL,
+      common::errors::InvalidArgument(
+          "VMM V2 BackingMap size %zu must be page-aligned by page_size %zu.",
+          size,
+          page_size));
   if (configured_) {
     if (base_ != base || size_ != size || page_size_ != page_size ||
         device_ != device) {
@@ -94,9 +106,9 @@ bool VMMBackingMap::CheckRangeLocked(VMMDevicePtr va,
             << " size=" << size;
     return false;
   }
-  if (size == 0 || page_size_ == 0 || size % page_size_ != 0 || va < base_ ||
-      va + size < va || va + size > base_ + size_ ||
-      (va - base_) % page_size_ != 0) {
+  if (size == 0 || page_size_ == 0 || size % page_size_ != 0 ||
+      AddOverflow(base_, size_) || va < base_ || va + size < va ||
+      va + size > base_ + size_ || (va - base_) % page_size_ != 0) {
     VLOG(0) << "VMM V2 BackingMap invalid range in " << context
             << ": va=" << reinterpret_cast<void*>(va) << " size=" << size
             << " base=" << reinterpret_cast<void*>(base_)
@@ -355,47 +367,6 @@ bool VMMBackingMap::CollectIpcPartDescriptors(
     std::vector<IpcBlockPartDescriptor>* descriptors) const {
   std::lock_guard<SpinLock> guard(spinlock_);
   return CollectIpcPartDescriptorsLocked(va, size, descriptors);
-}
-
-bool VMMBackingMap::ForEachUniqueMappedHandle(
-    VMMDevicePtr va,
-    size_t size,
-    const std::function<bool(const std::shared_ptr<VMMHandleMeta>&)>& fn)
-    const {
-  std::vector<std::shared_ptr<VMMHandleMeta>> handles;
-  {
-    std::lock_guard<SpinLock> guard(spinlock_);
-    size_t start = 0;
-    size_t count = 0;
-    if (!ComputeOverlappedPages(base_,
-                                size_,
-                                page_size_,
-                                va,
-                                size,
-                                "ForEachUniqueMappedHandle",
-                                &start,
-                                &count)) {
-      return false;
-    }
-    std::unordered_set<VMMHandleMeta*> seen;
-    handles.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-      const auto& page = pages_[start + i];
-      if (!page.mapped || page.meta == nullptr) {
-        return false;
-      }
-      if (!seen.insert(page.meta.get()).second) {
-        continue;
-      }
-      handles.push_back(page.meta);
-    }
-  }
-  for (const auto& handle : handles) {
-    if (!fn(handle)) {
-      return false;
-    }
-  }
-  return true;
 }
 
 bool VMMBackingMap::IsRangeMapped(VMMDevicePtr va, size_t size) const {
@@ -928,8 +899,8 @@ void VMMBackingMap::AppendMappedPagesFullyCoveredByLocked(
             << " size=" << size;
     return;
   }
-  if (size == 0 || page_size_ == 0 || va < base_ || va + size < va ||
-      va + size > base_ + size_) {
+  if (size == 0 || page_size_ == 0 || AddOverflow(base_, size_) || va < base_ ||
+      va + size < va || va + size > base_ + size_) {
     VLOG(0) << "VMM V2 BackingMap invalid range in " << context
             << ": va=" << reinterpret_cast<void*>(va) << " size=" << size
             << " base=" << reinterpret_cast<void*>(base_)
@@ -1025,8 +996,8 @@ void VMMBackingMap::AppendUnmappedPagesFullyCoveredByLocked(
             << " size=" << size;
     return;
   }
-  if (size == 0 || page_size_ == 0 || va < base_ || va + size < va ||
-      va + size > base_ + size_) {
+  if (size == 0 || page_size_ == 0 || AddOverflow(base_, size_) || va < base_ ||
+      va + size < va || va + size > base_ + size_) {
     VLOG(0) << "VMM V2 BackingMap invalid range in " << context
             << ": va=" << reinterpret_cast<void*>(va) << " size=" << size
             << " base=" << reinterpret_cast<void*>(base_)

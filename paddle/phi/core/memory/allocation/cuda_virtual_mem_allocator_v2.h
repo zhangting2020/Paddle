@@ -112,10 +112,10 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
       bool unmap_mapped_source);
 
   const GPUPlace& place() const { return place_; }
-  AllocationWithBlock AllocateWithBlock(size_t size);
+  AllocationWithBlock AppendWithBlock(size_t size);
   // Create fresh physical backing and map it at an existing reserved VA range.
   // This is used by upper layers to reuse unmapped-free VA space in place.
-  AllocationWithBlock AllocateAtVAWithBlock(VMMDevicePtr ptr, size_t size);
+  AllocationWithBlock PlaceAtVAWithBlock(VMMDevicePtr ptr, size_t size);
   bool IsAllocationOwnedByRemapDestination(void* ptr) const;
 
   // Create a staged synthetic Allocation and mapped-free block for handles
@@ -140,12 +140,6 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
                            VMMAllocHandle handle,
                            size_t size);
   void MarkBackingIpcExported(VMMDevicePtr ptr, size_t size);
-#if defined(PADDLE_WITH_CUDA)
-  void MarkBackingPendingEvent(VMMDevicePtr ptr,
-                               size_t size,
-                               gpuStream_t stream,
-                               std::shared_ptr<CUDAEventGuard> event);
-#endif
   bool HasIpcExportedRange(VMMDevicePtr ptr, size_t size) const;
   bool IsRangeReleasable(VMMDevicePtr ptr, size_t size) const;
   bool IsRangeReusable(VMMDevicePtr ptr, size_t size) const;
@@ -154,11 +148,9 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
                             std::vector<BlockPart>* ipc_parts) const;
   bool MarkBlockIpcExported(const BlockV2& block);
   bool HasBlockIpcExported(const BlockV2& block) const;
-#if defined(PADDLE_WITH_CUDA)
   bool SetBlockRemapEvent(const BlockV2& block,
                           gpuStream_t stream,
                           std::shared_ptr<CUDAEventGuard> event);
-#endif
   bool IsBlockReusableForAllocation(const BlockV2& block) const;
   bool ValidateBackingLayout(const HandleLayout& layout,
                              const char* context) const;
@@ -192,20 +184,25 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
                        size_t size,
                        std::vector<BlockPart>* ipc_parts) const;
   bool MarkIpcExported(VMMDevicePtr ptr, size_t size);
-#if defined(PADDLE_WITH_CUDA)
   bool SetRemapEvent(VMMDevicePtr ptr,
                      size_t size,
                      gpuStream_t stream,
                      std::shared_ptr<CUDAEventGuard> event);
-#endif
   void MapHandlesToVA(
       VMMDevicePtr ptr,
       const std::vector<VMMAllocHandle>& hs,
       const std::vector<std::shared_ptr<VMMHandleMeta>>* metas = nullptr);
   void RollbackCreatedHandles(const HandleLayout& layout) const;
   void MarkLayoutMapped(const HandleLayout& layout);
-  AllocationWithLayout AllocateWithLayout(size_t size);
-  AllocationWithLayout AllocateAtVAWithLayout(VMMDevicePtr ptr, size_t size);
+  AllocationWithLayout AppendWithLayout(size_t size);
+  AllocationWithLayout PlaceAtVAWithLayout(VMMDevicePtr ptr, size_t size);
+  HandleLayout CreateMappedHandleLayout(VMMDevicePtr ptr,
+                                        size_t aligned_size,
+                                        const char* context);
+  void SetAccessOrThrow(VMMDevicePtr ptr,
+                        size_t aligned_size,
+                        size_t num_handles,
+                        const char* context);
   bool CollectAllocationHandleLayout(void* ptr, HandleLayout* layout) const;
   bool IsRemapDestinationOwnedLayout(const HandleLayout& layout) const;
   Allocation* CreateStagedSyntheticAllocation(VMMDevicePtr ptr,
