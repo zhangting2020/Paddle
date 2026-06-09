@@ -194,6 +194,7 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
       const std::vector<std::shared_ptr<VMMHandleMeta>>* metas = nullptr);
   void RollbackCreatedHandles(const HandleLayout& layout) const;
   void MarkLayoutMapped(const HandleLayout& layout);
+  void MarkRemapDestinationLayoutMapped(const HandleLayout& layout);
   AllocationWithLayout AppendWithLayout(size_t size);
   AllocationWithLayout PlaceAtVAWithLayout(VMMDevicePtr ptr, size_t size);
   HandleLayout CreateMappedHandleLayout(VMMDevicePtr ptr,

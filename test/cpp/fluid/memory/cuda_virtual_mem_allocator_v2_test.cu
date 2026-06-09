@@ -447,6 +447,64 @@ TEST(CUDAVirtualMemAllocatorV2, DetectsRemapDestinationOwnedLayouts) {
   EXPECT_FALSE(allocator.IsAllocationOwnedByRemapDestination(nullptr));
 }
 
+TEST(CUDAVirtualMemAllocatorV2, StagedRemapDestinationBlocksSource) {
+  CUDAVirtualMemAllocatorV2 allocator(
+      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
+
+  auto allocation_with_block =
+      allocator.AppendWithBlock(allocator.HandleSize());
+  ASSERT_NE(allocation_with_block.allocation, nullptr);
+  ASSERT_EQ(allocation_with_block.block.AllocationPartCount(), 1UL);
+
+  const VMMDevicePtr source_va =
+      reinterpret_cast<VMMDevicePtr>(allocation_with_block.allocation->ptr());
+  const VMMDevicePtr target_va = source_va + allocator.HandleSize();
+  std::vector<std::pair<VMMDevicePtr, size_t>> source_ranges = {
+      {source_va, allocator.HandleSize()}};
+  std::vector<std::pair<VMMDevicePtr, size_t>> target_ranges = {
+      {target_va, allocator.HandleSize()}};
+  auto source_pages =
+      allocator.CollectMappedPages(source_ranges, allocator.HandleSize());
+  auto target_pages =
+      allocator.CollectUnmappedPages(target_ranges, allocator.HandleSize());
+  ASSERT_EQ(source_pages.size(), 1UL);
+  ASSERT_EQ(target_pages.size(), 1UL);
+
+  auto meta = allocation_with_block.block.FirstAllocationPartHandleMeta();
+  ASSERT_NE(meta, nullptr);
+  ASSERT_TRUE(allocator.MoveBackingPageForRemap(
+      source_pages[0], target_pages[0], meta));
+  EXPECT_TRUE(meta->IsOwnedByRemapDestination());
+
+  auto staged = allocator.CreateStagedRemapDestinationAllocationWithBlock(
+      target_va,
+      std::vector<VMMAllocHandle>{source_pages[0].handle},
+      0,
+      1,
+      PoolType::kLarge);
+  ASSERT_NE(staged.allocation, nullptr);
+  EXPECT_FALSE(
+      allocator.IsAllocationOwnedByRemapDestination(staged.allocation->ptr()));
+
+  auto remap_sources =
+      allocator.CollectRemapSourcePages(target_ranges, allocator.HandleSize());
+  ASSERT_EQ(remap_sources.size(), 1UL);
+  EXPECT_EQ(remap_sources[0].remap_source_state,
+            VMMBackingMap::RemapSourceState::kRemapDestinationOwned);
+
+  std::vector<BlockPart> ipc_parts;
+  EXPECT_TRUE(allocator.CollectBlockIpcParts(staged.block, &ipc_parts));
+  EXPECT_EQ(ipc_parts.size(), 1UL);
+  ASSERT_NE(ipc_parts[0].chunk, nullptr);
+  EXPECT_EQ(ipc_parts[0].chunk->base, target_va);
+  EXPECT_EQ(ipc_parts[0].chunk_rel_off, 0UL);
+  EXPECT_EQ(ipc_parts[0].len, allocator.HandleSize());
+
+  auto committed =
+      allocator.AdoptCommittedSyntheticAllocation(staged.allocation);
+  staged.allocation = nullptr;
+}
+
 TEST(CUDAVirtualMemAllocatorV2, DetectsReusableBlockBacking) {
   CUDAVirtualMemAllocatorV2 allocator(
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);

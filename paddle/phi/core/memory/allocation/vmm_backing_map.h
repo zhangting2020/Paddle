@@ -64,6 +64,9 @@ class VMMBackingMap {
   void MarkMapped(VMMDevicePtr va,
                   const std::shared_ptr<VMMHandleMeta>& meta,
                   size_t size);
+  void MarkRemapDestinationMapped(VMMDevicePtr va,
+                                  const std::shared_ptr<VMMHandleMeta>& meta,
+                                  size_t size);
   void MarkUnmapped(VMMDevicePtr va, size_t size);
   void MarkReleased(VMMDevicePtr va, VMMAllocHandle handle, size_t size);
   void MarkIpcExported(VMMDevicePtr va, size_t size);
@@ -132,6 +135,7 @@ class VMMBackingMap {
     VMMAllocHandle handle{0};
     std::shared_ptr<VMMHandleMeta> meta;
     bool mapped{false};
+    bool remap_destination_owned{false};
     bool ipc_exported{false};
     std::vector<PendingEvent> pending_events;
     uint64_t epoch{0};
@@ -145,7 +149,8 @@ class VMMBackingMap {
   void MarkPageMappedLocked(Page* page,
                             VMMDevicePtr page_va,
                             VMMAllocHandle handle,
-                            const std::shared_ptr<VMMHandleMeta>& meta);
+                            const std::shared_ptr<VMMHandleMeta>& meta,
+                            bool remap_destination_owned);
   void ResetPageToUnmappedLocked(Page* page, bool clear_ipc_exported);
   std::vector<std::pair<VMMDevicePtr, size_t>> CollectRangesLocked(
       VMMDevicePtr va, size_t size, bool mapped, const char* context) const;

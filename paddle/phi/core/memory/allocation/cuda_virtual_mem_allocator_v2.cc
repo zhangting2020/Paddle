@@ -150,6 +150,13 @@ void CUDAVirtualMemAllocatorV2::MarkLayoutMapped(const HandleLayout& layout) {
   }
 }
 
+void CUDAVirtualMemAllocatorV2::MarkRemapDestinationLayoutMapped(
+    const HandleLayout& layout) {
+  for (const auto& meta : layout) {
+    backing_map_.MarkRemapDestinationMapped(meta->Base(), meta, meta->Size());
+  }
+}
+
 void CUDAVirtualMemAllocatorV2::InitOnce() {
   std::call_once(init_flag_, [this] {
     platform::CUDADeviceGuard guard(place_.device);
@@ -738,11 +745,12 @@ CUDAVirtualMemAllocatorV2::CreateStagedRemapDestinationAllocationWithBlock(
   HandleLayout layout;
   layout.reserve(count);
   for (size_t i = 0; i < count; ++i) {
-    layout.push_back(
+    auto meta =
         std::make_shared<VMMHandleMeta>(VMMHandleMeta{ptr + i * handle_size_,
                                                       handle_size_,
                                                       handles[start + i],
-                                                      place_.device}));
+                                                      place_.device});
+    layout.push_back(std::move(meta));
   }
 
   StagedAllocationWithBlock result;
@@ -752,7 +760,7 @@ CUDAVirtualMemAllocatorV2::CreateStagedRemapDestinationAllocationWithBlock(
         CreateStagedSyntheticAllocation(ptr, result.bytes, layout);
     result.block = BlockV2::MakeMappedFreeBlockFromLayout(
         reinterpret_cast<void*>(ptr), result.bytes, layout, pool_type);
-    MarkLayoutMapped(layout);
+    MarkRemapDestinationLayoutMapped(layout);
   } catch (const std::exception& e) {
     VLOG(0) << "CreateStagedRemapDestinationAllocationWithBlock: failed to "
                "materialize destination, destroying staged allocation. dst="

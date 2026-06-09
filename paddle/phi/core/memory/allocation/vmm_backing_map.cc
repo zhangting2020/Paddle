@@ -124,7 +124,8 @@ void VMMBackingMap::MarkPageMappedLocked(
     Page* page,
     VMMDevicePtr page_va,
     VMMAllocHandle handle,
-    const std::shared_ptr<VMMHandleMeta>& meta) {
+    const std::shared_ptr<VMMHandleMeta>& meta,
+    bool remap_destination_owned) {
   PADDLE_ENFORCE_EQ(
       page->mapped && handle != 0 && page->handle != handle,
       false,
@@ -140,6 +141,7 @@ void VMMBackingMap::MarkPageMappedLocked(
   page->handle = handle;
   page->meta = meta;
   page->mapped = true;
+  page->remap_destination_owned = remap_destination_owned;
   page->pending_events.clear();
   page->epoch++;
 }
@@ -152,6 +154,7 @@ void VMMBackingMap::ResetPageToUnmappedLocked(Page* page,
   page->handle = 0;
   page->meta.reset();
   page->mapped = false;
+  page->remap_destination_owned = false;
   if (clear_ipc_exported) {
     page->ipc_exported = false;
   }
@@ -170,8 +173,11 @@ void VMMBackingMap::MarkMapped(VMMDevicePtr va,
   }
   for (size_t i = 0; i < count; ++i) {
     auto& page = pages_[start + i];
-    MarkPageMappedLocked(
-        &page, va + i * page_size_, handle, std::shared_ptr<VMMHandleMeta>());
+    MarkPageMappedLocked(&page,
+                         va + i * page_size_,
+                         handle,
+                         std::shared_ptr<VMMHandleMeta>(),
+                         false);
   }
 }
 
@@ -188,7 +194,24 @@ void VMMBackingMap::MarkMapped(VMMDevicePtr va,
                                                 : meta->AllocationHandle();
   for (size_t i = 0; i < count; ++i) {
     auto& page = pages_[start + i];
-    MarkPageMappedLocked(&page, va + i * page_size_, handle, meta);
+    MarkPageMappedLocked(&page, va + i * page_size_, handle, meta, false);
+  }
+}
+
+void VMMBackingMap::MarkRemapDestinationMapped(
+    VMMDevicePtr va, const std::shared_ptr<VMMHandleMeta>& meta, size_t size) {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  size_t start = 0;
+  size_t count = 0;
+  if (!CheckRangeLocked(
+          va, size, "MarkRemapDestinationMapped", &start, &count)) {
+    return;
+  }
+  const VMMAllocHandle handle = meta == nullptr ? static_cast<VMMAllocHandle>(0)
+                                                : meta->AllocationHandle();
+  for (size_t i = 0; i < count; ++i) {
+    auto& page = pages_[start + i];
+    MarkPageMappedLocked(&page, va + i * page_size_, handle, meta, true);
   }
 }
 
@@ -1065,7 +1088,8 @@ VMMBackingMap::RemapSourceState VMMBackingMap::GetRemapSourceStateLocked(
   if (page == nullptr || page->meta == nullptr) {
     return RemapSourceState::kPartialOrInvalid;
   }
-  if (page->meta->IsOwnedByRemapDestination()) {
+  if (page->remap_destination_owned ||
+      page->meta->IsOwnedByRemapDestination()) {
     return RemapSourceState::kRemapDestinationOwned;
   }
   return PageCanUseBackingLocked(page, context)
