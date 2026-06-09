@@ -16,48 +16,162 @@
 
 #if defined(PADDLE_WITH_CUDA)
 
-#include <mutex>
 #include <unordered_map>
 #include <vector>
 
 #include "paddle/phi/backends/dynload/cuda_driver.h"
 #include "paddle/phi/common/place.h"
 #include "paddle/phi/core/memory/allocation/allocator.h"
+#include "paddle/phi/core/memory/allocation/spin_lock.h"
 #include "paddle/phi/core/memory/allocation/vmm_allocator_v2_types.h"
+#include "paddle/phi/core/memory/allocation/vmm_backing_map.h"
+#include "paddle/phi/core/memory/allocation/vmm_ipc_allocation.h"
 
 namespace paddle {
 namespace memory {
 namespace allocation {
 
 // Compared with CUDAVirtualMemAllocator, V2 does not expose a single
-// VA<->handle mapping per allocation. Instead it returns a lightweight
-// HandleLayout (a handle list) for one allocation. Upper layers later
-// transform that list into block-level BlockPartV2 state.
+// VA<->handle mapping per allocation. It keeps the handle layout registered in
+// the bottom allocator and hands upper layers either allocation-level layout
+// snapshots or materialized mapped-free BlockV2 views.
 class CUDAVirtualMemAllocatorV2 : public Allocator {
  public:
-  // Standalone use defaults to the transient pool. Upper layers may still
-  // override this explicitly when routing by lifecycle.
+  struct AllocationWithLayout {
+    DecoratedAllocationPtr allocation;
+    HandleLayout layout;
+  };
+
+  struct AllocationWithBlock {
+    bool HasAllocation() const { return allocation != nullptr; }
+    BlockV2 TakeBlock() { return std::move(block); }
+    DecoratedAllocationPtr TakeAllocation() { return std::move(allocation); }
+
+    DecoratedAllocationPtr allocation;
+    BlockV2 block;
+  };
+
+  struct StagedAllocationWithBlock {
+    Allocation* allocation{nullptr};
+    BlockV2 block;
+    size_t bytes{0};
+  };
+
+  struct AllocationLayoutRegistry {
+    void Add(void* ptr, const HandleLayout& layout);
+    bool Lookup(void* ptr, HandleLayout* layout) const;
+    void Remove(void* ptr);
+
+   private:
+    std::unordered_map<void*, HandleLayout> layouts_;
+    mutable SpinLock spinlock_;
+  };
+
+  // Standalone use defaults to the large pool. Upper layers may also choose
+  // explicit small/large pool types.
   CUDAVirtualMemAllocatorV2(const GPUPlace& place,
                             size_t handle_size,
-                            PoolType pool = PoolType::kTransient);
+                            PoolType pool = PoolType::kLarge);
 
   bool IsAllocThreadSafe() const override;
 
-  size_t handle_size() const { return handle_size_; }
-  PoolType pool_type() const { return pool_type_; }
-  VmmDevicePtr virtual_mem_base() const { return virtual_mem_base_; }
-  size_t virtual_mem_size() const { return virtual_mem_size_; }
-  size_t tail_offset() const { return virtual_mem_alloced_offset_; }
+  size_t HandleSize() const { return handle_size_; }
+  PoolType GetPoolType() const { return pool_type_; }
+  VMMDevicePtr VirtualMemBase() const { return virtual_mem_base_; }
+  size_t VirtualMemSize() const { return virtual_mem_size_; }
+  size_t TailOffset() const { return virtual_mem_alloced_offset_; }
   // Best-fit/remap layers may consume VA from the reserved range incrementally.
   // V2 keeps this as an explicit cursor instead of reusing V1's
   // virtual_2_physical_map_ bookkeeping.
   void AdvanceTailOffset(size_t bytes) { virtual_mem_alloced_offset_ += bytes; }
+  // Retreat the tail cursor when the compactor discovers that blocks no
+  // longer span up to the previous high-water mark (e.g. after
+  // FreeIdleChunks released tail-end underlying allocations).
+  void SetTailOffset(size_t offset) { virtual_mem_alloced_offset_ = offset; }
 
-  void UnmapHandle(VmmDevicePtr ptr, size_t size);
-  void MapHandlesToVA(VmmDevicePtr ptr, const std::vector<VmmAllocHandle>& hs);
-  // Exposes the allocation-level handle list for IPC/export queries. The key
-  // is the raw allocation ptr returned by this allocator.
-  bool CollectAllocationHandleLayout(void* ptr, HandleLayout* layout) const;
+  void RollbackMappedHandleRange(VMMDevicePtr ptr, size_t handle_count);
+  bool MoveBackingPage(const VMMBackingMap::MappedPage& source,
+                       const VMMBackingMap::UnmappedPage& target);
+  bool MoveBackingPageForRemap(const VMMBackingMap::MappedPage& source,
+                               const VMMBackingMap::UnmappedPage& target,
+                               const std::shared_ptr<VMMHandleMeta>& meta);
+  enum class RestoreRemapSourceResult : uint8_t {
+    kSkipped = 0,
+    kRestored = 1,
+    kForceReleased = 2,
+  };
+  RestoreRemapSourceResult RestoreRemapSourceMapping(
+      VMMAllocHandle handle,
+      const std::shared_ptr<VMMHandleMeta>& meta,
+      size_t size);
+  RestoreRemapSourceResult ForceReleaseRestoredRemapSourceMapping(
+      VMMAllocHandle handle,
+      const std::shared_ptr<VMMHandleMeta>& meta,
+      size_t size,
+      const char* context,
+      bool unmap_mapped_source);
+
+  const GPUPlace& place() const { return place_; }
+  AllocationWithBlock AppendWithBlock(size_t size);
+  // Create fresh physical backing and map it at an existing reserved VA range.
+  // This is used by upper layers to reuse unmapped-free VA space in place.
+  AllocationWithBlock PlaceAtVAWithBlock(VMMDevicePtr ptr, size_t size);
+  bool IsAllocationOwnedByRemapDestination(void* ptr) const;
+
+  // Create a staged synthetic Allocation and mapped-free block for handles
+  // moved by remap compaction. The handles already exist (cuMemCreate was done
+  // earlier); rollback paths must explicitly destroy the staged allocation
+  // before discarding the block view.
+  StagedAllocationWithBlock CreateStagedRemapDestinationAllocationWithBlock(
+      VMMDevicePtr ptr,
+      const std::vector<VMMAllocHandle>& handles,
+      size_t start,
+      size_t count,
+      PoolType pool_type);
+  DecoratedAllocationPtr AdoptCommittedSyntheticAllocation(
+      Allocation* allocation);
+  void DestroyStagedSyntheticAllocation(Allocation* allocation);
+
+  // Phase-1 BackingMap mirror hooks for driver operations that still happen
+  // outside the bottom allocator (e.g. compactor rollback).
+  void MarkBackingMapped(VMMDevicePtr ptr, VMMAllocHandle handle, size_t size);
+  void MarkBackingUnmapped(VMMDevicePtr ptr, size_t size);
+  void MarkBackingReleased(VMMDevicePtr ptr,
+                           VMMAllocHandle handle,
+                           size_t size);
+  void MarkBackingIpcExported(VMMDevicePtr ptr, size_t size);
+  bool HasIpcExportedRange(VMMDevicePtr ptr, size_t size) const;
+  bool IsRangeReleasable(VMMDevicePtr ptr, size_t size) const;
+  bool IsRangeReusable(VMMDevicePtr ptr, size_t size) const;
+  bool IsDriverVaRangeUnmapped(VMMDevicePtr ptr, size_t size) const;
+  bool CollectBlockIpcParts(const BlockV2& block,
+                            std::vector<BlockPart>* ipc_parts) const;
+  bool MarkBlockIpcExported(const BlockV2& block);
+  bool HasBlockIpcExported(const BlockV2& block) const;
+  bool SetBlockRemapEvent(const BlockV2& block,
+                          gpuStream_t stream,
+                          std::shared_ptr<CUDAEventGuard> event);
+  bool IsBlockReusableForAllocation(const BlockV2& block) const;
+  bool ValidateBackingLayout(const HandleLayout& layout,
+                             const char* context) const;
+  std::vector<VMMBackingMap::MappedPage> CollectMappedPages(
+      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
+      size_t target_bytes) const;
+  std::vector<VMMBackingMap::MappedPage> CollectRemapSourcePages(
+      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
+      size_t target_bytes) const;
+  std::vector<VMMBackingMap::UnmappedPage> CollectUnmappedPages(
+      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
+      size_t target_bytes) const;
+  VMMBackingMap::CompactCandidates CollectCompactCandidates(
+      const std::vector<std::pair<VMMDevicePtr, size_t>>& source_ranges,
+      const std::vector<std::pair<VMMDevicePtr, size_t>>& target_ranges,
+      size_t target_bytes) const;
+  bool ValidateMappedPages(const std::vector<VMMBackingMap::MappedPage>& pages,
+                           const char* context) const;
+  bool ValidateUnmappedPages(
+      const std::vector<VMMBackingMap::UnmappedPage>& pages,
+      const char* context) const;
 
  protected:
   phi::Allocation* AllocateImpl(size_t size) override;
@@ -65,7 +179,47 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
 
  private:
   void InitOnce();
+  bool IsReservedVaRange(VMMDevicePtr ptr, size_t size) const;
+  bool CollectIpcParts(VMMDevicePtr ptr,
+                       size_t size,
+                       std::vector<BlockPart>* ipc_parts) const;
+  bool MarkIpcExported(VMMDevicePtr ptr, size_t size);
+  bool SetRemapEvent(VMMDevicePtr ptr,
+                     size_t size,
+                     gpuStream_t stream,
+                     std::shared_ptr<CUDAEventGuard> event);
+  void MapHandlesToVA(
+      VMMDevicePtr ptr,
+      const std::vector<VMMAllocHandle>& hs,
+      const std::vector<std::shared_ptr<VMMHandleMeta>>* metas = nullptr);
+  void RollbackCreatedHandles(const HandleLayout& layout) const;
+  void MarkLayoutMapped(const HandleLayout& layout);
+  void MarkRemapDestinationLayoutMapped(const HandleLayout& layout);
+  AllocationWithLayout AppendWithLayout(size_t size);
+  AllocationWithLayout PlaceAtVAWithLayout(VMMDevicePtr ptr, size_t size);
+  HandleLayout CreateMappedHandleLayout(VMMDevicePtr ptr,
+                                        size_t aligned_size,
+                                        const char* context);
+  void SetAccessOrThrow(VMMDevicePtr ptr,
+                        size_t aligned_size,
+                        size_t num_handles,
+                        const char* context);
+  bool CollectAllocationHandleLayout(void* ptr, HandleLayout* layout) const;
+  bool IsRemapDestinationOwnedLayout(const HandleLayout& layout) const;
+  Allocation* CreateStagedSyntheticAllocation(VMMDevicePtr ptr,
+                                              size_t size,
+                                              const HandleLayout& layout);
+  AllocationWithLayout WrapTrackedAllocation(VMMDevicePtr ptr,
+                                             size_t size,
+                                             HandleLayout layout,
+                                             bool advance_tail);
+  AllocationWithBlock BuildAllocationWithBlock(
+      AllocationWithLayout allocation_with_layout);
+  Allocation* CreateTrackedAllocation(VMMDevicePtr ptr,
+                                      size_t size,
+                                      const HandleLayout& layout);
   void RegisterHandleLayout(void* ptr, const HandleLayout& layout);
+  HandleLayout RequireHandleLayout(void* ptr) const;
   void UnregisterHandleLayout(void* ptr);
 
   GPUPlace place_;
@@ -73,15 +227,15 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   PoolType pool_type_;
   std::once_flag init_flag_;
 
-  VmmDevicePtr virtual_mem_base_{0};
+  VMMDevicePtr virtual_mem_base_{0};
   size_t virtual_mem_size_{0};
   size_t virtual_mem_alloced_offset_{0};
   size_t granularity_{0};
   CUmemAllocationProp prop_{};
   std::vector<CUmemAccessDesc> access_desc_;
 
-  mutable std::unordered_map<void*, HandleLayout> allocation_layout_map_;
-  mutable std::mutex allocation_layout_mu_;
+  AllocationLayoutRegistry allocation_layouts_;
+  VMMBackingMap backing_map_;
 };
 
 }  // namespace allocation
