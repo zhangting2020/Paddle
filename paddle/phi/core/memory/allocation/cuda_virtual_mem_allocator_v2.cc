@@ -883,7 +883,7 @@ bool CUDAVirtualMemAllocatorV2::CollectIpcParts(
     std::vector<BlockPart> collected;
     collected.reserve(descriptors.size());
     for (const auto& descriptor : descriptors) {
-      auto chunk = std::make_shared<VMMChunkMeta>(VMMChunkMeta{
+      auto chunk = std::make_shared<VmmChunkMeta>(VmmChunkMeta{
           descriptor.handle_base,
           descriptor.handle_size,
           descriptor.handle,
