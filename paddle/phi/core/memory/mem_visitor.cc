@@ -144,47 +144,7 @@ void VMMAllocateCompactSizeVisitor::Visit(
   allocate_compact_size_ = allocator->GetCompactSize();
 }
 
-void VMMV2PoolStatsVisitor::Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) {
-  size_t active_count = 0, active_bytes = 0;
-  size_t free_count = 0, free_bytes = 0;
-  size_t unmapped_free_count = 0, unmapped_free_bytes = 0;
-  const auto blocks = allocator->SnapshotAllBlocks();
-  for (const auto& block : blocks) {
-    switch (block.type_) {
-      case allocation::BlockType::kActive:
-        ++active_count;
-        active_bytes += block.size_;
-        break;
-      case allocation::BlockType::kFree:
-        ++free_count;
-        free_bytes += block.size_;
-        break;
-      case allocation::BlockType::kUnmappedFree:
-        ++unmapped_free_count;
-        unmapped_free_bytes += block.size_;
-        break;
-    }
-  }
-  pool_stats_.emplace_back(static_cast<int>(allocator->GetPoolType()),
-                           active_count,
-                           active_bytes,
-                           free_count,
-                           free_bytes,
-                           unmapped_free_count,
-                           unmapped_free_bytes);
-}
-
-void VMMV2PoolStatsVisitor::Visit(
-    VMMAutoGrowthBestFitMultiPoolAllocatorV2* allocator) {
-  if (allocator->small_allocator()) {
-    Visit(allocator->small_allocator().get());
-  }
-  if (allocator->large_allocator()) {
-    Visit(allocator->large_allocator().get());
-  }
-}
-
-void VMMTensorPartsVisitor::Visit(
+void VmmTensorPartsVisitor::Visit(
     VirtualMemoryAutoGrowthBestFitAllocator* allocator) {
   if (found_) {
     return;
@@ -204,7 +164,7 @@ void VMMTensorPartsVisitor::Visit(
   allocator->GetUnderLyingAllocator()->Accept(this);
 }
 
-void VMMTensorPartsVisitor::Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) {
+void VmmTensorPartsVisitor::Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) {
   if (found_) {
     return;
   }
@@ -221,7 +181,7 @@ void VMMTensorPartsVisitor::Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) {
   }
 }
 
-void VMMTensorPartsVisitor::Visit(
+void VmmTensorPartsVisitor::Visit(
     VMMAutoGrowthBestFitMultiPoolAllocatorV2* allocator) {
   if (found_) {
     return;

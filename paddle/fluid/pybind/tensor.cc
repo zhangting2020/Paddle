@@ -215,7 +215,7 @@ void ShareTensorViaVmm(const DenseTensor &self, py::tuple *out) {
           << " holder_base=" << holder->base_ptr()
           << " holder_size=" << holder->size()
           << " place=" << holder->place().DebugString();
-  paddle::memory::VMMTensorPartsVisitor parts_visitor(data_ptr, data_size);
+  paddle::memory::VmmTensorPartsVisitor parts_visitor(data_ptr, data_size);
   paddle::memory::allocation::AllocatorFacade::Instance().Accept(
       holder->place(), &parts_visitor);
   if (!parts_visitor.Found()) {

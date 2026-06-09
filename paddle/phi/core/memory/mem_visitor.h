@@ -337,30 +337,10 @@ class VMMAllocateCompactSizeVisitor : public AllocatorComputeStreamVisitor {
   std::vector<size_t> allocate_compact_size_;
 };
 
-class VMMV2PoolStatsVisitor : public AllocatorComputeStreamVisitor {
-  using AllocatorComputeStreamVisitor::Visit;
-
- public:
-  // (pool_type, active_count, active_bytes,
-  //             free_count,   free_bytes,
-  //             gap_count,    gap_bytes)
-  std::vector<std::tuple<int, size_t, size_t, size_t, size_t, size_t, size_t>>
-  GetPoolStats() const {
-    return pool_stats_;
-  }
-
-  void Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) override;
-  void Visit(VMMAutoGrowthBestFitMultiPoolAllocatorV2* allocator) override;
-
- private:
-  std::vector<std::tuple<int, size_t, size_t, size_t, size_t, size_t, size_t>>
-      pool_stats_;
-};
-
-class VMMTensorPartsVisitor : public AllocatorVisitor {
+class VmmTensorPartsVisitor : public AllocatorVisitor {
  public:
   using BlockPart = allocation::BlockPart;
-  VMMTensorPartsVisitor(void* ptr, size_t size)
+  explicit VmmTensorPartsVisitor(void* ptr, size_t size)
       : target_ptr_(ptr), target_size_(size) {}
 
   void Visit(VirtualMemoryAutoGrowthBestFitAllocator* allocator) override;
