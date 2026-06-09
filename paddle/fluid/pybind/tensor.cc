@@ -201,18 +201,44 @@ namespace {
 void ShareTensorViaVMM(const DenseTensor &self, py::tuple *out) {
   auto *holder =
       dynamic_cast<memory::allocation::Allocation *>(self.Holder().get());
+  PADDLE_ENFORCE_NOT_NULL(
+      holder,
+      common::errors::InvalidArgument(
+          "Cannot export VMM tensor because tensor holder is not a memory "
+          "allocation."));
   size_t data_size =
       self.numel() *
       framework::SizeOfType(framework::TransToProtoVarType(self.type()));
-  paddle::memory::VMMTensorPartsVisitor parts_visitor(
-      const_cast<void *>(self.data()), data_size);
+  void *data_ptr = const_cast<void *>(self.data());
+  VLOG(4) << "[VMM-IPC/export] tensor_data=" << data_ptr
+          << " data_size=" << data_size << " holder_ptr=" << holder->ptr()
+          << " holder_base=" << holder->base_ptr()
+          << " holder_size=" << holder->size()
+          << " place=" << holder->place().DebugString();
+  paddle::memory::VMMTensorPartsVisitor parts_visitor(data_ptr, data_size);
   paddle::memory::allocation::AllocatorFacade::Instance().Accept(
       holder->place(), &parts_visitor);
+  if (!parts_visitor.Found()) {
+    VLOG(2) << "[VMM-IPC/export] failed to locate VMM allocation metadata: "
+            << "tensor_data=" << data_ptr << " data_size=" << data_size
+            << " holder_ptr=" << holder->ptr()
+            << " holder_base=" << holder->base_ptr()
+            << " holder_size=" << holder->size()
+            << " place=" << holder->place().DebugString();
+  }
   PADDLE_ENFORCE_EQ(
       parts_visitor.Found(),
       true,
       common::errors::Unavailable(
-          "Failed to locate VMM allocation metadata for tensor."));
+          "Failed to locate VMM allocation metadata for tensor. "
+          "tensor_data=%p, data_size=%zu, holder_ptr=%p, holder_base=%p, "
+          "holder_size=%zu, place=%s.",
+          data_ptr,
+          data_size,
+          holder->ptr(),
+          holder->base_ptr(),
+          holder->size(),
+          holder->place().DebugString().c_str()));
   const auto &parts = parts_visitor.Parts();
   PADDLE_ENFORCE_GT(
       parts.size(),

@@ -207,7 +207,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   CUDAVirtualMemAllocatorV2::AllocationWithBlock grow_alloc;
   if (grow_size > 0) {
     try {
-      grow_alloc = underlying_allocator_->AppendWithBlock(grow_size);
+      grow_alloc = underlying_allocator_->AllocateWithBlock(grow_size);
     } catch (const BadAlloc& bad_alloc) {
       // Grow failed: restore the tail FREE block before propagating.
       if (has_tail_reuse) {
@@ -359,7 +359,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
     }
   }
   const size_t releasable_bytes =
-      releasable_handles * underlying_allocator_->handle_size();
+      releasable_handles * underlying_allocator_->HandleSize();
 
   if (requested_size > 0 && !FLAGS_vmm_v2_compact_all &&
       releasable_bytes < required_releasable_bytes) {
@@ -433,7 +433,6 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
       common::errors::NotFound("Can not find active block for allocation %p in "
                                "VMMAutoGrowthBestFitAllocatorV2.",
                                allocation->ptr()));
-#ifdef PADDLE_WITH_CUDA
   auto remap_event = wrapped_allocation->TakeRemapEvent();
   if (remap_event != nullptr) {
     PADDLE_ENFORCE_EQ(
@@ -446,7 +445,6 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   } else {
     it->SetRemapSafety(wrapped_allocation->remap_stream(), nullptr);
   }
-#endif
   it->MarkFree();
   TryMerge(it);
   delete allocation;
@@ -524,54 +522,28 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
-    void* ptr,
-#ifdef PADDLE_WITH_CUDA
-    gpuStream_t stream,
-    std::shared_ptr<CUDAEventGuard> event
-#else
-    void* stream,
-    void* event
-#endif
-) {
+    void* ptr, gpuStream_t stream, std::shared_ptr<CUDAEventGuard> event) {
   std::lock_guard<SpinLock> guard(spinlock_);
   for (auto it = all_blocks_.begin(); it != all_blocks_.end(); ++it) {
     if (!it->IsActive() || it->ptr_ != ptr) {
       continue;
     }
-#ifdef PADDLE_WITH_CUDA
     return underlying_allocator_->SetBlockRemapEvent(
         *it, stream, std::move(event));
-#else
-    (void)stream;
-    (void)event;
-    return true;
-#endif
   }
   return false;
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
     BlockListIt block_it,
-#ifdef PADDLE_WITH_CUDA
     gpuStream_t stream,
-    std::shared_ptr<CUDAEventGuard> event
-#else
-    void* stream,
-    void* event
-#endif
-) {
+    std::shared_ptr<CUDAEventGuard> event) {
   std::lock_guard<SpinLock> guard(spinlock_);
   if (block_it == all_blocks_.end() || !block_it->IsActive()) {
     return false;
   }
-#ifdef PADDLE_WITH_CUDA
   return underlying_allocator_->SetBlockRemapEvent(
       *block_it, stream, std::move(event));
-#else
-  (void)stream;
-  (void)event;
-#endif
-  return true;
 }
 
 BlockList VMMAutoGrowthBestFitAllocatorV2::SnapshotAllBlocks() const {
@@ -596,10 +568,8 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
     const size_t remaining_size = block_it->size_ - size;
     BlockV2 remaining_block =
         block_it->MakeMappedFreeSubBlock(size, remaining_size);
-#ifdef PADDLE_WITH_CUDA
     // The free remainder keeps the source block's remap-safety stream. The
     // reused prefix is cleared by MarkActive().
-#endif
 
     block_it->TrimToPrefix(size);
     auto remain_it =
@@ -614,7 +584,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
     size_t size) {
   const size_t backing_size =
-      AlignedSize(size, underlying_allocator_->handle_size());
+      AlignedSize(size, underlying_allocator_->HandleSize());
   BlockListIt best = all_blocks_.end();
   for (auto iter = unmapped_free_blocks_.lower_bound({backing_size, nullptr});
        iter != unmapped_free_blocks_.end();) {
@@ -643,10 +613,10 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
           << reinterpret_cast<void*>(unmapped_free_ptr) << " requested=" << size
           << " backing_size=" << backing_size
           << " original_unmapped_free_size=" << best->size_
-          << " tail_offset=" << underlying_allocator_->tail_offset();
+          << " tail_offset=" << underlying_allocator_->TailOffset();
   CUDAVirtualMemAllocatorV2::AllocationWithBlock unmapped_free_alloc;
   try {
-    unmapped_free_alloc = underlying_allocator_->PlaceAtVAWithBlock(
+    unmapped_free_alloc = underlying_allocator_->AllocateAtVAWithBlock(
         unmapped_free_ptr, backing_size);
   } catch (...) {
     // Do not mutate the allocation view if backing cannot be created in this
@@ -674,11 +644,9 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
   if (backing_size > size) {
     BlockV2 mapped_remain =
         mapped_block.MakeMappedFreeSubBlock(size, backing_size - size);
-#ifdef PADDLE_WITH_CUDA
     mapped_remain.owning_stream_ = nullptr;
     mapped_remain.remap_safe_event_.reset();
     mapped_remain.remap_pending_states_.clear();
-#endif
     auto free_it = all_blocks_.insert(insert_pos, std::move(mapped_remain));
     InsertFreeBlock(free_it);
     insert_pos = std::next(free_it);
@@ -909,16 +877,16 @@ uint64_t VMMAutoGrowthBestFitAllocatorV2::FreeIdleChunks() {
     }
   }
 
-  underlying_allocator_->SetTailOffset(Computetail_offset());
+  underlying_allocator_->SetTailOffset(ComputeTailOffset());
   return released;
 }
 
-size_t VMMAutoGrowthBestFitAllocatorV2::Computetail_offset() const {
+size_t VMMAutoGrowthBestFitAllocatorV2::ComputeTailOffset() const {
   if (all_blocks_.empty()) {
     return 0;
   }
   return static_cast<size_t>(all_blocks_.back().EndVA() -
-                             underlying_allocator_->virtual_mem_base());
+                             underlying_allocator_->VirtualMemBase());
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::IsRangeEntirelyFree(uint8_t* base,
@@ -1011,9 +979,7 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
         EraseFreeBlock(it);
         it->TrimToPrefix(left_size);
         InsertFreeBlock(it);
-#ifdef PADDLE_WITH_CUDA
         right.CopyRemapSafetyFrom(*it);
-#endif
         auto right_it = all_blocks_.insert(std::next(it), std::move(right));
         InsertFreeBlock(right_it);
       } else {

@@ -71,7 +71,6 @@ VMMDevicePtr AlignUp(VMMDevicePtr value, size_t alignment) {
 }
 
 bool QueryRemapEvent(VMMBlockRemapState* state) {
-#ifdef PADDLE_WITH_CUDA
   if (state->event == nullptr) {
     return true;
   }
@@ -82,12 +81,10 @@ bool QueryRemapEvent(VMMBlockRemapState* state) {
   PADDLE_ENFORCE_GPU_SUCCESS(err);
   state->event.reset();
   state->stream = nullptr;
-#endif
   return true;
 }
 
 bool RecordRemapEvent(VMMBlockRemapState* state) {
-#ifdef PADDLE_WITH_CUDA
   if (state->stream == nullptr || state->event != nullptr) {
     return true;
   }
@@ -97,13 +94,9 @@ bool RecordRemapEvent(VMMBlockRemapState* state) {
   PADDLE_ENFORCE_GPU_SUCCESS(cudaEventRecord(event, state->stream));
   state->event = std::make_shared<CUDAEventGuard>(event);
   return false;
-#else
-  return true;
-#endif
 }
 
 bool RemapStateReady(VMMBlockRemapState* state) {
-#ifdef PADDLE_WITH_CUDA
   if (!QueryRemapEvent(state)) {
     return false;
   }
@@ -120,16 +113,12 @@ bool RemapStateReady(VMMBlockRemapState* state) {
     PADDLE_ENFORCE_GPU_SUCCESS(err);
   }
   return RecordRemapEvent(state) && QueryRemapEvent(state);
-#else
-  return true;
-#endif
 }
 
 bool IsRemapSafe(BlockV2* block) {
   if (!block->CanBeRemapSource()) {
     return false;
   }
-#ifdef PADDLE_WITH_CUDA
   bool ready = true;
   VMMBlockRemapState primary{block->owning_stream_, block->remap_safe_event_};
   if (!RemapStateReady(&primary)) {
@@ -152,9 +141,6 @@ bool IsRemapSafe(BlockV2* block) {
     }
   }
   return ready;
-#else
-  return true;
-#endif
 }
 
 void AppendMappedFreeSubRange(std::vector<BlockV2>* segments,
@@ -558,10 +544,10 @@ void RemapTransaction::ApplyPlannedSourceBlocks(
 bool RemapTransaction::TailIsUsable(VMMDevicePtr tail_va,
                                     size_t total_bytes,
                                     VMMDevicePtr va_limit) const {
-  if (tail_va > va_limit || total_bytes > va_limit - tail_va) {
+  if (tail_va + total_bytes > va_limit) {
     return false;
   }
-  return vmm_allocator_->IsBackingRangeUnmapped(tail_va, total_bytes);
+  return vmm_allocator_->IsDriverVaRangeUnmapped(tail_va, total_bytes);
 }
 
 size_t RemapTransaction::CountLeadingUnmappedBackingPages(VMMDevicePtr va,
@@ -869,13 +855,13 @@ RemapTransaction::CompactResult RemapTransaction::CompactFreeBlocks(
   CompactResult result;
   rollback_source_mappings_ = {};
 
-  VMMDevicePtr tail_va = vmm_allocator_->virtual_mem_base();
+  VMMDevicePtr tail_va = vmm_allocator_->VirtualMemBase();
   if (!blocks->empty()) {
     const auto& last = blocks->back();
     tail_va = last.EndVA();
   }
   const VMMDevicePtr va_limit =
-      vmm_allocator_->virtual_mem_base() + vmm_allocator_->virtual_mem_size();
+      vmm_allocator_->VirtualMemBase() + vmm_allocator_->VirtualMemSize();
 
   auto source_start = Clock::now();
   auto move_plan = CollectRemapSourcePlan(blocks, requested_size, pool_type);

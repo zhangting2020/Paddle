@@ -114,8 +114,7 @@ class VirtualMemoryAutoGrowthBestFitMultiScalePoolAllocator
       size_t alignment,
       const GPUPlace &place)
       : MultiScalePoolAllocator(
-            small_allocator, large_allocator, alignment, place),
-        alignment_(alignment) {}
+            small_allocator, large_allocator, alignment, place) {}
   bool IsAllocThreadSafe() const override { return true; }
   void PreAlloc() override;
   void Accept(AllocatorVisitor *visitor) override { visitor->Visit(this); }
@@ -126,7 +125,6 @@ class VirtualMemoryAutoGrowthBestFitMultiScalePoolAllocator
   size_t CompactImpl(const Place &place, size_t requested_size) override;
 
  private:
-  size_t alignment_;
   std::vector<size_t> compact_size_;
 };
 

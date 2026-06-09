@@ -43,14 +43,8 @@ class VMMAutoGrowthBestFitMultiPoolAllocatorV2 : public Allocator {
                          size_t alloc_size = 0);
 
   bool SetBlockRemapEvent(void* ptr,
-#ifdef PADDLE_WITH_CUDA
                           gpuStream_t stream,
-                          std::shared_ptr<CUDAEventGuard> event
-#else
-                          void* stream,
-                          void* event
-#endif
-  );
+                          std::shared_ptr<CUDAEventGuard> event);
 
   const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>& small_allocator()
       const {

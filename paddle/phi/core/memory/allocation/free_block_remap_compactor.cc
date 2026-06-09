@@ -26,7 +26,7 @@ namespace allocation {
 
 size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
                                         size_t requested_size) {
-  const size_t handle_size = vmm_allocator_->handle_size();
+  const size_t handle_size = vmm_allocator_->HandleSize();
   RemapTransaction transaction(vmm_allocator_.get(),
                                handle_size,
                                commit_synthetic_allocation_,
@@ -36,12 +36,10 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
   VLOG(3) << "VMM V2 compactor: entering Compact, blocks=" << blocks->size()
           << " handle_size=" << handle_size;
 
-#ifdef PADDLE_WITH_CUDA
   // Clear any sticky CUDA error before we start.
   cudaGetLastError();
   // No cudaDeviceSynchronize here. Source collection uses per-event query
   // inside RemapTransaction to avoid a full pipeline stall.
-#endif
 
   // The entire compact is wrapped in try-catch.  If ANY CUDA API call
   // fails (e.g. cuMemUnmap during Phase 1, cuMemMap during Phase 2),

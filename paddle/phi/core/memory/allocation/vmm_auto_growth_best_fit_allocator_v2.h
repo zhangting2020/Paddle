@@ -75,8 +75,8 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
 
   const BlockList& all_blocks() const { return all_blocks_; }
   BlockList SnapshotAllBlocks() const;
-  PoolType pool_type() const { return pool_type_; }
-  size_t alignment() const { return alignment_; }
+  PoolType GetPoolType() const { return pool_type_; }
+  size_t Alignment() const { return alignment_; }
 
   // Query aggregate free-block statistics for OOM dispatch decisions.
   // total_free = sum of all FREE block sizes, max_free = largest FREE block.
@@ -87,23 +87,11 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
                           std::vector<BlockPart>* parts);
 
   bool SetBlockRemapEvent(void* ptr,
-#ifdef PADDLE_WITH_CUDA
                           gpuStream_t stream,
-                          std::shared_ptr<CUDAEventGuard> event
-#else
-                          void* stream,
-                          void* event
-#endif
-  );
+                          std::shared_ptr<CUDAEventGuard> event);
   bool SetBlockRemapEvent(BlockListIt block_it,
-#ifdef PADDLE_WITH_CUDA
                           gpuStream_t stream,
-                          std::shared_ptr<CUDAEventGuard> event
-#else
-                          void* stream,
-                          void* event
-#endif
-  );
+                          std::shared_ptr<CUDAEventGuard> event);
 
  protected:
   phi::Allocation* AllocateImpl(size_t size) override;
@@ -166,7 +154,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   void TryMerge(BlockListIt it);
   void TryMergeUnmappedFree(BlockListIt it);
   uint64_t FreeIdleChunks();
-  size_t Computetail_offset() const;
+  size_t ComputeTailOffset() const;
   bool IsRangeEntirelyFree(uint8_t* base, size_t size) const;
   void SplitAndReplaceRangeWithUnmappedFree(uint8_t* base, size_t size);
 

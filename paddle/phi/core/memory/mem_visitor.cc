@@ -18,6 +18,8 @@
 #include "paddle/phi/core/memory/allocation/spin_lock.h"
 #include "paddle/phi/core/memory/allocation/stat_allocator.h"
 
+#include "glog/logging.h"
+
 #ifdef PADDLE_WITH_CUDA
 #include "paddle/phi/core/memory/allocation/stream_safe_cuda_allocator.h"
 #include "paddle/phi/core/memory/allocation/virtual_memory_auto_growth_best_fit_allocator.h"
@@ -163,7 +165,7 @@ void VMMV2PoolStatsVisitor::Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) {
         break;
     }
   }
-  pool_stats_.emplace_back(static_cast<int>(allocator->pool_type()),
+  pool_stats_.emplace_back(static_cast<int>(allocator->GetPoolType()),
                            active_count,
                            active_bytes,
                            free_count,
@@ -187,12 +189,18 @@ void VMMTensorPartsVisitor::Visit(
   if (found_) {
     return;
   }
+  VLOG(4) << "[VMM-IPC/export] visitor checking VMM v1 allocator target_ptr="
+          << target_ptr_ << " target_size=" << target_size_;
   std::vector<BlockPart> parts;
   if (allocator->CollectTensorParts(target_ptr_, target_size_, &parts)) {
     found_ = true;
     parts_ = std::move(parts);
+    VLOG(4) << "[VMM-IPC/export] visitor matched VMM v1 allocator parts="
+            << parts_.size();
     return;
   }
+  VLOG(4) << "[VMM-IPC/export] visitor missed VMM v1 allocator; descending "
+             "to underlying allocator";
   allocator->GetUnderLyingAllocator()->Accept(this);
 }
 
@@ -200,10 +208,16 @@ void VMMTensorPartsVisitor::Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) {
   if (found_) {
     return;
   }
+  VLOG(4) << "[VMM-IPC/export] visitor checking VMM v2 best-fit allocator "
+          << "target_ptr=" << target_ptr_ << " target_size=" << target_size_;
   std::vector<BlockPart> parts;
   if (allocator->CollectTensorParts(target_ptr_, target_size_, &parts)) {
     found_ = true;
     parts_ = std::move(parts);
+    VLOG(4) << "[VMM-IPC/export] visitor matched VMM v2 best-fit allocator "
+            << "parts=" << parts_.size();
+  } else {
+    VLOG(4) << "[VMM-IPC/export] visitor missed VMM v2 best-fit allocator";
   }
 }
 
@@ -212,14 +226,22 @@ void VMMTensorPartsVisitor::Visit(
   if (found_) {
     return;
   }
+  VLOG(4) << "[VMM-IPC/export] visitor checking VMM v2 multi-pool allocator "
+          << "target_ptr=" << target_ptr_ << " target_size=" << target_size_;
   if (allocator->small_allocator()) {
+    VLOG(4) << "[VMM-IPC/export] visitor entering VMM v2 small pool";
     allocator->small_allocator()->Accept(this);
+  } else {
+    VLOG(4) << "[VMM-IPC/export] VMM v2 small pool is null";
   }
   if (found_) {
     return;
   }
   if (allocator->large_allocator()) {
+    VLOG(4) << "[VMM-IPC/export] visitor entering VMM v2 large pool";
     allocator->large_allocator()->Accept(this);
+  } else {
+    VLOG(4) << "[VMM-IPC/export] VMM v2 large pool is null";
   }
 }
 #endif

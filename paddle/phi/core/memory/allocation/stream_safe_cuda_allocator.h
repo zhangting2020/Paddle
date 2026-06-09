@@ -34,10 +34,8 @@ namespace memory {
 namespace allocation {
 
 class StreamSafeCUDAAllocator;
-#ifdef PADDLE_WITH_CUDA
 class VMMAutoGrowthBestFitMultiPoolAllocatorV2;
 class VMMRemapEventAllocation;
-#endif
 
 class StreamSafeCUDAAllocation : public Allocation {
  public:
@@ -48,9 +46,7 @@ class StreamSafeCUDAAllocation : public Allocation {
   bool RecordStream(gpuStream_t stream);
   void EraseStream(gpuStream_t stream);
   bool CanBeFreed();
-#ifdef PADDLE_WITH_CUDA
   bool SetVMMV2RemapEvent();
-#endif
   gpuStream_t GetOwningStream() const;
   void *ptr() const noexcept override { return underlying_allocation_->ptr(); }
   size_t size() const noexcept override {
@@ -65,9 +61,7 @@ class StreamSafeCUDAAllocation : public Allocation {
   void RecordGraphCapturingStreams();
   void RecordStreamWithNoGraphCapturing(gpuStream_t stream);
   DecoratedAllocationPtr underlying_allocation_;
-#ifdef PADDLE_WITH_CUDA
   VMMRemapEventAllocation *vmm_v2_remap_allocation_{nullptr};
-#endif
   std::set<gpuStream_t> graph_capturing_stream_set_;
   std::map<gpuStream_t, gpuEvent_t> outstanding_event_map_;
   gpuStream_t owning_stream_;
@@ -90,11 +84,9 @@ class StreamSafeCUDAAllocator
   std::shared_ptr<Allocator> &GetUnderLyingAllocator() {
     return underlying_allocator_;
   }
-#ifdef PADDLE_WITH_CUDA
   VMMAutoGrowthBestFitMultiPoolAllocatorV2 *GetVMMV2Allocator() const {
     return vmm_v2_allocator_;
   }
-#endif
   std::vector<StreamSafeCUDAAllocator *> &GetAllocatorByPlace() {
     return allocator_map_[place_];
   }
@@ -117,9 +109,7 @@ class StreamSafeCUDAAllocator
   static SpinLock allocator_map_lock_;
 
   std::shared_ptr<Allocator> underlying_allocator_;
-#ifdef PADDLE_WITH_CUDA
   VMMAutoGrowthBestFitMultiPoolAllocatorV2 *vmm_v2_allocator_{nullptr};
-#endif
   GPUPlace place_;
   gpuStream_t default_stream_;
   std::list<StreamSafeCUDAAllocation *> unfreed_allocations_;
