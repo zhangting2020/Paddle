@@ -22,29 +22,21 @@
 #include <utility>
 #include <vector>
 
-#if defined(PADDLE_WITH_CUDA)
-#include "paddle/phi/backends/dynload/cuda_driver.h"
-using VmmDevicePtr = CUdeviceptr;
-using VmmAllocHandle = CUmemGenericAllocationHandle;
-#else
-using VmmDevicePtr = uintptr_t;
-using VmmAllocHandle = uint64_t;
-#endif
-
 #include "paddle/phi/common/place.h"
 #include "paddle/phi/core/enforce.h"
 #include "paddle/phi/core/memory/allocation/allocator.h"
+#include "paddle/phi/core/memory/allocation/vmm_allocator_v2_types.h"
 
 namespace paddle {
 namespace memory {
 namespace allocation {
 
-struct ImportedVmmMulti {
-  VmmDevicePtr base{0};
+struct ImportedVMMMulti {
+  VMMDevicePtr base{0};
   size_t reserved_size{0};
-  std::vector<VmmAllocHandle> hs;
+  std::vector<VMMAllocHandle> hs;
 #if defined(PADDLE_WITH_CUDA)
-  ~ImportedVmmMulti() {
+  ~ImportedVMMMulti() {
     if (base && reserved_size) {
       phi::dynload::cuMemUnmap(base, reserved_size);
     }
@@ -56,31 +48,31 @@ struct ImportedVmmMulti {
     }
   }
 #else
-  ~ImportedVmmMulti() = default;
+  ~ImportedVMMMulti() = default;
 #endif
 };
 
-class VmmImportedAllocation : public phi::Allocation {
+class VMMImportedAllocation : public phi::Allocation {
  public:
-  VmmImportedAllocation(void* ptr,
+  VMMImportedAllocation(void* ptr,
                         size_t bytes,
                         Place place,
-                        std::shared_ptr<ImportedVmmMulti> keep)
+                        std::shared_ptr<ImportedVMMMulti> keep)
       : Allocation(ptr, bytes, place), keep_(std::move(keep)) {}
 
  private:
-  std::shared_ptr<ImportedVmmMulti> keep_;
+  std::shared_ptr<ImportedVMMMulti> keep_;
 };
 
-struct VmmChunkMeta {
-  VmmDevicePtr base;
+struct VMMChunkMeta {
+  VMMDevicePtr base;
   size_t size;
-  VmmAllocHandle handle;
+  VMMAllocHandle handle;
   int device;
 };
 
 struct BlockPart {
-  std::shared_ptr<VmmChunkMeta> chunk;
+  std::shared_ptr<VMMChunkMeta> chunk;
   size_t chunk_rel_off;
   size_t len;
 };
@@ -194,7 +186,7 @@ inline void AppendBlockPartsTail(std::vector<BlockPart>* dst,
 }
 
 #pragma pack(push, 1)
-struct VmmIpcHeader {
+struct VMMIPCHeader {
   uint8_t version;
   uint16_t flags;
   uint32_t pid;
@@ -204,7 +196,7 @@ struct VmmIpcHeader {
   uint64_t reserved_size;
 };
 
-struct VmmIpcEntry {
+struct VMMIPCEntry {
   uint8_t handle_type;
   uint8_t reserved[7];
   uint64_t rel_offset;
@@ -213,8 +205,8 @@ struct VmmIpcEntry {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(VmmIpcHeader) == 35, "VmmIpcHeader size changed");
-static_assert(sizeof(VmmIpcEntry) == 32, "VmmIpcEntry size changed");
+static_assert(sizeof(VMMIPCHeader) == 35, "VMMIPCHeader size changed");
+static_assert(sizeof(VMMIPCEntry) == 32, "VMMIPCEntry size changed");
 
 }  // namespace allocation
 }  // namespace memory

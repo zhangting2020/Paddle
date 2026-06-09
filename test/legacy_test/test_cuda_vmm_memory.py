@@ -59,6 +59,11 @@ def _vmm_runtime_available() -> bool:
 class TestMemoryreserved(unittest.TestCase):
     def setUp(self):
         if paddle.base.is_compiled_with_cuda():
+            flags = paddle.get_flags(
+                ['FLAGS_use_vmm_auto_growth_best_fit_allocator_v2']
+            )
+            if flags['FLAGS_use_vmm_auto_growth_best_fit_allocator_v2']:
+                return
             paddle.set_flags(
                 {
                     'FLAGS_use_virtual_memory_auto_growth': 1,
@@ -103,6 +108,11 @@ class TestMemoryreserved(unittest.TestCase):
             )
 
     def test_memory_stats(self):
+        flags = paddle.get_flags(
+            ['FLAGS_use_vmm_auto_growth_best_fit_allocator_v2']
+        )
+        if flags['FLAGS_use_vmm_auto_growth_best_fit_allocator_v2']:
+            self.skipTest("VMM V2 uses a different reserved-memory layout.")
         self.func_test_memory_stats()
 
     def test_reduce_scatter_buffer_uses_vmm(self):

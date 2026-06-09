@@ -24,6 +24,7 @@
 #include "paddle/phi/core/memory/allocation/spin_lock.h"
 #include "paddle/phi/core/memory/allocation/vmm_allocator_v2_types.h"
 #include "paddle/phi/core/memory/allocation/vmm_ipc_allocation.h"
+#include "paddle/phi/core/memory/mem_visitor.h"
 
 #if defined(PADDLE_WITH_CUDA)
 
@@ -70,6 +71,8 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
       PoolType pool_type);
 
   bool IsAllocThreadSafe() const override { return true; }
+  void Accept(AllocatorVisitor* visitor) override { visitor->Visit(this); }
+
   const BlockList& all_blocks() const { return all_blocks_; }
   BlockList SnapshotAllBlocks() const;
   PoolType pool_type() const { return pool_type_; }
@@ -78,6 +81,10 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   // Query aggregate free-block statistics for OOM dispatch decisions.
   // total_free = sum of all FREE block sizes, max_free = largest FREE block.
   void GetFreeBlockStats(size_t* total_free, size_t* max_free);
+
+  bool CollectTensorParts(void* ptr,
+                          size_t size,
+                          std::vector<BlockPart>* parts);
 
   bool SetBlockRemapEvent(void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)

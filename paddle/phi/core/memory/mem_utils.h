@@ -87,7 +87,7 @@ class TotalMemoryCompactor final : public MemoryCompactionStrategy {
 
 #if defined(PADDLE_WITH_CUDA)
 // return a pair of <largest_free_block_size, sum_of_n_largest_free_block_size>
-PADDLE_API extern std::pair<size_t, size_t> VmmMaxFreeSize(
+PADDLE_API extern std::pair<size_t, size_t> VMMMaxFreeSize(
     const GPUPlace& place, int32_t n);
 
 // Try using Allocator to simulate an allocation, simulating a request for
@@ -95,16 +95,24 @@ PADDLE_API extern std::pair<size_t, size_t> VmmMaxFreeSize(
 PADDLE_API extern bool TryAllocBatch(const GPUPlace& place,
                                      const std::vector<size_t>& sizes);
 
-// Compact memory of free blocks held by the VmmAllocator.
-PADDLE_API extern size_t VmmCompact(const GPUPlace& place);
+// Compact memory of free blocks held by the VMMAllocator.
+PADDLE_API extern size_t VMMCompact(const GPUPlace& place);
 
 // Get VMM allocator free block info.
 PADDLE_API extern std::vector<std::vector<std::pair<size_t, uintptr_t>>>
-FreeBlockInfoOfVmmAllocator(const GPUPlace& place);
+FreeBlockInfoOfVMMAllocator(const GPUPlace& place);
 
 // Get VMM allocator all block info.
 PADDLE_API extern std::vector<std::vector<std::tuple<size_t, uintptr_t, bool>>>
-AllBlockInfoOfVmmAllocator(const GPUPlace& place);
+AllBlockInfoOfVMMAllocator(const GPUPlace& place);
+
+// Get VMM V2 per-pool block statistics as tuples of
+// (pool_type, active_count, active_bytes,
+//             free_count,   free_bytes,
+//             gap_count,    gap_bytes).
+PADDLE_API extern std::vector<
+    std::tuple<int, size_t, size_t, size_t, size_t, size_t, size_t>>
+VMMV2PoolStats(const GPUPlace& place);
 
 // Get allocate event when start FLAGS_record_alloc_event.
 PADDLE_API extern std::vector<

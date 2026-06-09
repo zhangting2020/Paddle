@@ -74,7 +74,7 @@ class VirtualMemoryAutoGrowthBestFitAllocator : public Allocator {
 
  protected:
   phi::Allocation *AllocateImpl(size_t size) override;
-  size_t CompactImpl(const Place &place) override;
+  size_t CompactImpl(const Place &place, size_t requested_size) override;
   void FreeImpl(phi::Allocation *allocation) override;
 
  private:
@@ -123,7 +123,7 @@ class VirtualMemoryAutoGrowthBestFitMultiScalePoolAllocator
   std::vector<size_t> GetCompactSize() const { return compact_size_; }
 
  protected:
-  size_t CompactImpl(const Place &place) override;
+  size_t CompactImpl(const Place &place, size_t requested_size) override;
 
  private:
   size_t alignment_;

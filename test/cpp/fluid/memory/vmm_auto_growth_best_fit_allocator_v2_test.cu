@@ -447,6 +447,161 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
+     CollectTensorPartsMarksIpcExportedAndPinsFreedBlock) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
+
+  auto allocation = allocator.Allocate(underlying->handle_size() * 2);
+  ASSERT_NE(allocation, nullptr);
+  auto* ptr = allocation->ptr();
+  const size_t tail_after_first_alloc = underlying->tail_offset();
+  auto* tensor_ptr = reinterpret_cast<uint8_t*>(ptr) + 128UL;
+  const size_t tensor_size = underlying->handle_size() - 128UL + 2048UL;
+
+  std::vector<BlockPart> parts;
+  ASSERT_TRUE(allocator.CollectTensorParts(tensor_ptr, tensor_size, &parts));
+  ASSERT_EQ(parts.size(), 2UL);
+  EXPECT_EQ(parts[0].chunk_rel_off, 128UL);
+  EXPECT_EQ(parts[0].len, underlying->handle_size() - 128UL);
+  EXPECT_EQ(parts[1].chunk_rel_off, 0UL);
+  EXPECT_EQ(parts[1].len, 2048UL);
+
+  EXPECT_EQ(parts[0].chunk->base, reinterpret_cast<VMMDevicePtr>(ptr));
+  EXPECT_EQ(parts[0].chunk->size, underlying->handle_size());
+  EXPECT_EQ(parts[1].chunk->base,
+            reinterpret_cast<VMMDevicePtr>(ptr) + underlying->handle_size());
+  std::vector<std::pair<VMMDevicePtr, size_t>> exported_ranges = {
+      {reinterpret_cast<VMMDevicePtr>(ptr), underlying->handle_size() * 2}};
+  EXPECT_TRUE(
+      underlying
+          ->CollectMappedPages(exported_ranges, underlying->handle_size() * 2)
+          .empty());
+
+  allocation.reset();
+  ASSERT_EQ(allocator.all_blocks().size(), 1UL);
+  EXPECT_TRUE(allocator.all_blocks().front().IsFree());
+  EXPECT_TRUE(underlying->HasIpcExportedRange(
+      reinterpret_cast<VMMDevicePtr>(ptr), underlying->handle_size() * 2));
+  ExpectIndexedFreeStats(&allocator, 0UL, 0UL);
+
+  auto released = allocator.Release(phi::GPUPlace());
+  EXPECT_EQ(released, 0UL);
+  ASSERT_EQ(allocator.all_blocks().size(), 1UL);
+  EXPECT_TRUE(underlying->HasIpcExportedRange(
+      reinterpret_cast<VMMDevicePtr>(ptr), underlying->handle_size() * 2));
+
+  auto compacted =
+      allocator.Compact(phi::GPUPlace(), underlying->handle_size() * 2);
+  EXPECT_EQ(compacted, 0UL);
+
+  auto next = allocator.Allocate(underlying->handle_size() * 2);
+  ASSERT_NE(next, nullptr);
+  EXPECT_NE(next->ptr(), ptr);
+  EXPECT_GT(underlying->tail_offset(), tail_after_first_alloc);
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2,
+     BackingIpcPinAllowsRegularMergedNeighborRelease) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
+
+  auto exported = allocator.Allocate(underlying->handle_size());
+  auto regular = allocator.Allocate(underlying->handle_size());
+  ASSERT_NE(exported, nullptr);
+  ASSERT_NE(regular, nullptr);
+  auto* exported_ptr = exported->ptr();
+  auto* regular_ptr = regular->ptr();
+  const size_t tail_after_two_allocs = underlying->tail_offset();
+
+  std::vector<BlockPart> parts;
+  ASSERT_TRUE(allocator.CollectTensorParts(
+      exported_ptr, underlying->handle_size(), &parts));
+
+  regular.reset();
+  ASSERT_EQ(allocator.all_blocks().size(), 2UL);
+  ExpectIndexedFreeStats(
+      &allocator, underlying->handle_size(), underlying->handle_size());
+
+  exported.reset();
+  ASSERT_EQ(allocator.all_blocks().size(), 1UL);
+  EXPECT_TRUE(allocator.all_blocks().front().IsFree());
+  EXPECT_TRUE(underlying->HasIpcExportedRange(
+      reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->handle_size()));
+  EXPECT_EQ(allocator.all_blocks().front().size_,
+            underlying->handle_size() * 2);
+  ExpectIndexedFreeStats(&allocator, 0UL, 0UL);
+
+  auto released = allocator.Release(phi::GPUPlace());
+  EXPECT_EQ(released, underlying->handle_size());
+  ASSERT_EQ(allocator.all_blocks().size(), 2UL);
+  auto block_it = allocator.all_blocks().begin();
+  ASSERT_TRUE(block_it->IsFree());
+  EXPECT_EQ(block_it->ptr_, exported_ptr);
+  EXPECT_EQ(block_it->size_, underlying->handle_size());
+  ++block_it;
+  ASSERT_TRUE(block_it->IsUnmappedFree());
+  EXPECT_EQ(block_it->ptr_, regular_ptr);
+  EXPECT_EQ(block_it->size_, underlying->handle_size());
+  EXPECT_TRUE(underlying->HasIpcExportedRange(
+      reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->handle_size()));
+
+  auto next = allocator.Allocate(underlying->handle_size());
+  ASSERT_NE(next, nullptr);
+  EXPECT_NE(next->ptr(), exported_ptr);
+  EXPECT_EQ(next->ptr(), regular_ptr);
+  EXPECT_EQ(underlying->tail_offset(), tail_after_two_allocs);
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2,
+     BackingIpcPinAllowsRegularMergedNeighborCompact) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
+
+  auto exported = allocator.Allocate(underlying->handle_size());
+  auto regular = allocator.Allocate(underlying->handle_size());
+  auto anchor = allocator.Allocate(underlying->handle_size());
+  ASSERT_NE(exported, nullptr);
+  ASSERT_NE(regular, nullptr);
+  ASSERT_NE(anchor, nullptr);
+  auto* exported_ptr = exported->ptr();
+  auto* regular_ptr = regular->ptr();
+
+  std::vector<BlockPart> parts;
+  ASSERT_TRUE(allocator.CollectTensorParts(
+      exported_ptr, underlying->handle_size(), &parts));
+
+  regular.reset();
+  exported.reset();
+  ASSERT_EQ(allocator.all_blocks().size(), 2UL);
+  EXPECT_TRUE(allocator.all_blocks().front().IsFree());
+  EXPECT_TRUE(underlying->HasIpcExportedRange(
+      reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->handle_size()));
+  EXPECT_EQ(allocator.all_blocks().front().size_,
+            underlying->handle_size() * 2);
+  ExpectIndexedFreeStats(&allocator, 0UL, 0UL);
+
+  auto compacted =
+      allocator.Compact(phi::GPUPlace(), underlying->handle_size());
+  EXPECT_EQ(compacted, underlying->handle_size());
+  ASSERT_GE(allocator.all_blocks().size(), 4UL);
+
+  auto first = allocator.all_blocks().begin();
+  EXPECT_TRUE(first->IsFree());
+  EXPECT_TRUE(underlying->HasIpcExportedRange(
+      reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->handle_size()));
+  EXPECT_EQ(first->ptr_, exported_ptr);
+  EXPECT_EQ(first->size_, underlying->handle_size());
+
+  auto second = std::next(first);
+  EXPECT_TRUE(second->IsUnmappedFree());
+  EXPECT_EQ(second->ptr_, regular_ptr);
+  EXPECT_EQ(second->size_, underlying->handle_size());
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2,
      TailMoveCompactionNormalizesAdjacentUnmappedSources) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
@@ -489,6 +644,27 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   EXPECT_FALSE(next->IsUnmappedFree());
   EXPECT_EQ(reinterpret_cast<uint8_t*>(first_ptr) + underlying->handle_size(),
             second_ptr);
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2, VMMTensorPartsVisitorFindsV2Blocks) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
+
+  auto allocation = allocator.Allocate(underlying->handle_size());
+  ASSERT_NE(allocation, nullptr);
+
+  paddle::memory::VMMTensorPartsVisitor visitor(allocation->ptr(),
+                                                allocation->size());
+  allocator.Accept(&visitor);
+
+  ASSERT_TRUE(visitor.Found());
+  ASSERT_EQ(visitor.Parts().size(), 1UL);
+  EXPECT_EQ(visitor.Parts()[0].chunk_rel_off, 0UL);
+  EXPECT_EQ(visitor.Parts()[0].len, underlying->handle_size());
+  EXPECT_TRUE(underlying->HasIpcExportedRange(
+      reinterpret_cast<VMMDevicePtr>(allocation->ptr()),
+      underlying->handle_size()));
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2, CompactSkipsPartialFreeHandle) {
@@ -748,7 +924,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactUsesBlockListTailPlacement) {
   middle.reset();
   const size_t remaining_tail =
       underlying->virtual_mem_size() - underlying->tail_offset();
-  underlying->AdvanceTailOffset(remaining_tail);
+  underlying->Advancetail_offset(remaining_tail);
 
   const size_t remapped = allocator.Compact(phi::GPUPlace());
   EXPECT_EQ(remapped, underlying->handle_size());

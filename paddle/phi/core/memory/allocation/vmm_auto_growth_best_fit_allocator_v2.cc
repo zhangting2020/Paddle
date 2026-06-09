@@ -467,6 +467,47 @@ void VMMAutoGrowthBestFitAllocatorV2::GetFreeBlockStats(size_t* total_free,
   *max_free = max_sz;
 }
 
+bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
+    void* ptr, size_t size, std::vector<BlockPart>* parts) {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  auto target_va = reinterpret_cast<VMMDevicePtr>(ptr);
+  PADDLE_ENFORCE_LE(
+      size,
+      std::numeric_limits<VMMDevicePtr>::max() - target_va,
+      common::errors::InvalidArgument(
+          "Invalid VMM V2 tensor range: ptr %p plus size %zu overflows.",
+          ptr,
+          size));
+  BlockListIt block_it = all_blocks_.end();
+  for (auto it = all_blocks_.begin(); it != all_blocks_.end(); ++it) {
+    if (!it->IsActive()) {
+      continue;
+    }
+    if (it->ContainsVARange(target_va, size)) {
+      block_it = it;
+      break;
+    }
+  }
+  if (block_it == all_blocks_.end()) {
+    return false;
+  }
+
+  const size_t block_offset = target_va - block_it->BeginVA();
+  BlockV2 tensor_block = block_it->MakeMappedActiveSubBlock(block_offset, size);
+  std::vector<BlockPart> collected;
+  if (!underlying_allocator_->CollectBlockIpcParts(tensor_block, &collected)) {
+    return false;
+  }
+  if (!underlying_allocator_->MarkBlockIpcExported(tensor_block)) {
+    return false;
+  }
+  block_it->ipc_exported_ = true;
+  if (parts != nullptr) {
+    *parts = std::move(collected);
+  }
+  return true;
+}
+
 bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
     void* ptr,
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
