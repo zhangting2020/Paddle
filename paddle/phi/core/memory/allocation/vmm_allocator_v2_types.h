@@ -70,6 +70,7 @@ class VMMRemapEventAllocation {
   virtual ~VMMRemapEventAllocation() = default;
   virtual bool SetVMMRemapEvent(gpuStream_t stream,
                                 std::shared_ptr<CUDAEventGuard> event) = 0;
+  virtual bool PinVMMRemap() = 0;
 };
 
 struct VMMBlockRemapState {
@@ -419,7 +420,7 @@ struct BlockV2 {
   bool IsActive() const { return type_ == BlockType::kActive; }
   bool IsFree() const { return type_ == BlockType::kFree; }
   bool IsMappedFree() const { return IsFree(); }
-  bool CanBeRemapSource() const { return IsMappedFree(); }
+  bool CanBeRemapSource() const { return IsMappedFree() && !remap_pinned_; }
   bool IsUnmappedFree() const { return type_ == BlockType::kUnmappedFree; }
   void* Ptr() const { return ptr_; }
   size_t Size() const { return size_; }
@@ -447,6 +448,7 @@ struct BlockV2 {
     auto block = MakeMappedFreeBlock(
         BeginPtr() + offset, len, parts_, offset, len, pool_type_);
     block.ipc_exported_ = ipc_exported_;
+    block.remap_pinned_ = remap_pinned_;
 #if defined(PADDLE_WITH_CUDA)
     block.CopyRemapSafetyFrom(*this);
 #endif
@@ -456,6 +458,7 @@ struct BlockV2 {
     auto block = MakeMappedActiveBlock(
         BeginPtr() + offset, len, parts_, offset, len, pool_type_);
     block.ipc_exported_ = ipc_exported_;
+    block.remap_pinned_ = remap_pinned_;
     return block;
   }
   BlockV2 MakeUnmappedFreeSubBlock(size_t offset, size_t len) const {
@@ -501,6 +504,7 @@ struct BlockV2 {
     type_ = type;
     pool_type_ = pool_type;
     ipc_exported_ = false;
+    remap_pinned_ = false;
     parts_.clear();
 #if defined(PADDLE_WITH_CUDA)
     ClearRemapSafety();
@@ -546,6 +550,7 @@ struct BlockV2 {
     ptr_ = reinterpret_cast<uint8_t*>(ptr_) + trim;
     size_ = keep;
   }
+  void PinRemap() { remap_pinned_ = true; }
   template <typename Fn>
   void ForEachPartWithPtr(Fn&& fn) const {
     auto* base = reinterpret_cast<uint8_t*>(ptr_);
@@ -558,6 +563,7 @@ struct BlockV2 {
   void AbsorbAdjacentBlock(BlockV2* src) {
     size_ += src->size_;
     ipc_exported_ = ipc_exported_ || src->ipc_exported_;
+    remap_pinned_ = remap_pinned_ || src->remap_pinned_;
     AppendPartsFrom(src);
 #if defined(PADDLE_WITH_CUDA)
     AppendRemapSafetyFrom(*src);
@@ -584,6 +590,7 @@ struct BlockV2 {
   size_t size_{0};
   BlockType type_{BlockType::kUnmappedFree};
   bool ipc_exported_{false};
+  bool remap_pinned_{false};
 
  private:
   void SetParts(const std::vector<BlockPartV2>& parts) { parts_ = parts; }

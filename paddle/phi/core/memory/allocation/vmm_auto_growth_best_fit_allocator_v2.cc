@@ -167,6 +167,13 @@ bool VMMAutoGrowthBestFitBlockAllocationV2::SetVMMRemapEvent(
   return true;
 }
 
+bool VMMAutoGrowthBestFitBlockAllocationV2::PinVMMRemap() {
+  if (owner_ == nullptr) {
+    return false;
+  }
+  return owner_->PinBlockRemap(ptr());
+}
+
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   std::lock_guard<SpinLock> guard(spinlock_);
   const size_t requested_size = AlignedSize(size, alignment_);
@@ -530,6 +537,18 @@ bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
     }
     return underlying_allocator_->SetBlockRemapEvent(
         *it, stream, std::move(event));
+  }
+  return false;
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::PinBlockRemap(void* ptr) {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  for (auto it = all_blocks_.begin(); it != all_blocks_.end(); ++it) {
+    if (!it->IsActive() || it->ptr_ != ptr) {
+      continue;
+    }
+    it->PinRemap();
+    return true;
   }
   return false;
 }
