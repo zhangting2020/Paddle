@@ -14,6 +14,8 @@
 
 #include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_multi_pool_allocator_v2.h"
 
+#include "glog/logging.h"
+
 #include "paddle/phi/core/enforce.h"
 
 namespace paddle {
