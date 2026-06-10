@@ -82,9 +82,34 @@ phi::Allocation* VMMAutoGrowthBestFitMultiPoolAllocatorV2::AllocateImpl(
       route.allocator,
       common::errors::NotFound("No VMM pool allocator found for pool %d.",
                                static_cast<int>(route.pool_type)));
-  auto allocation = route.allocator->Allocate(size);
+  AllocationPtr allocation;
+  auto* allocator = route.allocator;
+  auto pool_type = route.pool_type;
+  if (route.pool_type == PoolType::kSmall) {
+    try {
+      allocation = route.allocator->Allocate(size);
+    } catch (const BadAlloc& small_bad_alloc) {
+      VLOG(1) << "VMM V2 small pool allocation failed for " << size
+              << " bytes, retrying large pool";
+      try {
+        allocation = large_allocator_->Allocate(size);
+        allocator = large_allocator_.get();
+        pool_type = PoolType::kLarge;
+      } catch (const BadAlloc& large_bad_alloc) {
+        PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+            "VMM V2 small pool allocation failed for %zu bytes and large pool "
+            "fallback also failed.\nSmall pool failure:\n%s\nLarge pool "
+            "failure:\n%s",
+            size,
+            small_bad_alloc.what(),
+            large_bad_alloc.what()));
+      }
+    }
+  } else {
+    allocation = route.allocator->Allocate(size);
+  }
   return new VMMAutoGrowthBestFitMultiPoolAllocationV2(
-      std::move(allocation), route.allocator, route.pool_type);
+      std::move(allocation), allocator, pool_type);
 }
 
 size_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::CompactImpl(
