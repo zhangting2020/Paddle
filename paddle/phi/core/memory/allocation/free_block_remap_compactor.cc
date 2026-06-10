@@ -97,7 +97,12 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
               << " success=" << compact_result.success
               << " remapped_handles=" << compact_result.remapped_handle_count
               << " remapped_bytes=" << compact_result.remapped_bytes
-              << " used_tail=" << compact_result.used_tail
+              << " used_tail=" << compact_result.used_tail << " source_va=["
+              << reinterpret_cast<void*>(compact_result.source_min_va) << ", "
+              << reinterpret_cast<void*>(compact_result.source_max_va) << ")"
+              << " target_va=["
+              << reinterpret_cast<void*>(compact_result.target_min_va) << ", "
+              << reinterpret_cast<void*>(compact_result.target_max_va) << ")"
               << " source_collect_us=" << compact_result.source_collect_us
               << " destination_plan_us=" << compact_result.destination_plan_us
               << " move_commit_us=" << compact_result.move_commit_us

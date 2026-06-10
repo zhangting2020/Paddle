@@ -117,6 +117,8 @@ class RemapTransaction {
     bool used_tail{false};
     uint64_t destination_plan_us{0};
     uint64_t move_commit_us{0};
+    VMMDevicePtr target_min_va{0};
+    VMMDevicePtr target_max_va{0};
   };
   struct PlannedSourceBlock {
     BlockIterator block_it;
@@ -144,6 +146,10 @@ class RemapTransaction {
     uint64_t source_collect_us{0};
     uint64_t destination_plan_us{0};
     uint64_t move_commit_us{0};
+    VMMDevicePtr source_min_va{0};
+    VMMDevicePtr source_max_va{0};
+    VMMDevicePtr target_min_va{0};
+    VMMDevicePtr target_max_va{0};
     bool success{false};
     bool used_tail{false};
   };

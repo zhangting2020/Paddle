@@ -14,7 +14,9 @@
 
 #include "paddle/phi/core/memory/allocation/remap_transaction.h"
 
+#include <algorithm>
 #include <chrono>
+#include <limits>
 #include <list>
 #include <unordered_map>
 #include <utility>
@@ -831,6 +833,16 @@ RemapTransaction::ExecuteMovePlacementStrategy(BlockList* blocks,
   if (!destination.HasPlacement()) {
     return result;
   }
+  result.target_min_va = std::numeric_limits<VMMDevicePtr>::max();
+  result.target_max_va = 0;
+  for (const auto& placement : destination.placements) {
+    if (placement.count == 0) {
+      continue;
+    }
+    result.target_min_va = std::min(result.target_min_va, placement.dst);
+    result.target_max_va = std::max(
+        result.target_max_va, placement.dst + placement.count * handle_size_);
+  }
 
   auto commit_start = Clock::now();
   switch (destination.kind) {
@@ -878,6 +890,15 @@ RemapTransaction::CompactResult RemapTransaction::CompactFreeBlocks(
   result.source_stats = move_plan.stats;
   result.remapped_handle_count = move_plan.handles.size();
   result.remapped_bytes = move_plan.handles.size() * handle_size_;
+  if (!move_plan.source_pages.empty()) {
+    result.source_min_va = std::numeric_limits<VMMDevicePtr>::max();
+    result.source_max_va = 0;
+    for (const auto& page : move_plan.source_pages) {
+      result.source_min_va = std::min(result.source_min_va, page.va);
+      result.source_max_va =
+          std::max(result.source_max_va, page.va + handle_size_);
+    }
+  }
   if (move_plan.handles.empty()) {
     return result;
   }
@@ -887,6 +908,8 @@ RemapTransaction::CompactResult RemapTransaction::CompactFreeBlocks(
   result.used_tail = move_placement.used_tail;
   result.destination_plan_us = move_placement.destination_plan_us;
   result.move_commit_us = move_placement.move_commit_us;
+  result.target_min_va = move_placement.target_min_va;
+  result.target_max_va = move_placement.target_max_va;
   if (result.success) {
     if (result.used_tail) {
       vmm_allocator_->AdvanceTailOffset(result.remapped_bytes);
