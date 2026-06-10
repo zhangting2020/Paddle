@@ -196,6 +196,24 @@ void CUDAVirtualMemAllocatorV2::InitOnce() {
     self.location.id = place_.device;
     self.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
     access_desc_.push_back(self);
+    for (int peer = 0; peer < platform::GetGPUDeviceCount(); ++peer) {
+      if (peer == place_.device) {
+        continue;
+      }
+      int can_access = 0;
+      PADDLE_ENFORCE_GPU_SUCCESS(
+          cudaDeviceCanAccessPeer(&can_access, peer, place_.device));
+      if (can_access == 0) {
+        continue;
+      }
+      CUmemAccessDesc peer_access = {};
+      peer_access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+      peer_access.location.id = peer;
+      peer_access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+      access_desc_.push_back(peer_access);
+    }
+    VLOG(1) << "VMM V2 InitOnce dev " << place_.device
+            << " access_desc_count=" << access_desc_.size();
   });
 }
 
