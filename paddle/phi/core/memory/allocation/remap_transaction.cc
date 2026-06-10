@@ -753,7 +753,8 @@ bool RemapTransaction::MovePlannedPagesToTargets(
     if (!vmm_allocator_->MoveBackingPageForRemap(plan->source_pages[i],
                                                  target_pages[i],
                                                  plan->metas[i],
-                                                 &page_stats)) {
+                                                 &page_stats,
+                                                 true)) {
       VLOG(0) << "VMM V2 remap transaction: MoveBackingPage failed at " << i
               << "/" << handle_count;
       Rollback();
@@ -768,6 +769,54 @@ bool RemapTransaction::MovePlannedPagesToTargets(
       move_stats->rollback_us += page_stats.rollback_us;
     }
     RecordMappedDestinationRange(target_pages[i].va, 1);
+  }
+  VMMDevicePtr range_start = 0;
+  VMMDevicePtr expected_next = 0;
+  size_t range_handles = 0;
+  auto flush_target_access_range = [&]() {
+    if (range_handles == 0) {
+      return true;
+    }
+    CUDAVirtualMemAllocatorV2::MoveBackingPageStats access_stats;
+    const size_t range_size = range_handles * handle_size_;
+    const bool ok = vmm_allocator_->SetAccessForMappedRange(
+        range_start, range_size, &access_stats);
+    if (move_stats != nullptr) {
+      move_stats->set_access_us += access_stats.set_access_us;
+    }
+    if (!ok) {
+      VLOG(0) << "VMM V2 remap transaction: batched target SetAccess failed "
+              << "range_start=" << reinterpret_cast<void*>(range_start)
+              << " handles=" << range_handles;
+      Rollback();
+      return false;
+    }
+    range_start = 0;
+    expected_next = 0;
+    range_handles = 0;
+    return true;
+  };
+  for (const auto& target_page : target_pages) {
+    if (range_handles == 0) {
+      range_start = target_page.va;
+      expected_next = target_page.va + handle_size_;
+      range_handles = 1;
+      continue;
+    }
+    if (target_page.va == expected_next) {
+      expected_next += handle_size_;
+      ++range_handles;
+      continue;
+    }
+    if (!flush_target_access_range()) {
+      return false;
+    }
+    range_start = target_page.va;
+    expected_next = target_page.va + handle_size_;
+    range_handles = 1;
+  }
+  if (!flush_target_access_range()) {
+    return false;
   }
   return true;
 }

@@ -100,10 +100,15 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   };
   bool MoveBackingPage(const VMMBackingMap::MappedPage& source,
                        const VMMBackingMap::UnmappedPage& target,
-                       MoveBackingPageStats* stats = nullptr);
+                       MoveBackingPageStats* stats = nullptr,
+                       bool defer_target_access = false);
   bool MoveBackingPageForRemap(const VMMBackingMap::MappedPage& source,
                                const VMMBackingMap::UnmappedPage& target,
                                const std::shared_ptr<VMMHandleMeta>& meta,
+                               MoveBackingPageStats* stats = nullptr,
+                               bool defer_target_access = false);
+  bool SetAccessForMappedRange(VMMDevicePtr ptr,
+                               size_t size,
                                MoveBackingPageStats* stats = nullptr);
   enum class RestoreRemapSourceResult : uint8_t {
     kSkipped = 0,
