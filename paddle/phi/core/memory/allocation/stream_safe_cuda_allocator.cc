@@ -178,7 +178,19 @@ bool StreamSafeCUDAAllocation::SetVMMV2RemapEvent() {
   if (vmm_v2_remap_allocation_ == nullptr) {
     return false;
   }
+  if (!FLAGS_vmm_v2_remap_on_oom) {
+    return vmm_v2_remap_allocation_->SetVMMRemapEvent(owning_stream_, nullptr);
+  }
+#if defined(PADDLE_WITH_CUDA)
+  gpuEvent_t remap_event = nullptr;
+  PADDLE_ENFORCE_GPU_SUCCESS(
+      cudaEventCreateWithFlags(&remap_event, cudaEventDisableTiming));
+  PADDLE_ENFORCE_GPU_SUCCESS(cudaEventRecord(remap_event, owning_stream_));
+  return vmm_v2_remap_allocation_->SetVMMRemapEvent(
+      owning_stream_, std::make_shared<CUDAEventGuard>(remap_event));
+#else
   return vmm_v2_remap_allocation_->SetVMMRemapEvent(owning_stream_, nullptr);
+#endif
 }
 
 void StreamSafeCUDAAllocation::RecordStreamWithNoGraphCapturing(
