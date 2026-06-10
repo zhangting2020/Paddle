@@ -77,6 +77,17 @@ SetAccessResult SetAccessInChunks(VMMDevicePtr ptr,
   return {};
 }
 
+SetAccessResult SetAccessWholeRange(VMMDevicePtr ptr,
+                                    size_t size,
+                                    const std::vector<CUmemAccessDesc>& desc) {
+  auto status =
+      phi::dynload::cuMemSetAccess(ptr, size, desc.data(), desc.size());
+  if (status != CUDA_SUCCESS) {
+    return {status, 0, size};
+  }
+  return {};
+}
+
 template <typename Map, typename Key, typename Value>
 void EmplaceOrEnforce(Map* map,
                       Key&& key,
@@ -615,7 +626,14 @@ bool CUDAVirtualMemAllocatorV2::SetAccessForMappedRange(
   }
   platform::CUDADeviceGuard guard(place_.device);
   auto op_start = Clock::now();
-  auto access_result = SetAccessInChunks(ptr, size, handle_size_, access_desc_);
+  auto access_result = SetAccessWholeRange(ptr, size, access_desc_);
+  if (access_result.status != CUDA_SUCCESS) {
+    VLOG(1) << "SetAccessForMappedRange: whole-range cuMemSetAccess failed at "
+            << reinterpret_cast<void*>(ptr) << " size=" << size
+            << " status=" << access_result.status
+            << ", falling back to chunked access";
+    access_result = SetAccessInChunks(ptr, size, handle_size_, access_desc_);
+  }
   if (stats != nullptr) {
     stats->set_access_us += ElapsedMicros(op_start, Clock::now());
   }
