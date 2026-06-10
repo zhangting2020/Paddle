@@ -471,12 +471,14 @@ bool CUDAVirtualMemAllocatorV2::MoveBackingPage(
               << " status=" << restore_status;
       return false;
     }
-    auto access_status = phi::dynload::cuMemSetAccess(
-        source.va, handle_size_, access_desc_.data(), access_desc_.size());
-    if (access_status != CUDA_SUCCESS) {
+    auto access_result =
+        SetAccessInChunks(source.va, handle_size_, handle_size_, access_desc_);
+    if (access_result.status != CUDA_SUCCESS) {
       VLOG(0) << "MoveBackingPage: failed to restore source access at "
               << reinterpret_cast<void*>(source.va)
-              << " status=" << access_status;
+              << " failed_offset=" << access_result.failed_offset
+              << " failed_size=" << access_result.failed_size
+              << " status=" << access_result.status;
       phi::dynload::cuMemUnmap(source.va, handle_size_);
       return false;
     }
@@ -504,12 +506,14 @@ bool CUDAVirtualMemAllocatorV2::MoveBackingPage(
     return false;
   }
 
-  auto access_status = phi::dynload::cuMemSetAccess(
-      target.va, handle_size_, access_desc_.data(), access_desc_.size());
-  if (access_status != CUDA_SUCCESS) {
+  auto access_result =
+      SetAccessInChunks(target.va, handle_size_, handle_size_, access_desc_);
+  if (access_result.status != CUDA_SUCCESS) {
     VLOG(0) << "MoveBackingPage: target cuMemSetAccess failed at "
             << reinterpret_cast<void*>(target.va)
-            << " status=" << access_status;
+            << " failed_offset=" << access_result.failed_offset
+            << " failed_size=" << access_result.failed_size
+            << " status=" << access_result.status;
     auto unmap_target_status =
         phi::dynload::cuMemUnmap(target.va, handle_size_);
     if (unmap_target_status != CUDA_SUCCESS) {
@@ -566,12 +570,14 @@ CUDAVirtualMemAllocatorV2::RestoreRemapSourceMapping(
         handle, meta, size, "cuMemMap", false);
   }
 
-  auto access_status = phi::dynload::cuMemSetAccess(
-      original_va, size, access_desc_.data(), access_desc_.size());
-  if (access_status != CUDA_SUCCESS) {
+  auto access_result =
+      SetAccessInChunks(original_va, size, handle_size_, access_desc_);
+  if (access_result.status != CUDA_SUCCESS) {
     VLOG(0) << "RestoreRemapSourceMapping: cuMemSetAccess failed for VA "
             << reinterpret_cast<void*>(original_va)
-            << " status=" << access_status;
+            << " failed_offset=" << access_result.failed_offset
+            << " failed_size=" << access_result.failed_size
+            << " status=" << access_result.status;
     phi::dynload::cuMemUnmap(original_va, size);
     return ForceReleaseRestoredRemapSourceMapping(
         handle, meta, size, "cuMemSetAccess", false);

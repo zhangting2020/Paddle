@@ -56,12 +56,6 @@ class VMMAutoGrowthBestFitMultiPoolAllocationV2
     }
     return remap_allocation_->SetVMMRemapEvent(stream, std::move(event));
   }
-  bool PinVMMRemap() override {
-    if (remap_allocation_ == nullptr) {
-      return false;
-    }
-    return remap_allocation_->PinVMMRemap();
-  }
 
  private:
   AllocationPtr underlying_allocation_;

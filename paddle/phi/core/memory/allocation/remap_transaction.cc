@@ -419,22 +419,11 @@ RemapTransaction::SourceMovePlan RemapTransaction::CollectRemapSourcePlan(
     BlockList* blocks, size_t requested_size, PoolType pool_type) {
   SourceMovePlan plan;
   bool logged_first_candidate = false;
-  bool logged_first_pinned_skip = false;
   auto source_candidates =
       CollectSourcePageCandidates(vmm_allocator_, *blocks, requested_size);
   for (auto it = blocks->begin(); it != blocks->end();) {
     auto current = it++;
     if (current->IsFree()) plan.stats.free_block_count++;
-    if (current->IsMappedFree() && current->IsRemapPinned()) {
-      if (!logged_first_pinned_skip) {
-        VLOG(4) << "First pinned remap source skip pool="
-                << static_cast<int>(pool_type)
-                << " block_ptr=" << current->Ptr()
-                << " block_size=" << current->Size();
-        logged_first_pinned_skip = true;
-      }
-      continue;
-    }
     if (!current->CanBeRemapSource()) {
       continue;
     }
