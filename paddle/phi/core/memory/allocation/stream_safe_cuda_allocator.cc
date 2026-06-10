@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "paddle/phi/core/memory/allocation/stream_safe_cuda_allocator.h"
+#include <chrono>
 #include <thread>
 #include "glog/logging.h"
 
@@ -35,6 +36,14 @@ COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
 namespace paddle::memory::allocation {
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+
+uint64_t ElapsedMicros(Clock::time_point start, Clock::time_point end) {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+          .count());
+}
 
 VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVMMV2MultiPoolAllocator(
     const std::shared_ptr<Allocator>& allocator) {
@@ -403,16 +412,29 @@ void StreamSafeCUDAAllocator::ProcessUnfreedAllocations() {
     return;
   }
 
+  auto process_start = Clock::now();
+  size_t scanned = 0;
+  size_t released = 0;
   std::lock_guard<SpinLock> lock_guard(unfreed_allocation_lock_);
   for (auto it = unfreed_allocations_.begin();
        it != unfreed_allocations_.end();) {
+    ++scanned;
     if ((*it)->CanBeFreed()) {
       MarkVMMV2RemapPendingStream(this, *it);
       delete *it;
       it = unfreed_allocations_.erase(it);
+      ++released;
     } else {
       ++it;
     }
+  }
+  if (VLOG_IS_ON(4)) {
+    VLOG(4) << "StreamSafeCUDAAllocator::ProcessUnfreedAllocations"
+            << " place=" << place_ << " stream=" << default_stream_
+            << " scanned=" << scanned << " released=" << released
+            << " blocked=" << (scanned - released)
+            << " remaining=" << unfreed_allocations_.size()
+            << " elapsed_us=" << ElapsedMicros(process_start, Clock::now());
   }
 }
 

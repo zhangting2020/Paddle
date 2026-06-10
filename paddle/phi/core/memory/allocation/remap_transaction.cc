@@ -706,7 +706,8 @@ RemapTransaction::DestinationPlan RemapTransaction::SelectDestinationPlan(
 bool RemapTransaction::TryCommitTailMovePlacement(BlockList* blocks,
                                                   VMMDevicePtr tail_va,
                                                   SourceMovePlan* plan,
-                                                  PoolType pool_type) {
+                                                  PoolType pool_type,
+                                                  MoveCommitStats* move_stats) {
   const size_t handle_count = plan->handles.size();
   auto placement = DestinationPlacement::Tail(tail_va, handle_count);
   std::vector<VMMBackingMap::UnmappedPage> target_pages;
@@ -717,7 +718,7 @@ bool RemapTransaction::TryCommitTailMovePlacement(BlockList* blocks,
     return false;
   }
 
-  if (!MovePlannedPagesToTargets(blocks, plan, target_pages)) {
+  if (!MovePlannedPagesToTargets(blocks, plan, target_pages, move_stats)) {
     return false;
   }
   ApplyPlannedSourceBlocks(blocks, &plan->source_blocks);
@@ -734,7 +735,8 @@ bool RemapTransaction::TryCommitTailMovePlacement(BlockList* blocks,
 bool RemapTransaction::MovePlannedPagesToTargets(
     BlockList* blocks,
     SourceMovePlan* plan,
-    const std::vector<VMMBackingMap::UnmappedPage>& target_pages) {
+    const std::vector<VMMBackingMap::UnmappedPage>& target_pages,
+    MoveCommitStats* move_stats) {
   const size_t handle_count = plan->handles.size();
   if (target_pages.size() != handle_count) {
     VLOG(0) << "VMM V2 remap transaction: MovePage target count mismatch, "
@@ -747,12 +749,23 @@ bool RemapTransaction::MovePlannedPagesToTargets(
       };
 
   for (size_t i = 0; i < handle_count; ++i) {
-    if (!vmm_allocator_->MoveBackingPageForRemap(
-            plan->source_pages[i], target_pages[i], plan->metas[i])) {
+    CUDAVirtualMemAllocatorV2::MoveBackingPageStats page_stats;
+    if (!vmm_allocator_->MoveBackingPageForRemap(plan->source_pages[i],
+                                                 target_pages[i],
+                                                 plan->metas[i],
+                                                 &page_stats)) {
       VLOG(0) << "VMM V2 remap transaction: MoveBackingPage failed at " << i
               << "/" << handle_count;
       Rollback();
       return false;
+    }
+    if (move_stats != nullptr) {
+      move_stats->unmap_us += page_stats.unmap_us;
+      move_stats->map_us += page_stats.map_us;
+      move_stats->set_access_us += page_stats.set_access_us;
+      move_stats->metadata_us += page_stats.metadata_us;
+      move_stats->restore_us += page_stats.restore_us;
+      move_stats->rollback_us += page_stats.rollback_us;
     }
     RecordMappedDestinationRange(target_pages[i].va, 1);
   }
@@ -763,7 +776,8 @@ bool RemapTransaction::TryCommitSingleUnmappedFreeMovePlacement(
     BlockList* blocks,
     BlockIterator unmapped_free_it,
     SourceMovePlan* plan,
-    PoolType pool_type) {
+    PoolType pool_type,
+    MoveCommitStats* move_stats) {
   const size_t handle_count = plan->handles.size();
   const VMMDevicePtr unmapped_free_va = unmapped_free_it->BeginVA();
   auto placement = DestinationPlacement::UnmappedFree(
@@ -776,7 +790,7 @@ bool RemapTransaction::TryCommitSingleUnmappedFreeMovePlacement(
     return false;
   }
 
-  if (!MovePlannedPagesToTargets(blocks, plan, target_pages)) {
+  if (!MovePlannedPagesToTargets(blocks, plan, target_pages, move_stats)) {
     return false;
   }
   ApplyPlannedSourceBlocks(blocks, &plan->source_blocks);
@@ -793,7 +807,8 @@ bool RemapTransaction::TryCommitUnmappedFreeMoveScatter(
     BlockList* blocks,
     SourceMovePlan* plan,
     const std::vector<DestinationPlacement>& placements,
-    PoolType pool_type) {
+    PoolType pool_type,
+    MoveCommitStats* move_stats) {
   std::vector<VMMBackingMap::UnmappedPage> target_pages;
   target_pages.reserve(plan->handles.size());
   for (const auto& p : placements) {
@@ -805,7 +820,7 @@ bool RemapTransaction::TryCommitUnmappedFreeMoveScatter(
     target_pages.insert(target_pages.end(), pages.begin(), pages.end());
   }
 
-  if (!MovePlannedPagesToTargets(blocks, plan, target_pages)) {
+  if (!MovePlannedPagesToTargets(blocks, plan, target_pages, move_stats)) {
     return false;
   }
   ApplyPlannedSourceBlocks(blocks, &plan->source_blocks);
@@ -847,8 +862,12 @@ RemapTransaction::ExecuteMovePlacementStrategy(BlockList* blocks,
   auto commit_start = Clock::now();
   switch (destination.kind) {
     case DestinationPlanKind::kTail:
-      result.success = TryCommitTailMovePlacement(
-          blocks, destination.placements.front().dst, plan, pool_type);
+      result.success =
+          TryCommitTailMovePlacement(blocks,
+                                     destination.placements.front().dst,
+                                     plan,
+                                     pool_type,
+                                     &result.move_stats);
       result.used_tail = result.success;
       result.move_commit_us = ElapsedMicros(commit_start, Clock::now());
       return result;
@@ -857,12 +876,13 @@ RemapTransaction::ExecuteMovePlacementStrategy(BlockList* blocks,
           blocks,
           destination.placements.front().unmapped_free_it,
           plan,
-          pool_type);
+          pool_type,
+          &result.move_stats);
       result.move_commit_us = ElapsedMicros(commit_start, Clock::now());
       return result;
     case DestinationPlanKind::kScatterUnmappedFree:
       result.success = TryCommitUnmappedFreeMoveScatter(
-          blocks, plan, destination.placements, pool_type);
+          blocks, plan, destination.placements, pool_type, &result.move_stats);
       result.move_commit_us = ElapsedMicros(commit_start, Clock::now());
       return result;
     case DestinationPlanKind::kNone:
@@ -908,6 +928,7 @@ RemapTransaction::CompactResult RemapTransaction::CompactFreeBlocks(
   result.used_tail = move_placement.used_tail;
   result.destination_plan_us = move_placement.destination_plan_us;
   result.move_commit_us = move_placement.move_commit_us;
+  result.move_stats = move_placement.move_stats;
   result.target_min_va = move_placement.target_min_va;
   result.target_max_va = move_placement.target_max_va;
   if (result.success) {

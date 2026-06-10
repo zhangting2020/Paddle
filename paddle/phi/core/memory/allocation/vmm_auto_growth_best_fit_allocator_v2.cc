@@ -16,6 +16,7 @@
 
 #if defined(PADDLE_WITH_CUDA)
 
+#include <chrono>
 #include <exception>
 #include <limits>
 
@@ -30,6 +31,16 @@ namespace memory {
 namespace allocation {
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+
+constexpr uint64_t kSlowAllocatorOpLogUs = 1000;
+
+uint64_t ElapsedMicros(Clock::time_point start, Clock::time_point end) {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+          .count());
+}
 
 template <typename Map, typename Key, typename Value>
 void EmplaceOrEnforce(Map* map,
@@ -169,11 +180,33 @@ bool VMMAutoGrowthBestFitBlockAllocationV2::SetVMMRemapEvent(
 
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   std::lock_guard<SpinLock> guard(spinlock_);
+  const bool trace_perf = VLOG_IS_ON(4);
+  const auto op_start = trace_perf ? Clock::now() : Clock::time_point{};
   const size_t requested_size = AlignedSize(size, alignment_);
+  auto log_slow_alloc = [&](const char* path, phi::Allocation* allocation) {
+    if (!trace_perf) {
+      return;
+    }
+    const uint64_t elapsed_us = ElapsedMicros(op_start, Clock::now());
+    if (elapsed_us < kSlowAllocatorOpLogUs) {
+      return;
+    }
+    VLOG(4) << "VMM V2 best-fit slow alloc"
+            << " pool=" << static_cast<int>(pool_type_) << " path=" << path
+            << " request=" << size << " aligned=" << requested_size
+            << " elapsed_us=" << elapsed_us
+            << " ptr=" << (allocation == nullptr ? nullptr : allocation->ptr())
+            << " block_count=" << all_blocks_.size()
+            << " free_blocks=" << free_blocks_.size()
+            << " unmapped_free_blocks=" << unmapped_free_blocks_.size()
+            << " tail_offset=" << underlying_allocator_->TailOffset();
+  };
   if (auto* allocation = AllocFromFreeBlocks(requested_size)) {
+    log_slow_alloc("mapped_free", allocation);
     return allocation;
   }
   if (auto* allocation = AllocFromUnmappedFreeBlocks(requested_size)) {
+    log_slow_alloc("unmapped_free", allocation);
     return allocation;
   }
 
@@ -275,7 +308,10 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
     InsertFreeBlock(remain_it);
   }
 
-  return new VMMAutoGrowthBestFitBlockAllocationV2(it, place_, this);
+  auto* allocation =
+      new VMMAutoGrowthBestFitBlockAllocationV2(it, place_, this);
+  log_slow_alloc(grow_size > 0 ? "grow" : "tail_reuse", allocation);
+  return allocation;
 }
 
 size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
@@ -424,8 +460,12 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
 
 void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   std::lock_guard<SpinLock> guard(spinlock_);
+  const bool trace_perf = VLOG_IS_ON(4);
+  const auto op_start = trace_perf ? Clock::now() : Clock::time_point{};
   auto* wrapped_allocation =
       static_cast<VMMAutoGrowthBestFitBlockAllocationV2*>(allocation);
+  void* ptr = allocation->ptr();
+  size_t allocation_size = allocation->size();
   auto it = wrapped_allocation->block_it();
   PADDLE_ENFORCE_NE(
       it,
@@ -447,6 +487,17 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   }
   it->MarkFree();
   TryMerge(it);
+  if (trace_perf) {
+    const uint64_t elapsed_us = ElapsedMicros(op_start, Clock::now());
+    if (elapsed_us >= kSlowAllocatorOpLogUs) {
+      VLOG(4) << "VMM V2 best-fit slow free"
+              << " pool=" << static_cast<int>(pool_type_) << " ptr=" << ptr
+              << " size=" << allocation_size << " elapsed_us=" << elapsed_us
+              << " block_count=" << all_blocks_.size()
+              << " free_blocks=" << free_blocks_.size()
+              << " unmapped_free_blocks=" << unmapped_free_blocks_.size();
+    }
+  }
   delete allocation;
 }
 

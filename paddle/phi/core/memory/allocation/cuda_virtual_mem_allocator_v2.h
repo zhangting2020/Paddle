@@ -90,11 +90,21 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   void SetTailOffset(size_t offset) { virtual_mem_alloced_offset_ = offset; }
 
   void RollbackMappedHandleRange(VMMDevicePtr ptr, size_t handle_count);
+  struct MoveBackingPageStats {
+    uint64_t unmap_us{0};
+    uint64_t map_us{0};
+    uint64_t set_access_us{0};
+    uint64_t metadata_us{0};
+    uint64_t restore_us{0};
+    uint64_t rollback_us{0};
+  };
   bool MoveBackingPage(const VMMBackingMap::MappedPage& source,
-                       const VMMBackingMap::UnmappedPage& target);
+                       const VMMBackingMap::UnmappedPage& target,
+                       MoveBackingPageStats* stats = nullptr);
   bool MoveBackingPageForRemap(const VMMBackingMap::MappedPage& source,
                                const VMMBackingMap::UnmappedPage& target,
-                               const std::shared_ptr<VMMHandleMeta>& meta);
+                               const std::shared_ptr<VMMHandleMeta>& meta,
+                               MoveBackingPageStats* stats = nullptr);
   enum class RestoreRemapSourceResult : uint8_t {
     kSkipped = 0,
     kRestored = 1,

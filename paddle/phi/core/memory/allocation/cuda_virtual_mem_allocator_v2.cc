@@ -17,6 +17,7 @@
 #if defined(PADDLE_WITH_CUDA)
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <utility>
 
@@ -31,6 +32,14 @@ namespace allocation {
 namespace {
 
 constexpr size_t kVMMSetAccessChunkSize = 64UL << 20;
+
+using Clock = std::chrono::steady_clock;
+
+uint64_t ElapsedMicros(Clock::time_point start, Clock::time_point end) {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+          .count());
+}
 
 size_t GetPoolVAMultiplier(PoolType pool_type) {
   switch (pool_type) {
@@ -448,23 +457,33 @@ void CUDAVirtualMemAllocatorV2::RollbackMappedHandleRange(VMMDevicePtr ptr,
 
 bool CUDAVirtualMemAllocatorV2::MoveBackingPage(
     const VMMBackingMap::MappedPage& source,
-    const VMMBackingMap::UnmappedPage& target) {
+    const VMMBackingMap::UnmappedPage& target,
+    MoveBackingPageStats* stats) {
   if (!ValidateMappedPages({source}, "MoveBackingPage::source") ||
       !ValidateUnmappedPages({target}, "MoveBackingPage::target")) {
     return false;
   }
   platform::CUDADeviceGuard guard(place_.device);
 
+  auto op_start = Clock::now();
   auto unmap_source_status = phi::dynload::cuMemUnmap(source.va, handle_size_);
+  if (stats != nullptr) {
+    stats->unmap_us += ElapsedMicros(op_start, Clock::now());
+  }
   if (unmap_source_status != CUDA_SUCCESS) {
     VLOG(0) << "MoveBackingPage: source cuMemUnmap failed at "
             << reinterpret_cast<void*>(source.va)
             << " status=" << unmap_source_status;
     return false;
   }
+  op_start = Clock::now();
   backing_map_.MarkUnmapped(source.va, handle_size_);
+  if (stats != nullptr) {
+    stats->metadata_us += ElapsedMicros(op_start, Clock::now());
+  }
 
   auto restore_source = [&]() {
+    auto restore_start = Clock::now();
     auto restore_status =
         phi::dynload::cuMemMap(source.va, handle_size_, 0, source.handle, 0);
     if (restore_status != CUDA_SUCCESS) {
@@ -482,6 +501,9 @@ bool CUDAVirtualMemAllocatorV2::MoveBackingPage(
               << " failed_size=" << access_result.failed_size
               << " status=" << access_result.status;
       phi::dynload::cuMemUnmap(source.va, handle_size_);
+      if (stats != nullptr) {
+        stats->restore_us += ElapsedMicros(restore_start, Clock::now());
+      }
       return false;
     }
     if (source.meta != nullptr) {
@@ -489,11 +511,18 @@ bool CUDAVirtualMemAllocatorV2::MoveBackingPage(
     } else {
       backing_map_.MarkMapped(source.va, source.handle, handle_size_);
     }
+    if (stats != nullptr) {
+      stats->restore_us += ElapsedMicros(restore_start, Clock::now());
+    }
     return true;
   };
 
+  op_start = Clock::now();
   auto map_target_status =
       phi::dynload::cuMemMap(target.va, handle_size_, 0, source.handle, 0);
+  if (stats != nullptr) {
+    stats->map_us += ElapsedMicros(op_start, Clock::now());
+  }
   if (map_target_status != CUDA_SUCCESS) {
     VLOG(0) << "MoveBackingPage: target cuMemMap failed at "
             << reinterpret_cast<void*>(target.va)
@@ -508,16 +537,24 @@ bool CUDAVirtualMemAllocatorV2::MoveBackingPage(
     return false;
   }
 
+  op_start = Clock::now();
   auto access_result =
       SetAccessInChunks(target.va, handle_size_, handle_size_, access_desc_);
+  if (stats != nullptr) {
+    stats->set_access_us += ElapsedMicros(op_start, Clock::now());
+  }
   if (access_result.status != CUDA_SUCCESS) {
     VLOG(0) << "MoveBackingPage: target cuMemSetAccess failed at "
             << reinterpret_cast<void*>(target.va)
             << " failed_offset=" << access_result.failed_offset
             << " failed_size=" << access_result.failed_size
             << " status=" << access_result.status;
+    op_start = Clock::now();
     auto unmap_target_status =
         phi::dynload::cuMemUnmap(target.va, handle_size_);
+    if (stats != nullptr) {
+      stats->rollback_us += ElapsedMicros(op_start, Clock::now());
+    }
     if (unmap_target_status != CUDA_SUCCESS) {
       VLOG(0) << "MoveBackingPage: target rollback cuMemUnmap failed at "
               << reinterpret_cast<void*>(target.va)
@@ -533,10 +570,14 @@ bool CUDAVirtualMemAllocatorV2::MoveBackingPage(
     return false;
   }
 
+  op_start = Clock::now();
   if (source.meta != nullptr) {
     backing_map_.MarkMapped(target.va, source.meta, handle_size_);
   } else {
     backing_map_.MarkMapped(target.va, source.handle, handle_size_);
+  }
+  if (stats != nullptr) {
+    stats->metadata_us += ElapsedMicros(op_start, Clock::now());
   }
   return true;
 }
@@ -544,11 +585,16 @@ bool CUDAVirtualMemAllocatorV2::MoveBackingPage(
 bool CUDAVirtualMemAllocatorV2::MoveBackingPageForRemap(
     const VMMBackingMap::MappedPage& source,
     const VMMBackingMap::UnmappedPage& target,
-    const std::shared_ptr<VMMHandleMeta>& meta) {
-  if (!MoveBackingPage(source, target)) {
+    const std::shared_ptr<VMMHandleMeta>& meta,
+    MoveBackingPageStats* stats) {
+  if (!MoveBackingPage(source, target, stats)) {
     return false;
   }
+  auto op_start = Clock::now();
   meta->MarkOwnedByRemapDestination();
+  if (stats != nullptr) {
+    stats->metadata_us += ElapsedMicros(op_start, Clock::now());
+  }
   return true;
 }
 
