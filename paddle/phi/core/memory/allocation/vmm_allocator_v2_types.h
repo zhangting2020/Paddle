@@ -621,10 +621,15 @@ struct BlockV2 {
     owning_stream_ = nullptr;
     remap_safe_event_.reset();
     remap_pending_states_.clear();
+    remap_safety_unknown_ = false;
   }
   void SetRemapSafety(gpuStream_t stream,
                       std::shared_ptr<CUDAEventGuard> event) {
     ClearRemapSafety();
+    if (stream == nullptr && event == nullptr) {
+      remap_safety_unknown_ = true;
+      return;
+    }
     owning_stream_ = stream;
     remap_safe_event_ = std::move(event);
   }
@@ -632,6 +637,7 @@ struct BlockV2 {
     owning_stream_ = src.owning_stream_;
     remap_safe_event_ = src.remap_safe_event_;
     remap_pending_states_ = src.remap_pending_states_;
+    remap_safety_unknown_ = src.remap_safety_unknown_;
   }
   void AppendRemapSafety(gpuStream_t stream,
                          std::shared_ptr<CUDAEventGuard> event) {
@@ -654,15 +660,18 @@ struct BlockV2 {
     remap_pending_states_.push_back({stream, std::move(event)});
   }
   void AppendRemapSafetyFrom(const BlockV2& src) {
+    remap_safety_unknown_ = remap_safety_unknown_ || src.remap_safety_unknown_;
     AppendRemapSafety(src.owning_stream_, src.remap_safe_event_);
     for (const auto& state : src.remap_pending_states_) {
       AppendRemapSafety(state.stream, state.event);
     }
   }
+  bool HasUnknownRemapSafety() const { return remap_safety_unknown_; }
 
   gpuStream_t owning_stream_{nullptr};
   std::shared_ptr<CUDAEventGuard> remap_safe_event_;
   std::vector<VMMBlockRemapState> remap_pending_states_;
+  bool remap_safety_unknown_{false};
 #endif
 };
 

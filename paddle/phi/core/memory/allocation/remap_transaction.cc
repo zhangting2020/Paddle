@@ -119,6 +119,9 @@ bool IsRemapSafe(BlockV2* block) {
   if (!block->CanBeRemapSource()) {
     return false;
   }
+  if (block->HasUnknownRemapSafety()) {
+    return false;
+  }
   bool ready = true;
   VMMBlockRemapState primary{block->owning_stream_, block->remap_safe_event_};
   if (!RemapStateReady(&primary)) {
@@ -420,6 +423,12 @@ RemapTransaction::SourceMovePlan RemapTransaction::CollectRemapSourcePlan(
     auto current = it++;
     if (current->IsFree()) plan.stats.free_block_count++;
     if (!current->CanBeRemapSource()) {
+      continue;
+    }
+    if (current->HasUnknownRemapSafety()) {
+      plan.stats.unknown_safety_blocked_count +=
+          (current->Size() + handle_size_ - 1) / handle_size_;
+      plan.stats.unknown_safety_blocked_bytes += current->Size();
       continue;
     }
     if (!IsRemapSafe(&*current)) {
