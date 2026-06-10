@@ -748,12 +748,76 @@ bool RemapTransaction::MovePlannedPagesToTargets(
         RestoreRemappedSourcesToFreeBlocks(blocks, handles, metas);
       };
 
+  VMMDevicePtr source_range_start = 0;
+  VMMDevicePtr source_expected_next = 0;
+  size_t source_range_first = 0;
+  size_t source_range_handles = 0;
+  auto flush_source_unmap_range = [&]() {
+    if (source_range_handles == 0) {
+      return true;
+    }
+    CUDAVirtualMemAllocatorV2::MoveBackingPageStats unmap_stats;
+    const bool ok = vmm_allocator_->UnmapMappedRangeForRemap(
+        source_range_start, source_range_handles, &unmap_stats);
+    if (move_stats != nullptr) {
+      move_stats->unmap_us += unmap_stats.unmap_us;
+      move_stats->metadata_us += unmap_stats.metadata_us;
+    }
+    if (!ok) {
+      VLOG(0) << "VMM V2 remap transaction: batched source unmap failed "
+              << "range_start=" << reinterpret_cast<void*>(source_range_start)
+              << " handles=" << source_range_handles;
+      Rollback();
+      return false;
+    }
+    auto metadata_start = Clock::now();
+    for (size_t i = source_range_first;
+         i < source_range_first + source_range_handles;
+         ++i) {
+      plan->metas[i]->MarkOwnedByRemapDestination();
+    }
+    if (move_stats != nullptr) {
+      move_stats->metadata_us += ElapsedMicros(metadata_start, Clock::now());
+    }
+    source_range_start = 0;
+    source_expected_next = 0;
+    source_range_first = 0;
+    source_range_handles = 0;
+    return true;
+  };
+  for (size_t i = 0; i < handle_count; ++i) {
+    const auto& source_page = plan->source_pages[i];
+    if (source_range_handles == 0) {
+      source_range_start = source_page.va;
+      source_expected_next = source_page.va + handle_size_;
+      source_range_first = i;
+      source_range_handles = 1;
+      continue;
+    }
+    if (source_page.va == source_expected_next) {
+      source_expected_next += handle_size_;
+      ++source_range_handles;
+      continue;
+    }
+    if (!flush_source_unmap_range()) {
+      return false;
+    }
+    source_range_start = source_page.va;
+    source_expected_next = source_page.va + handle_size_;
+    source_range_first = i;
+    source_range_handles = 1;
+  }
+  if (!flush_source_unmap_range()) {
+    return false;
+  }
+
   for (size_t i = 0; i < handle_count; ++i) {
     CUDAVirtualMemAllocatorV2::MoveBackingPageStats page_stats;
     if (!vmm_allocator_->MoveBackingPageForRemap(plan->source_pages[i],
                                                  target_pages[i],
                                                  plan->metas[i],
                                                  &page_stats,
+                                                 true,
                                                  true)) {
       VLOG(0) << "VMM V2 remap transaction: MoveBackingPage failed at " << i
               << "/" << handle_count;
