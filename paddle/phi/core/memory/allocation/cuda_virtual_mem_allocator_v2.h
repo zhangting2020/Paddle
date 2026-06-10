@@ -97,6 +97,8 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
     uint64_t metadata_us{0};
     uint64_t restore_us{0};
     uint64_t rollback_us{0};
+    uint64_t unmap_calls{0};
+    uint64_t set_access_calls{0};
   };
   bool UnmapMappedRangeForRemap(VMMDevicePtr ptr,
                                 size_t handle_count,

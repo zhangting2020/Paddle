@@ -107,9 +107,15 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
               << " destination_plan_us=" << compact_result.destination_plan_us
               << " move_commit_us=" << compact_result.move_commit_us
               << " move_unmap_us=" << compact_result.move_stats.unmap_us
+              << " move_unmap_ranges=" << compact_result.move_stats.unmap_ranges
+              << " move_unmap_calls=" << compact_result.move_stats.unmap_calls
               << " move_map_us=" << compact_result.move_stats.map_us
               << " move_set_access_us="
               << compact_result.move_stats.set_access_us
+              << " move_set_access_ranges="
+              << compact_result.move_stats.set_access_ranges
+              << " move_set_access_calls="
+              << compact_result.move_stats.set_access_calls
               << " move_metadata_us=" << compact_result.move_stats.metadata_us
               << " move_restore_us=" << compact_result.move_stats.restore_us
               << " move_rollback_us=" << compact_result.move_stats.rollback_us

@@ -32,10 +32,19 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+constexpr size_t kRemapSourceUnmapChunkSize = 64UL << 20;
+
 uint64_t ElapsedMicros(Clock::time_point start, Clock::time_point end) {
   return static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::microseconds>(end - start)
           .count());
+}
+
+size_t RemapSourceUnmapChunkHandles(size_t handle_size) {
+  if (handle_size == 0) {
+    return 1;
+  }
+  return std::max<size_t>(1, kRemapSourceUnmapChunkSize / handle_size);
 }
 
 std::vector<std::pair<VMMDevicePtr, size_t>> CollectFreeRanges(
@@ -756,28 +765,43 @@ bool RemapTransaction::MovePlannedPagesToTargets(
     if (source_range_handles == 0) {
       return true;
     }
-    CUDAVirtualMemAllocatorV2::MoveBackingPageStats unmap_stats;
-    const bool ok = vmm_allocator_->UnmapMappedRangeForRemap(
-        source_range_start, source_range_handles, &unmap_stats);
     if (move_stats != nullptr) {
-      move_stats->unmap_us += unmap_stats.unmap_us;
-      move_stats->metadata_us += unmap_stats.metadata_us;
+      move_stats->unmap_ranges += 1;
     }
-    if (!ok) {
-      VLOG(0) << "VMM V2 remap transaction: batched source unmap failed "
-              << "range_start=" << reinterpret_cast<void*>(source_range_start)
-              << " handles=" << source_range_handles;
-      Rollback();
-      return false;
-    }
-    auto metadata_start = Clock::now();
-    for (size_t i = source_range_first;
-         i < source_range_first + source_range_handles;
-         ++i) {
-      plan->metas[i]->MarkOwnedByRemapDestination();
-    }
-    if (move_stats != nullptr) {
-      move_stats->metadata_us += ElapsedMicros(metadata_start, Clock::now());
+    const size_t max_chunk_handles = RemapSourceUnmapChunkHandles(handle_size_);
+    size_t chunk_offset = 0;
+    while (chunk_offset < source_range_handles) {
+      const size_t chunk_handles =
+          std::min(max_chunk_handles, source_range_handles - chunk_offset);
+      const VMMDevicePtr chunk_start =
+          source_range_start + chunk_offset * handle_size_;
+      CUDAVirtualMemAllocatorV2::MoveBackingPageStats unmap_stats;
+      const bool ok = vmm_allocator_->UnmapMappedRangeForRemap(
+          chunk_start, chunk_handles, &unmap_stats);
+      if (move_stats != nullptr) {
+        move_stats->unmap_us += unmap_stats.unmap_us;
+        move_stats->metadata_us += unmap_stats.metadata_us;
+        move_stats->unmap_calls += unmap_stats.unmap_calls;
+      }
+      if (!ok) {
+        VLOG(0) << "VMM V2 remap transaction: batched source unmap failed "
+                << "range_start=" << reinterpret_cast<void*>(source_range_start)
+                << " chunk_start=" << reinterpret_cast<void*>(chunk_start)
+                << " chunk_handles=" << chunk_handles
+                << " range_handles=" << source_range_handles;
+        Rollback();
+        return false;
+      }
+      auto metadata_start = Clock::now();
+      for (size_t i = source_range_first + chunk_offset;
+           i < source_range_first + chunk_offset + chunk_handles;
+           ++i) {
+        plan->metas[i]->MarkOwnedByRemapDestination();
+      }
+      if (move_stats != nullptr) {
+        move_stats->metadata_us += ElapsedMicros(metadata_start, Clock::now());
+      }
+      chunk_offset += chunk_handles;
     }
     source_range_start = 0;
     source_expected_next = 0;
@@ -831,6 +855,8 @@ bool RemapTransaction::MovePlannedPagesToTargets(
       move_stats->metadata_us += page_stats.metadata_us;
       move_stats->restore_us += page_stats.restore_us;
       move_stats->rollback_us += page_stats.rollback_us;
+      move_stats->unmap_calls += page_stats.unmap_calls;
+      move_stats->set_access_calls += page_stats.set_access_calls;
     }
     RecordMappedDestinationRange(target_pages[i].va, 1);
   }
@@ -846,7 +872,9 @@ bool RemapTransaction::MovePlannedPagesToTargets(
     const bool ok = vmm_allocator_->SetAccessForMappedRange(
         range_start, range_size, &access_stats);
     if (move_stats != nullptr) {
+      move_stats->set_access_ranges += 1;
       move_stats->set_access_us += access_stats.set_access_us;
+      move_stats->set_access_calls += access_stats.set_access_calls;
     }
     if (!ok) {
       VLOG(0) << "VMM V2 remap transaction: batched target SetAccess failed "

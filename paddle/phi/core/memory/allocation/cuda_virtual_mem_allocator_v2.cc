@@ -55,6 +55,7 @@ struct SetAccessResult {
   CUresult status{CUDA_SUCCESS};
   size_t failed_offset{0};
   size_t failed_size{0};
+  size_t call_count{0};
 };
 
 SetAccessResult SetAccessInChunks(VMMDevicePtr ptr,
@@ -63,18 +64,23 @@ SetAccessResult SetAccessInChunks(VMMDevicePtr ptr,
                                   const std::vector<CUmemAccessDesc>& desc) {
   const size_t chunk_size =
       std::max(handle_size, AlignedSize(kVMMSetAccessChunkSize, handle_size));
+  SetAccessResult result;
   size_t offset = 0;
   while (offset < size) {
     const size_t remaining = size - offset;
     const size_t current_size = std::min(chunk_size, remaining);
     auto status = phi::dynload::cuMemSetAccess(
         ptr + offset, current_size, desc.data(), desc.size());
+    ++result.call_count;
     if (status != CUDA_SUCCESS) {
-      return {status, offset, current_size};
+      result.status = status;
+      result.failed_offset = offset;
+      result.failed_size = current_size;
+      return result;
     }
     offset += current_size;
   }
-  return {};
+  return result;
 }
 
 SetAccessResult SetAccessWholeRange(VMMDevicePtr ptr,
@@ -83,9 +89,9 @@ SetAccessResult SetAccessWholeRange(VMMDevicePtr ptr,
   auto status =
       phi::dynload::cuMemSetAccess(ptr, size, desc.data(), desc.size());
   if (status != CUDA_SUCCESS) {
-    return {status, 0, size};
+    return {status, 0, size, 1};
   }
-  return {};
+  return {CUDA_SUCCESS, 0, 0, 1};
 }
 
 template <typename Map, typename Key, typename Value>
@@ -482,6 +488,7 @@ bool CUDAVirtualMemAllocatorV2::UnmapMappedRangeForRemap(
   auto unmap_status = phi::dynload::cuMemUnmap(ptr, size);
   if (stats != nullptr) {
     stats->unmap_us += ElapsedMicros(op_start, Clock::now());
+    stats->unmap_calls += 1;
   }
   if (unmap_status != CUDA_SUCCESS) {
     VLOG(0) << "UnmapMappedRangeForRemap: cuMemUnmap failed at "
@@ -516,6 +523,7 @@ bool CUDAVirtualMemAllocatorV2::MoveBackingPage(
         phi::dynload::cuMemUnmap(source.va, handle_size_);
     if (stats != nullptr) {
       stats->unmap_us += ElapsedMicros(op_start, Clock::now());
+      stats->unmap_calls += 1;
     }
     if (unmap_source_status != CUDA_SUCCESS) {
       VLOG(0) << "MoveBackingPage: source cuMemUnmap failed at "
@@ -591,6 +599,7 @@ bool CUDAVirtualMemAllocatorV2::MoveBackingPage(
         SetAccessInChunks(target.va, handle_size_, handle_size_, access_desc_);
     if (stats != nullptr) {
       stats->set_access_us += ElapsedMicros(op_start, Clock::now());
+      stats->set_access_calls += access_result.call_count;
     }
     if (access_result.status != CUDA_SUCCESS) {
       VLOG(0) << "MoveBackingPage: target cuMemSetAccess failed at "
@@ -679,6 +688,7 @@ bool CUDAVirtualMemAllocatorV2::SetAccessForMappedRange(
   }
   if (stats != nullptr) {
     stats->set_access_us += ElapsedMicros(op_start, Clock::now());
+    stats->set_access_calls += access_result.call_count;
   }
   if (access_result.status != CUDA_SUCCESS) {
     VLOG(0) << "SetAccessForMappedRange: cuMemSetAccess failed at "

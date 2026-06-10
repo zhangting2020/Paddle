@@ -119,6 +119,10 @@ class RemapTransaction {
     uint64_t metadata_us{0};
     uint64_t restore_us{0};
     uint64_t rollback_us{0};
+    uint64_t unmap_ranges{0};
+    uint64_t unmap_calls{0};
+    uint64_t set_access_ranges{0};
+    uint64_t set_access_calls{0};
   };
   struct PlacementResult {
     bool success{false};
