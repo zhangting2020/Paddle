@@ -373,18 +373,15 @@ size_t StreamSafeCUDAAllocator::CompactImpl(const Place& place,
   std::vector<StreamSafeCUDAAllocator*>& allocators = allocator_map_[place];
 
   // Execution layer for compact(remap): first reclaim cross-stream pending
-  // frees so that more blocks become FREE and eligible for remap, then
-  // forward the bounded compact request to each underlying allocator.
+  // frees. Only the current stream allocator can satisfy this allocation
+  // retry, so remap compaction must stay local to the allocator that observed
+  // OOM. Compacting other stream allocators cannot provide a block to this
+  // retry and may unnecessarily remap communication-stream memory.
   for (StreamSafeCUDAAllocator* allocator : allocators) {
     allocator->ProcessUnfreedAllocations();
   }
 
-  size_t compact_free_size = 0;
-  for (StreamSafeCUDAAllocator* allocator : allocators) {
-    compact_free_size +=
-        allocator->underlying_allocator_->Compact(place_, requested_size);
-  }
-  return compact_free_size;
+  return underlying_allocator_->Compact(place_, requested_size);
 }
 
 void StreamSafeCUDAAllocator::ProcessUnfreedAllocations() {
