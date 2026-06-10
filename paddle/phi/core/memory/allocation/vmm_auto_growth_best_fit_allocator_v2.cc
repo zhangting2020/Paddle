@@ -548,6 +548,9 @@ bool VMMAutoGrowthBestFitAllocatorV2::PinBlockRemap(void* ptr) {
       continue;
     }
     it->PinRemap();
+    VLOG(3) << "VMM V2 pinned block remap ptr=" << it->Ptr()
+            << " size=" << it->Size()
+            << " pool=" << static_cast<int>(it->Pool());
     return true;
   }
   return false;

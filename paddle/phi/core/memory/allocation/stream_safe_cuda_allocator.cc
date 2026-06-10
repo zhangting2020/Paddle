@@ -88,9 +88,15 @@ bool StreamSafeCUDAAllocation::RecordStream(gpuStream_t stream) {
     return false;
   }
 
-  if (vmm_v2_remap_allocation_ != nullptr && !PinVMMV2Remap()) {
-    VLOG(0) << "VMM V2 failed to pin remap for cross-stream allocation "
-            << ptr() << "; compact/remap may still move communication memory";
+  if (vmm_v2_remap_allocation_ != nullptr) {
+    if (PinVMMV2Remap()) {
+      VLOG(3) << "VMM V2 pinned remap for cross-stream allocation ptr=" << ptr()
+              << " size=" << size() << " owning_stream=" << owning_stream_
+              << " recorded_stream=" << stream;
+    } else {
+      VLOG(0) << "VMM V2 failed to pin remap for cross-stream allocation "
+              << ptr() << "; compact/remap may still move communication memory";
+    }
   }
 
   std::call_once(once_flag_,

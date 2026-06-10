@@ -420,6 +420,7 @@ struct BlockV2 {
   bool IsActive() const { return type_ == BlockType::kActive; }
   bool IsFree() const { return type_ == BlockType::kFree; }
   bool IsMappedFree() const { return IsFree(); }
+  bool IsRemapPinned() const { return remap_pinned_; }
   bool CanBeRemapSource() const { return IsMappedFree() && !remap_pinned_; }
   bool IsUnmappedFree() const { return type_ == BlockType::kUnmappedFree; }
   void* Ptr() const { return ptr_; }
