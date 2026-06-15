@@ -10,6 +10,7 @@ set(ALLOCATOR_SRCS
     auto_growth_best_fit_allocator.cc
     auto_growth_best_fit_allocator_v2.cc
     virtual_memory_auto_growth_best_fit_allocator.cc
+    vmm_v2_step_stats.cc
     retry_allocator.cc
     memory_block.cc
     memory_block_desc.cc

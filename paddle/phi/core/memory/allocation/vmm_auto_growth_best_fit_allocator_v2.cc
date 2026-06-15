@@ -23,6 +23,7 @@
 #include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
 #include "paddle/phi/core/memory/allocation/free_block_remap_compactor.h"
+#include "paddle/phi/core/memory/allocation/vmm_v2_step_stats.h"
 
 COMMON_DECLARE_bool(vmm_v2_compact_all);
 
@@ -181,13 +182,27 @@ bool VMMAutoGrowthBestFitBlockAllocationV2::SetVMMRemapEvent(
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   std::lock_guard<SpinLock> guard(spinlock_);
   const bool trace_perf = VLOG_IS_ON(4);
-  const auto op_start = trace_perf ? Clock::now() : Clock::time_point{};
+  const bool trace_step = VMMV2StepStatsEnabled();
+  const auto op_start =
+      (trace_perf || trace_step) ? Clock::now() : Clock::time_point{};
   const size_t requested_size = AlignedSize(size, alignment_);
-  auto log_slow_alloc = [&](const char* path, phi::Allocation* allocation) {
+  auto record_alloc = [&](const char* path, phi::Allocation* allocation) {
+    const uint64_t elapsed_us =
+        (trace_perf || trace_step) ? ElapsedMicros(op_start, Clock::now()) : 0;
+    if (trace_step) {
+      RecordVMMV2Alloc(place_.device,
+                       pool_type_,
+                       path,
+                       size,
+                       elapsed_us,
+                       all_blocks_.size(),
+                       free_blocks_.size(),
+                       unmapped_free_blocks_.size(),
+                       underlying_allocator_->TailOffset());
+    }
     if (!trace_perf) {
       return;
     }
-    const uint64_t elapsed_us = ElapsedMicros(op_start, Clock::now());
     if (elapsed_us < kSlowAllocatorOpLogUs) {
       return;
     }
@@ -202,11 +217,11 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
             << " tail_offset=" << underlying_allocator_->TailOffset();
   };
   if (auto* allocation = AllocFromFreeBlocks(requested_size)) {
-    log_slow_alloc("mapped_free", allocation);
+    record_alloc("mapped_free", allocation);
     return allocation;
   }
   if (auto* allocation = AllocFromUnmappedFreeBlocks(requested_size)) {
-    log_slow_alloc("unmapped_free", allocation);
+    record_alloc("unmapped_free", allocation);
     return allocation;
   }
 
@@ -310,7 +325,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
 
   auto* allocation =
       new VMMAutoGrowthBestFitBlockAllocationV2(it, place_, this);
-  log_slow_alloc(grow_size > 0 ? "grow" : "tail_reuse", allocation);
+  record_alloc(grow_size > 0 ? "grow" : "tail_reuse", allocation);
   return allocation;
 }
 
@@ -461,7 +476,9 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
 void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   std::lock_guard<SpinLock> guard(spinlock_);
   const bool trace_perf = VLOG_IS_ON(4);
-  const auto op_start = trace_perf ? Clock::now() : Clock::time_point{};
+  const bool trace_step = VMMV2StepStatsEnabled();
+  const auto op_start =
+      (trace_perf || trace_step) ? Clock::now() : Clock::time_point{};
   auto* wrapped_allocation =
       static_cast<VMMAutoGrowthBestFitBlockAllocationV2*>(allocation);
   void* ptr = allocation->ptr();
@@ -487,9 +504,18 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   }
   it->MarkFree();
   TryMerge(it);
-  if (trace_perf) {
+  if (trace_perf || trace_step) {
     const uint64_t elapsed_us = ElapsedMicros(op_start, Clock::now());
-    if (elapsed_us >= kSlowAllocatorOpLogUs) {
+    if (trace_step) {
+      RecordVMMV2Free(place_.device,
+                      pool_type_,
+                      allocation_size,
+                      elapsed_us,
+                      all_blocks_.size(),
+                      free_blocks_.size(),
+                      unmapped_free_blocks_.size());
+    }
+    if (trace_perf && elapsed_us >= kSlowAllocatorOpLogUs) {
       VLOG(4) << "VMM V2 best-fit slow free"
               << " pool=" << static_cast<int>(pool_type_) << " ptr=" << ptr
               << " size=" << allocation_size << " elapsed_us=" << elapsed_us

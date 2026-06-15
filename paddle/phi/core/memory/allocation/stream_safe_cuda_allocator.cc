@@ -24,6 +24,7 @@
 #include "paddle/phi/core/memory/allocation/stat_allocator.h"
 #include "paddle/phi/core/memory/allocation/vmm_allocator_v2_types.h"
 #include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_multi_pool_allocator_v2.h"
+#include "paddle/phi/core/memory/allocation/vmm_v2_step_stats.h"
 
 COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
 
@@ -428,13 +429,22 @@ void StreamSafeCUDAAllocator::ProcessUnfreedAllocations() {
       ++it;
     }
   }
+  const uint64_t elapsed_us = ElapsedMicros(process_start, Clock::now());
   if (VLOG_IS_ON(4)) {
     VLOG(4) << "StreamSafeCUDAAllocator::ProcessUnfreedAllocations"
             << " place=" << place_ << " stream=" << default_stream_
             << " scanned=" << scanned << " released=" << released
             << " blocked=" << (scanned - released)
             << " remaining=" << unfreed_allocations_.size()
-            << " elapsed_us=" << ElapsedMicros(process_start, Clock::now());
+            << " elapsed_us=" << elapsed_us;
+  }
+  if (VMMV2StepStatsEnabled()) {
+    RecordStreamSafeProcess(place_.device,
+                            scanned,
+                            released,
+                            scanned - released,
+                            unfreed_allocations_.size(),
+                            elapsed_us);
   }
 }
 
