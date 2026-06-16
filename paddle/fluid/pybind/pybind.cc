@@ -3835,7 +3835,8 @@ All parameter, weight, gradient are variables in Paddle.
                                 dense_tensor->meta().offset;
     const void *data_ptr = reinterpret_cast<const void *>(data_addr);
     auto *mutable_ptr = const_cast<void *>(data_ptr);
-    paddle::memory::VmmTensorPartsVisitor parts_visitor(mutable_ptr, bytes);
+    paddle::memory::VmmTensorPartsVisitor parts_visitor(
+        mutable_ptr, bytes, false);
     paddle::memory::allocation::AllocatorFacade::Instance().Accept(
         GPUPlace(place.GetDeviceId()), &parts_visitor);
 

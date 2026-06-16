@@ -543,7 +543,10 @@ void VMMAutoGrowthBestFitAllocatorV2::GetFreeBlockStats(size_t* total_free,
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
-    void* ptr, size_t size, std::vector<BlockPart>* parts) {
+    void* ptr,
+    size_t size,
+    std::vector<BlockPart>* parts,
+    bool mark_ipc_exported) {
   std::lock_guard<SpinLock> guard(spinlock_);
   auto target_va = reinterpret_cast<VMMDevicePtr>(ptr);
   PADDLE_ENFORCE_LE(
@@ -583,15 +586,17 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
             << " part_count=" << tensor_block.AllocationPartCount();
     return false;
   }
-  if (!underlying_allocator_->MarkBlockIpcExported(tensor_block)) {
-    VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit failed to mark IPC exported "
-            << "for active block ptr=" << block_it->ptr_
-            << " block_size=" << block_it->size_ << " target_ptr=" << ptr
-            << " target_size=" << size
-            << " pool=" << static_cast<int>(pool_type_);
-    return false;
+  if (mark_ipc_exported) {
+    if (!underlying_allocator_->MarkBlockIpcExported(tensor_block)) {
+      VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit failed to mark IPC exported "
+              << "for active block ptr=" << block_it->ptr_
+              << " block_size=" << block_it->size_ << " target_ptr=" << ptr
+              << " target_size=" << size
+              << " pool=" << static_cast<int>(pool_type_);
+      return false;
+    }
+    block_it->ipc_exported_ = true;
   }
-  block_it->ipc_exported_ = true;
   if (parts != nullptr) {
     *parts = std::move(collected);
   }

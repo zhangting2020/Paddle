@@ -171,7 +171,8 @@ void VmmTensorPartsVisitor::Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) {
   VLOG(4) << "[VMM-IPC/export] visitor checking VMM v2 best-fit allocator "
           << "target_ptr=" << target_ptr_ << " target_size=" << target_size_;
   std::vector<BlockPart> parts;
-  if (allocator->CollectTensorParts(target_ptr_, target_size_, &parts)) {
+  if (allocator->CollectTensorParts(
+          target_ptr_, target_size_, &parts, mark_ipc_exported_)) {
     found_ = true;
     parts_ = std::move(parts);
     VLOG(4) << "[VMM-IPC/export] visitor matched VMM v2 best-fit allocator "

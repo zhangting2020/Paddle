@@ -84,7 +84,8 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
 
   bool CollectTensorParts(void* ptr,
                           size_t size,
-                          std::vector<BlockPart>* parts);
+                          std::vector<BlockPart>* parts,
+                          bool mark_ipc_exported = true);
 
   bool SetBlockRemapEvent(void* ptr,
                           gpuStream_t stream,
