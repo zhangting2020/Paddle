@@ -139,6 +139,7 @@ limitations under the License. */
 #include "paddle/phi/common/data_type.h"
 #include "paddle/phi/common/place.h"
 #include "paddle/phi/core/compat/convert_utils.h"
+#include "paddle/phi/core/dense_tensor.h"
 #include "paddle/phi/core/lod_utils.h"
 #include "paddle/phi/core/memory/allocation/allocator_facade.h"
 #include "paddle/phi/core/memory/allocation/mmap_allocator.h"
@@ -3805,25 +3806,34 @@ All parameter, weight, gradient are variables in Paddle.
       info["reason"] = "not_dense_tensor";
       return info;
     }
-    const auto &place = tensor.place();
+    auto dense_tensor =
+        std::dynamic_pointer_cast<phi::DenseTensor>(tensor.impl());
+    if (!dense_tensor) {
+      info["reason"] = "not_dense_tensor";
+      return info;
+    }
+    const auto &place = dense_tensor->place();
     if (!phi::is_gpu_place(place)) {
       info["reason"] = "not_gpu_tensor";
       return info;
     }
-    const int64_t numel = tensor.numel();
+    const int64_t numel = dense_tensor->numel();
     if (numel <= 0) {
       info["reason"] = "empty_tensor";
       return info;
     }
 
-    const void *data_ptr = tensor.data();
-    if (data_ptr == nullptr) {
+    const auto &holder = dense_tensor->Holder();
+    if (!holder || holder->ptr() == nullptr) {
       info["reason"] = "null_data";
       return info;
     }
 
     const size_t bytes =
-        static_cast<size_t>(numel) * phi::SizeOf(tensor.dtype());
+        static_cast<size_t>(numel) * phi::SizeOf(dense_tensor->dtype());
+    const uintptr_t data_addr = reinterpret_cast<uintptr_t>(holder->ptr()) +
+                                dense_tensor->meta().offset;
+    const void *data_ptr = reinterpret_cast<const void *>(data_addr);
     auto *mutable_ptr = const_cast<void *>(data_ptr);
     paddle::memory::VmmTensorPartsVisitor parts_visitor(mutable_ptr, bytes);
     paddle::memory::allocation::AllocatorFacade::Instance().Accept(
