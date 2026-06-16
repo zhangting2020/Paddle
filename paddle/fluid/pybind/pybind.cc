@@ -140,8 +140,10 @@ limitations under the License. */
 #include "paddle/phi/common/place.h"
 #include "paddle/phi/core/compat/convert_utils.h"
 #include "paddle/phi/core/lod_utils.h"
+#include "paddle/phi/core/memory/allocation/allocator_facade.h"
 #include "paddle/phi/core/memory/allocation/mmap_allocator.h"
 #include "paddle/phi/core/memory/mem_utils.h"
+#include "paddle/phi/core/memory/mem_visitor.h"
 #include "paddle/phi/core/platform/cpu_helper.h"
 #include "paddle/phi/core/platform/device/device_wrapper.h"
 #include "paddle/phi/core/platform/device_context.h"
@@ -3789,6 +3791,111 @@ All parameter, weight, gradient are variables in Paddle.
   });
   m.def("vmm_all_block_info", [](int device_id) {
     return paddle::memory::AllBlockInfoOfVmmAllocator(GPUPlace(device_id));
+  });
+  m.def("vmm_tensor_info", [](const paddle::Tensor &tensor) {
+    py::dict info;
+    info["found"] = false;
+    info["reason"] = "";
+
+    if (!tensor.initialized()) {
+      info["reason"] = "uninitialized_tensor";
+      return info;
+    }
+    if (!tensor.is_dense_tensor()) {
+      info["reason"] = "not_dense_tensor";
+      return info;
+    }
+    const auto &place = tensor.place();
+    if (!phi::is_gpu_place(place)) {
+      info["reason"] = "not_gpu_tensor";
+      return info;
+    }
+    const int64_t numel = tensor.numel();
+    if (numel <= 0) {
+      info["reason"] = "empty_tensor";
+      return info;
+    }
+
+    const void *data_ptr = tensor.data();
+    if (data_ptr == nullptr) {
+      info["reason"] = "null_data";
+      return info;
+    }
+
+    const size_t bytes =
+        static_cast<size_t>(numel) * phi::SizeOf(tensor.dtype());
+    auto *mutable_ptr = const_cast<void *>(data_ptr);
+    paddle::memory::VmmTensorPartsVisitor parts_visitor(mutable_ptr, bytes);
+    paddle::memory::allocation::AllocatorFacade::Instance().Accept(
+        GPUPlace(place.GetDeviceId()), &parts_visitor);
+
+    info["ptr"] = reinterpret_cast<uintptr_t>(data_ptr);
+    info["bytes"] = bytes;
+    info["device_id"] = place.GetDeviceId();
+
+    if (!parts_visitor.Found()) {
+      info["reason"] = "not_vmm_allocation";
+      return info;
+    }
+
+    const auto &parts = parts_visitor.Parts();
+    info["found"] = true;
+    info["reason"] = "ok";
+    info["part_count"] = parts.size();
+
+    std::unordered_set<uintptr_t> handle_bases;
+    std::unordered_set<size_t> handle_sizes;
+    uintptr_t first_handle_base = 0;
+    uintptr_t last_handle_base = 0;
+    uintptr_t first_slice_base = 0;
+    uintptr_t last_slice_end = 0;
+    size_t mapped_range_count = 0;
+    uintptr_t prev_slice_end = 0;
+    py::list part_list;
+
+    for (size_t i = 0; i < parts.size(); ++i) {
+      const auto &part = parts[i];
+      if (!part.chunk) {
+        continue;
+      }
+      const uintptr_t handle_base = static_cast<uintptr_t>(part.chunk->base);
+      const size_t handle_size = part.chunk->size;
+      const uintptr_t slice_base = handle_base + part.chunk_rel_off;
+      const uintptr_t slice_end = slice_base + part.len;
+
+      if (i == 0) {
+        first_handle_base = handle_base;
+        first_slice_base = slice_base;
+      }
+      last_handle_base = handle_base;
+      last_slice_end = slice_end;
+      handle_bases.insert(handle_base);
+      handle_sizes.insert(handle_size);
+      if (i == 0 || slice_base != prev_slice_end) {
+        ++mapped_range_count;
+      }
+      prev_slice_end = slice_end;
+
+      py::dict part_info;
+      part_info["handle_base"] = handle_base;
+      part_info["handle_size"] = handle_size;
+      part_info["handle_rel_off"] = part.chunk_rel_off;
+      part_info["slice_base"] = slice_base;
+      part_info["slice_bytes"] = part.len;
+      part_info["device_id"] = part.chunk->device;
+      part_list.append(part_info);
+    }
+
+    info["handle_count"] = handle_bases.size();
+    info["handle_size"] = handle_sizes.size() == 1 ? *handle_sizes.begin() : 0;
+    info["handle_size_count"] = handle_sizes.size();
+    info["first_handle_base"] = first_handle_base;
+    info["last_handle_base"] = last_handle_base;
+    info["first_slice_base"] = first_slice_base;
+    info["last_slice_end"] = last_slice_end;
+    info["mapped_range_count"] = mapped_range_count;
+    info["parts"] = part_list;
+    return info;
   });
   m.def("_vmm_v2_step_stats_snapshot_and_reset", [](int device_id) {
     return paddle::memory::allocation::SnapshotAndResetVMMV2StepStats(
