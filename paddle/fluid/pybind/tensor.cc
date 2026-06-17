@@ -172,6 +172,7 @@ limitations under the License. */
 
 PD_DECLARE_bool(use_virtual_memory_auto_growth);
 PHI_DECLARE_bool(use_vmm_auto_growth_best_fit_allocator_v2);
+PHI_DECLARE_bool(vmm_v2_fake_share_cuda_ipc_meta);
 
 COMMON_DECLARE_bool(use_mkldnn);
 COMMON_DECLARE_bool(use_onednn);
@@ -215,6 +216,27 @@ void ShareTensorViaVmm(const DenseTensor &self, py::tuple *out) {
           << " holder_base=" << holder->base_ptr()
           << " holder_size=" << holder->size()
           << " place=" << holder->place().DebugString();
+  if (FLAGS_vmm_v2_fake_share_cuda_ipc_meta) {
+    using paddle::memory::allocation::VmmIpcHeader;
+    VmmIpcHeader header{};
+    header.version = 1;
+    header.flags = 0x8001;
+    header.pid = static_cast<uint32_t>(::getpid());
+    header.num_entries = 0;
+    header.alloc_size = static_cast<uint64_t>(data_size);
+    header.offset = 0;
+    header.reserved_size = 0;
+
+    std::string blob(sizeof(VmmIpcHeader), '\0');
+    std::memcpy(blob.data(), &header, sizeof(VmmIpcHeader));
+    int dtype_idx = static_cast<int>(self.type());
+    *out = py::make_tuple(py::bytes(blob),
+                          dtype_idx,
+                          common::vectorize(self.dims()),
+                          self.lod(),
+                          paddle::platform::GetCurrentDeviceId());
+    return;
+  }
   paddle::memory::VmmTensorPartsVisitor parts_visitor(data_ptr, data_size);
   paddle::memory::allocation::AllocatorFacade::Instance().Accept(
       holder->place(), &parts_visitor);
@@ -334,6 +356,13 @@ DenseTensor RebuildTensorFromVmmMeta(const py::tuple &meta) {
           sizeof(VmmIpcHeader)));
   const VmmIpcHeader *header =
       reinterpret_cast<const VmmIpcHeader *>(blob.data());
+  PADDLE_ENFORCE_GT(
+      header->num_entries,
+      0,
+      common::errors::Unavailable(
+          "Cannot rebuild tensor from fake VMM IPC metadata. "
+          "FLAGS_vmm_v2_fake_share_cuda_ipc_meta is only for diagnostics when "
+          "the metadata is not consumed by _new_shared_cuda."));
   VLOG(10) << "[VMM-IPC] header: ver=" << static_cast<int>(header->version)
            << " pid=" << header->pid << " num_entries=" << header->num_entries
            << " alloc_size=" << header->alloc_size

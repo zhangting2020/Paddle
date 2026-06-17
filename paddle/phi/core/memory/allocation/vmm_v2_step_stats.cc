@@ -55,6 +55,13 @@ PHI_DEFINE_EXPORTED_bool(
     "Disabled by default because it walks block parts on the allocation hot "
     "path.");
 
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_fake_share_cuda_ipc_meta,
+    false,
+    "Make DenseTensor._share_cuda return fake VMM IPC metadata without "
+    "collecting/exporting VMM chunks. This is for diagnostics only and is only "
+    "valid when the returned metadata is not consumed by _new_shared_cuda.");
+
 namespace paddle::memory::allocation {
 
 namespace {
