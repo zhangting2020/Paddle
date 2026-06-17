@@ -27,6 +27,34 @@ PHI_DEFINE_EXPORTED_bool(
     "Use core._vmm_v2_step_stats_snapshot_and_reset(device_id) to fetch and "
     "reset counters.");
 
+PHI_DEFINE_EXPORTED_bool(
+    vmm_tensor_info_fake,
+    false,
+    "Return a cheap fake result from core.vmm_tensor_info without walking VMM "
+    "backing parts. This is for VMM performance diagnosis only.");
+
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_disable_ipc_export_mark,
+    false,
+    "Skip marking VMM V2 backing pages as IPC-exported in CollectTensorParts. "
+    "This is for performance diagnosis only and may be unsafe for real IPC "
+    "users.");
+
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_fake_collect_tensor_parts,
+    false,
+    "Make VMM V2 CollectTensorParts return a fake successful result after "
+    "active-block lookup, without collecting backing parts or marking IPC "
+    "exported. This is for performance diagnosis only and may be unsafe for "
+    "real IPC users.");
+
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_record_mapped_free_parts,
+    false,
+    "Record mapped-free block part counts in VMM V2 allocation step stats. "
+    "Disabled by default because it walks block parts on the allocation hot "
+    "path.");
+
 namespace paddle::memory::allocation {
 
 namespace {

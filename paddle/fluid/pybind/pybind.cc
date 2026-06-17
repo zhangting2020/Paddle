@@ -257,12 +257,7 @@ COMMON_DECLARE_bool(use_mkldnn);
 COMMON_DECLARE_bool(use_onednn);
 COMMON_DECLARE_int64(offload_retry_times);
 COMMON_DECLARE_string(prim_backward_blacklist);
-
-PD_DEFINE_bool(vmm_tensor_info_fake,
-               false,
-               "Return a cheap fake result from core.vmm_tensor_info without "
-               "walking VMM backing parts. This is for VMM performance "
-               "diagnosis only.");
+PHI_DECLARE_bool(vmm_tensor_info_fake);
 
 // disable auto conversion to list in Python
 PYBIND11_MAKE_OPAQUE(phi::TensorArray);

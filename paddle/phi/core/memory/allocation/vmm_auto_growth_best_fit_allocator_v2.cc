@@ -27,25 +27,9 @@
 #include "paddle/phi/core/memory/allocation/vmm_v2_step_stats.h"
 
 COMMON_DECLARE_bool(vmm_v2_compact_all);
-
-PD_DEFINE_bool(vmm_v2_disable_ipc_export_mark,
-               false,
-               "Skip marking VMM V2 backing pages as IPC-exported in "
-               "CollectTensorParts. This is for performance diagnosis only "
-               "and may be unsafe for real IPC users.");
-
-PD_DEFINE_bool(vmm_v2_fake_collect_tensor_parts,
-               false,
-               "Make VMM V2 CollectTensorParts return a fake successful "
-               "result after active-block lookup, without collecting backing "
-               "parts or marking IPC exported. This is for performance "
-               "diagnosis only and may be unsafe for real IPC users.");
-
-PD_DEFINE_bool(vmm_v2_record_mapped_free_parts,
-               false,
-               "Record mapped-free block part counts in VMM V2 allocation "
-               "step stats. Disabled by default because it walks block parts "
-               "on the allocation hot path.");
+PHI_DECLARE_bool(vmm_v2_disable_ipc_export_mark);
+PHI_DECLARE_bool(vmm_v2_fake_collect_tensor_parts);
+PHI_DECLARE_bool(vmm_v2_record_mapped_free_parts);
 
 namespace paddle {
 namespace memory {
