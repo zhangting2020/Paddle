@@ -46,6 +46,13 @@ struct StepStats {
   uint64_t grow_total_us{0};
   uint64_t mapped_free_count{0};
   uint64_t mapped_free_total_us{0};
+  uint64_t mapped_free_split_count{0};
+  uint64_t mapped_free_source_parts_total{0};
+  uint64_t mapped_free_source_parts_max{0};
+  uint64_t mapped_free_alloc_parts_total{0};
+  uint64_t mapped_free_alloc_parts_max{0};
+  uint64_t mapped_free_remainder_parts_total{0};
+  uint64_t mapped_free_remainder_parts_max{0};
   uint64_t unmapped_free_count{0};
   uint64_t unmapped_free_total_us{0};
   uint64_t small_pool_alloc_count{0};
@@ -89,7 +96,10 @@ void RecordVMMV2Alloc(int device_id,
                       uint64_t block_count,
                       uint64_t free_blocks,
                       uint64_t unmapped_free_blocks,
-                      uint64_t tail_offset) {
+                      uint64_t tail_offset,
+                      uint64_t mapped_free_source_parts,
+                      uint64_t mapped_free_alloc_parts,
+                      uint64_t mapped_free_remainder_parts) {
   if (!FLAGS_vmm_v2_step_stats || !IsValidDeviceId(device_id)) {
     return;
   }
@@ -110,6 +120,18 @@ void RecordVMMV2Alloc(int device_id,
   } else if (path_name == "mapped_free") {
     ++stats.mapped_free_count;
     stats.mapped_free_total_us += elapsed_us;
+    stats.mapped_free_source_parts_total += mapped_free_source_parts;
+    stats.mapped_free_source_parts_max =
+        std::max(stats.mapped_free_source_parts_max, mapped_free_source_parts);
+    stats.mapped_free_alloc_parts_total += mapped_free_alloc_parts;
+    stats.mapped_free_alloc_parts_max =
+        std::max(stats.mapped_free_alloc_parts_max, mapped_free_alloc_parts);
+    stats.mapped_free_remainder_parts_total += mapped_free_remainder_parts;
+    stats.mapped_free_remainder_parts_max = std::max(
+        stats.mapped_free_remainder_parts_max, mapped_free_remainder_parts);
+    if (mapped_free_remainder_parts > 0) {
+      ++stats.mapped_free_split_count;
+    }
   } else if (path_name == "unmapped_free") {
     ++stats.unmapped_free_count;
     stats.unmapped_free_total_us += elapsed_us;
@@ -190,6 +212,18 @@ std::unordered_map<std::string, uint64_t> SnapshotAndResetVMMV2StepStats(
   result["grow_total_us"] = snapshot.grow_total_us;
   result["mapped_free_count"] = snapshot.mapped_free_count;
   result["mapped_free_total_us"] = snapshot.mapped_free_total_us;
+  result["mapped_free_split_count"] = snapshot.mapped_free_split_count;
+  result["mapped_free_source_parts_total"] =
+      snapshot.mapped_free_source_parts_total;
+  result["mapped_free_source_parts_max"] =
+      snapshot.mapped_free_source_parts_max;
+  result["mapped_free_alloc_parts_total"] =
+      snapshot.mapped_free_alloc_parts_total;
+  result["mapped_free_alloc_parts_max"] = snapshot.mapped_free_alloc_parts_max;
+  result["mapped_free_remainder_parts_total"] =
+      snapshot.mapped_free_remainder_parts_total;
+  result["mapped_free_remainder_parts_max"] =
+      snapshot.mapped_free_remainder_parts_max;
   result["unmapped_free_count"] = snapshot.unmapped_free_count;
   result["unmapped_free_total_us"] = snapshot.unmapped_free_total_us;
   result["small_pool_alloc_count"] = snapshot.small_pool_alloc_count;

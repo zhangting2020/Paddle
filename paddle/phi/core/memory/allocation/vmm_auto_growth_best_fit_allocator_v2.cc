@@ -21,11 +21,25 @@
 #include <limits>
 
 #include "glog/logging.h"
+#include "paddle/common/flags.h"
 #include "paddle/phi/core/enforce.h"
 #include "paddle/phi/core/memory/allocation/free_block_remap_compactor.h"
 #include "paddle/phi/core/memory/allocation/vmm_v2_step_stats.h"
 
 COMMON_DECLARE_bool(vmm_v2_compact_all);
+
+PD_DEFINE_bool(vmm_v2_disable_ipc_export_mark,
+               false,
+               "Skip marking VMM V2 backing pages as IPC-exported in "
+               "CollectTensorParts. This is for performance diagnosis only "
+               "and may be unsafe for real IPC users.");
+
+PD_DEFINE_bool(vmm_v2_fake_collect_tensor_parts,
+               false,
+               "Make VMM V2 CollectTensorParts return a fake successful "
+               "result after active-block lookup, without collecting backing "
+               "parts or marking IPC exported. This is for performance "
+               "diagnosis only and may be unsafe for real IPC users.");
 
 namespace paddle {
 namespace memory {
@@ -186,6 +200,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   const auto op_start =
       (trace_perf || trace_step) ? Clock::now() : Clock::time_point{};
   const size_t requested_size = AlignedSize(size, alignment_);
+  MappedFreePartStats mapped_free_part_stats;
   auto record_alloc = [&](const char* path, phi::Allocation* allocation) {
     const uint64_t elapsed_us =
         (trace_perf || trace_step) ? ElapsedMicros(op_start, Clock::now()) : 0;
@@ -198,7 +213,10 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
                        all_blocks_.size(),
                        free_blocks_.size(),
                        unmapped_free_blocks_.size(),
-                       underlying_allocator_->TailOffset());
+                       underlying_allocator_->TailOffset(),
+                       mapped_free_part_stats.source_parts,
+                       mapped_free_part_stats.alloc_parts,
+                       mapped_free_part_stats.remainder_parts);
     }
     if (!trace_perf) {
       return;
@@ -216,7 +234,8 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
             << " unmapped_free_blocks=" << unmapped_free_blocks_.size()
             << " tail_offset=" << underlying_allocator_->TailOffset();
   };
-  if (auto* allocation = AllocFromFreeBlocks(requested_size)) {
+  if (auto* allocation =
+          AllocFromFreeBlocks(requested_size, &mapped_free_part_stats)) {
     record_alloc("mapped_free", allocation);
     return allocation;
   }
@@ -574,6 +593,18 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
     return false;
   }
 
+  if (FLAGS_vmm_v2_fake_collect_tensor_parts) {
+    if (parts != nullptr) {
+      parts->clear();
+    }
+    VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit fake CollectTensorParts "
+            << "for active block ptr=" << block_it->ptr_
+            << " block_size=" << block_it->size_ << " target_ptr=" << ptr
+            << " target_size=" << size
+            << " pool=" << static_cast<int>(pool_type_);
+    return true;
+  }
+
   const size_t block_offset = target_va - block_it->BeginVA();
   BlockV2 tensor_block = block_it->MakeMappedActiveSubBlock(block_offset, size);
   std::vector<BlockPart> collected;
@@ -586,7 +617,13 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
             << " part_count=" << tensor_block.AllocationPartCount();
     return false;
   }
-  if (mark_ipc_exported) {
+  if (mark_ipc_exported && FLAGS_vmm_v2_disable_ipc_export_mark) {
+    VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit skipped IPC exported mark "
+            << "by FLAGS_vmm_v2_disable_ipc_export_mark for active block ptr="
+            << block_it->ptr_ << " block_size=" << block_it->size_
+            << " target_ptr=" << ptr << " target_size=" << size
+            << " pool=" << static_cast<int>(pool_type_);
+  } else if (mark_ipc_exported) {
     if (!underlying_allocator_->MarkBlockIpcExported(tensor_block)) {
       VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit failed to mark IPC exported "
               << "for active block ptr=" << block_it->ptr_
@@ -634,7 +671,7 @@ BlockList VMMAutoGrowthBestFitAllocatorV2::SnapshotAllBlocks() const {
 }
 
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
-    size_t size) {
+    size_t size, MappedFreePartStats* part_stats) {
   auto it = free_blocks_.lower_bound({size, nullptr});
   while (it != free_blocks_.end() && !CanIndexFreeBlock(*it->second)) {
     it = free_blocks_.erase(it);
@@ -644,12 +681,15 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   }
 
   auto block_it = it->second;
+  const size_t source_parts = block_it->AllocationPartCount();
   EraseFreeBlock(block_it);
 
+  size_t remainder_parts = 0;
   if (block_it->size_ > size) {
     const size_t remaining_size = block_it->size_ - size;
     BlockV2 remaining_block =
         block_it->MakeMappedFreeSubBlock(size, remaining_size);
+    remainder_parts = remaining_block.AllocationPartCount();
     // The free remainder keeps the source block's remap-safety stream. The
     // reused prefix is cleared by MarkActive().
 
@@ -660,6 +700,11 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   }
 
   block_it->MarkActive();
+  if (part_stats != nullptr) {
+    part_stats->source_parts = source_parts;
+    part_stats->alloc_parts = block_it->AllocationPartCount();
+    part_stats->remainder_parts = remainder_parts;
+  }
   return new VMMAutoGrowthBestFitBlockAllocationV2(block_it, place_, this);
 }
 

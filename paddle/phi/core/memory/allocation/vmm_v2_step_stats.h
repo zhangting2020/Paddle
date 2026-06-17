@@ -32,7 +32,10 @@ void RecordVMMV2Alloc(int device_id,
                       uint64_t block_count,
                       uint64_t free_blocks,
                       uint64_t unmapped_free_blocks,
-                      uint64_t tail_offset);
+                      uint64_t tail_offset,
+                      uint64_t mapped_free_source_parts = 0,
+                      uint64_t mapped_free_alloc_parts = 0,
+                      uint64_t mapped_free_remainder_parts = 0);
 
 void RecordVMMV2Free(int device_id,
                      PoolType pool_type,

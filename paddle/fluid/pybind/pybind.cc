@@ -258,6 +258,12 @@ COMMON_DECLARE_bool(use_onednn);
 COMMON_DECLARE_int64(offload_retry_times);
 COMMON_DECLARE_string(prim_backward_blacklist);
 
+PD_DEFINE_bool(vmm_tensor_info_fake,
+               false,
+               "Return a cheap fake result from core.vmm_tensor_info without "
+               "walking VMM backing parts. This is for VMM performance "
+               "diagnosis only.");
+
 // disable auto conversion to list in Python
 PYBIND11_MAKE_OPAQUE(phi::TensorArray);
 PYBIND11_MAKE_OPAQUE(paddle::framework::FetchUnmergedList);
@@ -3834,15 +3840,31 @@ All parameter, weight, gradient are variables in Paddle.
     const uintptr_t data_addr = reinterpret_cast<uintptr_t>(holder->ptr()) +
                                 dense_tensor->meta().offset;
     const void *data_ptr = reinterpret_cast<const void *>(data_addr);
+    info["ptr"] = reinterpret_cast<uintptr_t>(data_ptr);
+    info["bytes"] = bytes;
+    info["device_id"] = place.GetDeviceId();
+
+    if (FLAGS_vmm_tensor_info_fake) {
+      info["found"] = true;
+      info["reason"] = "fake";
+      info["part_count"] = 0;
+      info["handle_count"] = 0;
+      info["handle_size"] = 0;
+      info["handle_size_count"] = 0;
+      info["first_handle_base"] = 0;
+      info["last_handle_base"] = 0;
+      info["first_slice_base"] = reinterpret_cast<uintptr_t>(data_ptr);
+      info["last_slice_end"] = reinterpret_cast<uintptr_t>(data_ptr) + bytes;
+      info["mapped_range_count"] = 0;
+      info["parts"] = py::list();
+      return info;
+    }
+
     auto *mutable_ptr = const_cast<void *>(data_ptr);
     paddle::memory::VmmTensorPartsVisitor parts_visitor(
         mutable_ptr, bytes, false);
     paddle::memory::allocation::AllocatorFacade::Instance().Accept(
         GPUPlace(place.GetDeviceId()), &parts_visitor);
-
-    info["ptr"] = reinterpret_cast<uintptr_t>(data_ptr);
-    info["bytes"] = bytes;
-    info["device_id"] = place.GetDeviceId();
 
     if (!parts_visitor.Found()) {
       info["reason"] = "not_vmm_allocation";

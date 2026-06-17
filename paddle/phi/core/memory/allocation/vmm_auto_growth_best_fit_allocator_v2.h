@@ -130,7 +130,13 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
     Index allocations_by_ptr_;
   };
 
-  phi::Allocation* AllocFromFreeBlocks(size_t size);
+  struct MappedFreePartStats {
+    size_t source_parts{0};
+    size_t alloc_parts{0};
+    size_t remainder_parts{0};
+  };
+  phi::Allocation* AllocFromFreeBlocks(size_t size,
+                                       MappedFreePartStats* part_stats);
   phi::Allocation* AllocFromUnmappedFreeBlocks(size_t size);
   BlockV2 AdoptBackingBlock(
       CUDAVirtualMemAllocatorV2::AllocationWithBlock* allocation_with_block);
