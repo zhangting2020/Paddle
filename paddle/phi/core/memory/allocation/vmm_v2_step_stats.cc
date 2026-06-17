@@ -62,6 +62,13 @@ PHI_DEFINE_EXPORTED_bool(
     "collecting/exporting VMM chunks. This is for diagnostics only and is only "
     "valid when the returned metadata is not consumed by _new_shared_cuda.");
 
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_fake_block_parts,
+    false,
+    "Skip maintaining BlockV2 backing parts in VMM V2 alloc/free split and "
+    "merge paths. This is for diagnostics only and is invalid with remap, IPC "
+    "export/import, or real tensor-info part inspection.");
+
 namespace paddle::memory::allocation {
 
 namespace {
