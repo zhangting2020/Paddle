@@ -41,6 +41,12 @@ PD_DEFINE_bool(vmm_v2_fake_collect_tensor_parts,
                "parts or marking IPC exported. This is for performance "
                "diagnosis only and may be unsafe for real IPC users.");
 
+PD_DEFINE_bool(vmm_v2_record_mapped_free_parts,
+               false,
+               "Record mapped-free block part counts in VMM V2 allocation "
+               "step stats. Disabled by default because it walks block parts "
+               "on the allocation hot path.");
+
 namespace paddle {
 namespace memory {
 namespace allocation {
@@ -201,6 +207,8 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
       (trace_perf || trace_step) ? Clock::now() : Clock::time_point{};
   const size_t requested_size = AlignedSize(size, alignment_);
   MappedFreePartStats mapped_free_part_stats;
+  MappedFreePartStats* mapped_free_part_stats_ptr =
+      FLAGS_vmm_v2_record_mapped_free_parts ? &mapped_free_part_stats : nullptr;
   auto record_alloc = [&](const char* path, phi::Allocation* allocation) {
     const uint64_t elapsed_us =
         (trace_perf || trace_step) ? ElapsedMicros(op_start, Clock::now()) : 0;
@@ -235,7 +243,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
             << " tail_offset=" << underlying_allocator_->TailOffset();
   };
   if (auto* allocation =
-          AllocFromFreeBlocks(requested_size, &mapped_free_part_stats)) {
+          AllocFromFreeBlocks(requested_size, mapped_free_part_stats_ptr)) {
     record_alloc("mapped_free", allocation);
     return allocation;
   }
@@ -681,7 +689,8 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   }
 
   auto block_it = it->second;
-  const size_t source_parts = block_it->AllocationPartCount();
+  const size_t source_parts =
+      part_stats == nullptr ? 0 : block_it->AllocationPartCount();
   EraseFreeBlock(block_it);
 
   size_t remainder_parts = 0;
@@ -689,7 +698,9 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
     const size_t remaining_size = block_it->size_ - size;
     BlockV2 remaining_block =
         block_it->MakeMappedFreeSubBlock(size, remaining_size);
-    remainder_parts = remaining_block.AllocationPartCount();
+    if (part_stats != nullptr) {
+      remainder_parts = remaining_block.AllocationPartCount();
+    }
     // The free remainder keeps the source block's remap-safety stream. The
     // reused prefix is cleared by MarkActive().
 
