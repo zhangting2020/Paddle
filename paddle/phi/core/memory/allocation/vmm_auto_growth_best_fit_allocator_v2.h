@@ -24,6 +24,7 @@
 #include "paddle/phi/core/memory/allocation/spin_lock.h"
 #include "paddle/phi/core/memory/allocation/vmm_allocator_v2_types.h"
 #include "paddle/phi/core/memory/allocation/vmm_ipc_allocation.h"
+#include "paddle/phi/core/memory/allocation/vmm_v2_step_stats.h"
 #include "paddle/phi/core/memory/mem_visitor.h"
 
 #if defined(PADDLE_WITH_CUDA)
@@ -135,8 +136,10 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
     size_t alloc_parts{0};
     size_t remainder_parts{0};
   };
-  phi::Allocation* AllocFromFreeBlocks(size_t size,
-                                       MappedFreePartStats* part_stats);
+  phi::Allocation* AllocFromFreeBlocks(
+      size_t size,
+      MappedFreePartStats* part_stats,
+      VMMV2MappedFreeDetailStats* detail_stats);
   phi::Allocation* AllocFromUnmappedFreeBlocks(size_t size);
   BlockV2 AdoptBackingBlock(
       CUDAVirtualMemAllocatorV2::AllocationWithBlock* allocation_with_block);
@@ -158,7 +161,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   void InsertUnmappedFreeBlock(BlockListIt it);
   void EraseUnmappedFreeBlock(BlockListIt it);
   void RebuildFreeBlockIndex();
-  void TryMerge(BlockListIt it);
+  void TryMerge(BlockListIt it, VMMV2FreeDetailStats* detail = nullptr);
   void TryMergeUnmappedFree(BlockListIt it);
   uint64_t FreeIdleChunks();
   size_t ComputeTailOffset() const;

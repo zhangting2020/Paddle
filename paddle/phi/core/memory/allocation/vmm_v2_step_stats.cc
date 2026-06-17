@@ -28,6 +28,13 @@ PHI_DEFINE_EXPORTED_bool(
     "reset counters.");
 
 PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_detail_stats,
+    false,
+    "Collect detailed VMM V2 mapped-free/free sub-stage timings. This adds "
+    "extra timers on allocator hot paths and is for short diagnostic runs "
+    "only.");
+
+PHI_DEFINE_EXPORTED_bool(
     vmm_tensor_info_fake,
     false,
     "Return a cheap fake result from core.vmm_tensor_info without walking VMM "
@@ -95,12 +102,30 @@ struct StepStats {
   uint64_t mapped_free_alloc_parts_max{0};
   uint64_t mapped_free_remainder_parts_total{0};
   uint64_t mapped_free_remainder_parts_max{0};
+  uint64_t mapped_free_lower_bound_us{0};
+  uint64_t mapped_free_stale_erase_count{0};
+  uint64_t mapped_free_stale_erase_us{0};
+  uint64_t mapped_free_erase_free_us{0};
+  uint64_t mapped_free_detail_split_count{0};
+  uint64_t mapped_free_split_us{0};
+  uint64_t mapped_free_insert_block_us{0};
+  uint64_t mapped_free_insert_free_us{0};
+  uint64_t mapped_free_mark_active_us{0};
+  uint64_t mapped_free_wrapper_new_us{0};
   uint64_t unmapped_free_count{0};
   uint64_t unmapped_free_total_us{0};
   uint64_t small_pool_alloc_count{0};
   uint64_t large_pool_alloc_count{0};
   uint64_t small_pool_free_count{0};
   uint64_t large_pool_free_count{0};
+  uint64_t free_mark_free_us{0};
+  uint64_t free_try_merge_us{0};
+  uint64_t free_merge_prev_count{0};
+  uint64_t free_merge_next_count{0};
+  uint64_t free_detail_erase_free_us{0};
+  uint64_t free_detail_absorb_us{0};
+  uint64_t free_detail_erase_block_us{0};
+  uint64_t free_detail_insert_free_us{0};
   uint64_t stream_process_count{0};
   uint64_t stream_process_total_us{0};
   uint64_t stream_process_max_us{0};
@@ -129,6 +154,10 @@ void AddTiming(uint64_t elapsed_us, uint64_t* total_us, uint64_t* max_us) {
 }  // namespace
 
 bool VMMV2StepStatsEnabled() { return FLAGS_vmm_v2_step_stats; }
+
+bool VMMV2DetailStatsEnabled() {
+  return FLAGS_vmm_v2_step_stats && FLAGS_vmm_v2_detail_stats;
+}
 
 void RecordVMMV2Alloc(int device_id,
                       PoolType pool_type,
@@ -209,6 +238,41 @@ void RecordVMMV2Free(int device_id,
   stats.last_unmapped_free_blocks = unmapped_free_blocks;
 }
 
+void RecordVMMV2MappedFreeDetail(int device_id,
+                                 const VMMV2MappedFreeDetailStats& detail) {
+  if (!VMMV2DetailStatsEnabled() || !IsValidDeviceId(device_id)) {
+    return;
+  }
+  std::lock_guard<SpinLock> guard(g_step_stats_locks[device_id]);
+  StepStats& stats = g_step_stats[device_id];
+  stats.mapped_free_lower_bound_us += detail.lower_bound_us;
+  stats.mapped_free_stale_erase_count += detail.stale_erase_count;
+  stats.mapped_free_stale_erase_us += detail.stale_erase_us;
+  stats.mapped_free_erase_free_us += detail.erase_free_us;
+  stats.mapped_free_detail_split_count += detail.split_count;
+  stats.mapped_free_split_us += detail.split_us;
+  stats.mapped_free_insert_block_us += detail.insert_block_us;
+  stats.mapped_free_insert_free_us += detail.insert_free_us;
+  stats.mapped_free_mark_active_us += detail.mark_active_us;
+  stats.mapped_free_wrapper_new_us += detail.wrapper_new_us;
+}
+
+void RecordVMMV2FreeDetail(int device_id, const VMMV2FreeDetailStats& detail) {
+  if (!VMMV2DetailStatsEnabled() || !IsValidDeviceId(device_id)) {
+    return;
+  }
+  std::lock_guard<SpinLock> guard(g_step_stats_locks[device_id]);
+  StepStats& stats = g_step_stats[device_id];
+  stats.free_mark_free_us += detail.mark_free_us;
+  stats.free_try_merge_us += detail.try_merge_us;
+  stats.free_merge_prev_count += detail.merge_prev_count;
+  stats.free_merge_next_count += detail.merge_next_count;
+  stats.free_detail_erase_free_us += detail.erase_free_us;
+  stats.free_detail_absorb_us += detail.absorb_us;
+  stats.free_detail_erase_block_us += detail.erase_block_us;
+  stats.free_detail_insert_free_us += detail.insert_free_us;
+}
+
 void RecordStreamSafeProcess(int device_id,
                              uint64_t scanned,
                              uint64_t released,
@@ -266,12 +330,32 @@ std::unordered_map<std::string, uint64_t> SnapshotAndResetVMMV2StepStats(
       snapshot.mapped_free_remainder_parts_total;
   result["mapped_free_remainder_parts_max"] =
       snapshot.mapped_free_remainder_parts_max;
+  result["mapped_free_lower_bound_us"] = snapshot.mapped_free_lower_bound_us;
+  result["mapped_free_stale_erase_count"] =
+      snapshot.mapped_free_stale_erase_count;
+  result["mapped_free_stale_erase_us"] = snapshot.mapped_free_stale_erase_us;
+  result["mapped_free_erase_free_us"] = snapshot.mapped_free_erase_free_us;
+  result["mapped_free_detail_split_count"] =
+      snapshot.mapped_free_detail_split_count;
+  result["mapped_free_split_us"] = snapshot.mapped_free_split_us;
+  result["mapped_free_insert_block_us"] = snapshot.mapped_free_insert_block_us;
+  result["mapped_free_insert_free_us"] = snapshot.mapped_free_insert_free_us;
+  result["mapped_free_mark_active_us"] = snapshot.mapped_free_mark_active_us;
+  result["mapped_free_wrapper_new_us"] = snapshot.mapped_free_wrapper_new_us;
   result["unmapped_free_count"] = snapshot.unmapped_free_count;
   result["unmapped_free_total_us"] = snapshot.unmapped_free_total_us;
   result["small_pool_alloc_count"] = snapshot.small_pool_alloc_count;
   result["large_pool_alloc_count"] = snapshot.large_pool_alloc_count;
   result["small_pool_free_count"] = snapshot.small_pool_free_count;
   result["large_pool_free_count"] = snapshot.large_pool_free_count;
+  result["free_mark_free_us"] = snapshot.free_mark_free_us;
+  result["free_try_merge_us"] = snapshot.free_try_merge_us;
+  result["free_merge_prev_count"] = snapshot.free_merge_prev_count;
+  result["free_merge_next_count"] = snapshot.free_merge_next_count;
+  result["free_detail_erase_free_us"] = snapshot.free_detail_erase_free_us;
+  result["free_detail_absorb_us"] = snapshot.free_detail_absorb_us;
+  result["free_detail_erase_block_us"] = snapshot.free_detail_erase_block_us;
+  result["free_detail_insert_free_us"] = snapshot.free_detail_insert_free_us;
   result["stream_process_count"] = snapshot.stream_process_count;
   result["stream_process_total_us"] = snapshot.stream_process_total_us;
   result["stream_process_max_us"] = snapshot.stream_process_max_us;

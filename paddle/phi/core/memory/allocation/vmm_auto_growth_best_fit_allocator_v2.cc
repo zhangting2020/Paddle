@@ -203,6 +203,9 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   MappedFreePartStats mapped_free_part_stats;
   MappedFreePartStats* mapped_free_part_stats_ptr =
       FLAGS_vmm_v2_record_mapped_free_parts ? &mapped_free_part_stats : nullptr;
+  VMMV2MappedFreeDetailStats mapped_free_detail_stats;
+  VMMV2MappedFreeDetailStats* mapped_free_detail_stats_ptr =
+      VMMV2DetailStatsEnabled() ? &mapped_free_detail_stats : nullptr;
   auto record_alloc = [&](const char* path, phi::Allocation* allocation) {
     const uint64_t elapsed_us =
         (trace_perf || trace_step) ? ElapsedMicros(op_start, Clock::now()) : 0;
@@ -236,8 +239,12 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
             << " unmapped_free_blocks=" << unmapped_free_blocks_.size()
             << " tail_offset=" << underlying_allocator_->TailOffset();
   };
-  if (auto* allocation =
-          AllocFromFreeBlocks(requested_size, mapped_free_part_stats_ptr)) {
+  if (auto* allocation = AllocFromFreeBlocks(requested_size,
+                                             mapped_free_part_stats_ptr,
+                                             mapped_free_detail_stats_ptr)) {
+    if (mapped_free_detail_stats_ptr != nullptr) {
+      RecordVMMV2MappedFreeDetail(place_.device, mapped_free_detail_stats);
+    }
     record_alloc("mapped_free", allocation);
     return allocation;
   }
@@ -536,8 +543,28 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   } else {
     it->SetRemapSafety(wrapped_allocation->remap_stream(), nullptr);
   }
+  VMMV2FreeDetailStats free_detail_stats;
+  VMMV2FreeDetailStats* free_detail_stats_ptr =
+      VMMV2DetailStatsEnabled() ? &free_detail_stats : nullptr;
+  auto detail_tick = [&]() {
+    return free_detail_stats_ptr != nullptr ? Clock::now()
+                                            : Clock::time_point{};
+  };
+  auto detail_elapsed = [&](Clock::time_point start) -> uint64_t {
+    return free_detail_stats_ptr != nullptr ? ElapsedMicros(start, Clock::now())
+                                            : 0;
+  };
+  auto mark_start = detail_tick();
   it->MarkFree();
-  TryMerge(it);
+  if (free_detail_stats_ptr != nullptr) {
+    free_detail_stats.mark_free_us += detail_elapsed(mark_start);
+  }
+  auto merge_start = detail_tick();
+  TryMerge(it, free_detail_stats_ptr);
+  if (free_detail_stats_ptr != nullptr) {
+    free_detail_stats.try_merge_us += detail_elapsed(merge_start);
+    RecordVMMV2FreeDetail(place_.device, free_detail_stats);
+  }
   if (trace_perf || trace_step) {
     const uint64_t elapsed_us = ElapsedMicros(op_start, Clock::now());
     if (trace_step) {
@@ -686,10 +713,27 @@ BlockList VMMAutoGrowthBestFitAllocatorV2::SnapshotAllBlocks() const {
 }
 
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
-    size_t size, MappedFreePartStats* part_stats) {
+    size_t size,
+    MappedFreePartStats* part_stats,
+    VMMV2MappedFreeDetailStats* detail_stats) {
+  auto detail_tick = [&]() {
+    return detail_stats != nullptr ? Clock::now() : Clock::time_point{};
+  };
+  auto detail_elapsed = [&](Clock::time_point start) -> uint64_t {
+    return detail_stats != nullptr ? ElapsedMicros(start, Clock::now()) : 0;
+  };
+  auto lower_bound_start = detail_tick();
   auto it = free_blocks_.lower_bound({size, nullptr});
+  if (detail_stats != nullptr) {
+    detail_stats->lower_bound_us += detail_elapsed(lower_bound_start);
+  }
   while (it != free_blocks_.end() && !CanIndexFreeBlock(*it->second)) {
+    auto stale_erase_start = detail_tick();
     it = free_blocks_.erase(it);
+    if (detail_stats != nullptr) {
+      ++detail_stats->stale_erase_count;
+      detail_stats->stale_erase_us += detail_elapsed(stale_erase_start);
+    }
   }
   if (it == free_blocks_.end()) {
     return nullptr;
@@ -701,11 +745,16 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   void* block_ptr = block_it->ptr_;
   const size_t block_size = block_it->size_;
   const PoolType block_pool_type = block_it->pool_type_;
+  auto erase_free_start = detail_tick();
   EraseFreeBlock(block_it);
+  if (detail_stats != nullptr) {
+    detail_stats->erase_free_us += detail_elapsed(erase_free_start);
+  }
 
   size_t remainder_parts = 0;
   const bool has_remainder = block_size > size;
   if (has_remainder) {
+    auto split_start = detail_tick();
     const size_t remaining_size = block_size - size;
     BlockV2 remaining_block =
         FLAGS_vmm_v2_fake_block_parts
@@ -726,11 +775,24 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
     } else {
       block_it->TrimToPrefix(size);
     }
+    if (detail_stats != nullptr) {
+      ++detail_stats->split_count;
+      detail_stats->split_us += detail_elapsed(split_start);
+    }
+    auto insert_block_start = detail_tick();
     auto remain_it =
         all_blocks_.insert(std::next(block_it), std::move(remaining_block));
+    if (detail_stats != nullptr) {
+      detail_stats->insert_block_us += detail_elapsed(insert_block_start);
+    }
+    auto insert_free_start = detail_tick();
     InsertFreeBlock(remain_it);
+    if (detail_stats != nullptr) {
+      detail_stats->insert_free_us += detail_elapsed(insert_free_start);
+    }
   }
 
+  auto mark_active_start = detail_tick();
   if (FLAGS_vmm_v2_fake_block_parts) {
     if (!has_remainder) {
       *block_it = MakeFakeMappedBlock(
@@ -739,12 +801,21 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   } else {
     block_it->MarkActive();
   }
+  if (detail_stats != nullptr) {
+    detail_stats->mark_active_us += detail_elapsed(mark_active_start);
+  }
   if (part_stats != nullptr) {
     part_stats->source_parts = source_parts;
     part_stats->alloc_parts = block_it->AllocationPartCount();
     part_stats->remainder_parts = remainder_parts;
   }
-  return new VMMAutoGrowthBestFitBlockAllocationV2(block_it, place_, this);
+  auto wrapper_new_start = detail_tick();
+  auto* allocation =
+      new VMMAutoGrowthBestFitBlockAllocationV2(block_it, place_, this);
+  if (detail_stats != nullptr) {
+    detail_stats->wrapper_new_us += detail_elapsed(wrapper_new_start);
+  }
+  return allocation;
 }
 
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
@@ -962,7 +1033,14 @@ void VMMAutoGrowthBestFitAllocatorV2::RebuildFreeBlockIndex() {
   }
 }
 
-void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it) {
+void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it,
+                                               VMMV2FreeDetailStats* detail) {
+  auto detail_tick = [&]() {
+    return detail != nullptr ? Clock::now() : Clock::time_point{};
+  };
+  auto detail_elapsed = [&](Clock::time_point start) -> uint64_t {
+    return detail != nullptr ? ElapsedMicros(start, Clock::now()) : 0;
+  };
   // Only adjacent FREE blocks are merged here. ACTIVE blocks are never touched,
   // and unmapped-free blocks remain as explicit holes for later remap/reuse.
   // all_blocks_ is the full VA-ordered block list, so adjacency is checked
@@ -970,32 +1048,66 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it) {
   if (it != all_blocks_.begin()) {
     auto prev = std::prev(it);
     if (prev->CanAbsorbAdjacentFreeBlock(*it)) {
+      if (detail != nullptr) {
+        ++detail->merge_prev_count;
+      }
+      auto erase_free_start = detail_tick();
       EraseFreeBlock(prev);
+      if (detail != nullptr) {
+        detail->erase_free_us += detail_elapsed(erase_free_start);
+      }
+      auto absorb_start = detail_tick();
       if (FLAGS_vmm_v2_fake_block_parts) {
         prev->size_ += it->size_;
         prev->ipc_exported_ = prev->ipc_exported_ || it->ipc_exported_;
       } else {
         prev->AbsorbAdjacentBlock(&*it);
       }
+      if (detail != nullptr) {
+        detail->absorb_us += detail_elapsed(absorb_start);
+      }
+      auto erase_block_start = detail_tick();
       all_blocks_.erase(it);
+      if (detail != nullptr) {
+        detail->erase_block_us += detail_elapsed(erase_block_start);
+      }
       it = prev;
     }
   }
 
   auto next = std::next(it);
   if (next != all_blocks_.end() && it->CanAbsorbAdjacentFreeBlock(*next)) {
+    if (detail != nullptr) {
+      ++detail->merge_next_count;
+    }
+    auto erase_free_start = detail_tick();
     EraseFreeBlock(next);
+    if (detail != nullptr) {
+      detail->erase_free_us += detail_elapsed(erase_free_start);
+    }
+    auto absorb_start = detail_tick();
     if (FLAGS_vmm_v2_fake_block_parts) {
       it->size_ += next->size_;
       it->ipc_exported_ = it->ipc_exported_ || next->ipc_exported_;
     } else {
       it->AbsorbAdjacentBlock(&*next);
     }
+    if (detail != nullptr) {
+      detail->absorb_us += detail_elapsed(absorb_start);
+    }
+    auto erase_block_start = detail_tick();
     all_blocks_.erase(next);
+    if (detail != nullptr) {
+      detail->erase_block_us += detail_elapsed(erase_block_start);
+    }
   }
 
   if (CanIndexFreeBlock(*it)) {
+    auto insert_free_start = detail_tick();
     InsertFreeBlock(it);
+    if (detail != nullptr) {
+      detail->insert_free_us += detail_elapsed(insert_free_start);
+    }
   }
 }
 

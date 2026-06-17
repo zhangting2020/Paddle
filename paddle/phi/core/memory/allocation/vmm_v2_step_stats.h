@@ -45,6 +45,37 @@ void RecordVMMV2Free(int device_id,
                      uint64_t free_blocks,
                      uint64_t unmapped_free_blocks);
 
+struct VMMV2MappedFreeDetailStats {
+  uint64_t lower_bound_us{0};
+  uint64_t stale_erase_count{0};
+  uint64_t stale_erase_us{0};
+  uint64_t erase_free_us{0};
+  uint64_t split_count{0};
+  uint64_t split_us{0};
+  uint64_t insert_block_us{0};
+  uint64_t insert_free_us{0};
+  uint64_t mark_active_us{0};
+  uint64_t wrapper_new_us{0};
+};
+
+struct VMMV2FreeDetailStats {
+  uint64_t mark_free_us{0};
+  uint64_t try_merge_us{0};
+  uint64_t merge_prev_count{0};
+  uint64_t merge_next_count{0};
+  uint64_t erase_free_us{0};
+  uint64_t absorb_us{0};
+  uint64_t erase_block_us{0};
+  uint64_t insert_free_us{0};
+};
+
+bool VMMV2DetailStatsEnabled();
+
+void RecordVMMV2MappedFreeDetail(int device_id,
+                                 const VMMV2MappedFreeDetailStats& detail);
+
+void RecordVMMV2FreeDetail(int device_id, const VMMV2FreeDetailStats& detail);
+
 void RecordStreamSafeProcess(int device_id,
                              uint64_t scanned,
                              uint64_t released,
