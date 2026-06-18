@@ -76,6 +76,20 @@ PHI_DEFINE_EXPORTED_bool(
     "merge paths. This is for diagnostics only and is invalid with remap, IPC "
     "export/import, or real tensor-info part inspection.");
 
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_round_alloc_to_handle_size,
+    false,
+    "Round VMM V2 best-fit allocation requests up to the pool handle size. "
+    "This is a diagnostic-only mode to reduce steady-state split/size-class "
+    "jitter; it wastes memory and is not intended for production.");
+
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_round_large_pool_alloc_to_handle_size,
+    false,
+    "Round only VMM V2 large-pool best-fit allocation requests up to the pool "
+    "handle size. This is a diagnostic-only mode to reduce steady-state "
+    "split/size-class jitter with less small-pool memory blow-up.");
+
 namespace paddle::memory::allocation {
 
 namespace {

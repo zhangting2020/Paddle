@@ -31,6 +31,8 @@ PHI_DECLARE_bool(vmm_v2_fake_block_parts);
 PHI_DECLARE_bool(vmm_v2_disable_ipc_export_mark);
 PHI_DECLARE_bool(vmm_v2_fake_collect_tensor_parts);
 PHI_DECLARE_bool(vmm_v2_record_mapped_free_parts);
+PHI_DECLARE_bool(vmm_v2_round_alloc_to_handle_size);
+PHI_DECLARE_bool(vmm_v2_round_large_pool_alloc_to_handle_size);
 
 namespace paddle {
 namespace memory {
@@ -199,7 +201,13 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   const bool trace_step = VMMV2StepStatsEnabled();
   const auto op_start =
       (trace_perf || trace_step) ? Clock::now() : Clock::time_point{};
-  const size_t requested_size = AlignedSize(size, alignment_);
+  size_t requested_size = AlignedSize(size, alignment_);
+  if (FLAGS_vmm_v2_round_alloc_to_handle_size ||
+      (FLAGS_vmm_v2_round_large_pool_alloc_to_handle_size &&
+       pool_type_ == PoolType::kLarge)) {
+    requested_size =
+        AlignedSize(requested_size, underlying_allocator_->HandleSize());
+  }
   MappedFreePartStats mapped_free_part_stats;
   MappedFreePartStats* mapped_free_part_stats_ptr =
       FLAGS_vmm_v2_record_mapped_free_parts ? &mapped_free_part_stats : nullptr;
