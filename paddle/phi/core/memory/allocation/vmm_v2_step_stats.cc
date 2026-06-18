@@ -108,10 +108,14 @@ struct StepStats {
   uint64_t alloc_count{0};
   uint64_t alloc_total_us{0};
   uint64_t alloc_max_us{0};
+  uint64_t alloc_lock_wait_total_us{0};
+  uint64_t alloc_lock_wait_max_us{0};
   uint64_t alloc_request_bytes{0};
   uint64_t free_count{0};
   uint64_t free_total_us{0};
   uint64_t free_max_us{0};
+  uint64_t free_lock_wait_total_us{0};
+  uint64_t free_lock_wait_max_us{0};
   uint64_t free_bytes{0};
   uint64_t grow_count{0};
   uint64_t grow_total_us{0};
@@ -186,6 +190,7 @@ void RecordVMMV2Alloc(int device_id,
                       const char* path,
                       uint64_t request_size,
                       uint64_t elapsed_us,
+                      uint64_t lock_wait_us,
                       uint64_t block_count,
                       uint64_t free_blocks,
                       uint64_t unmapped_free_blocks,
@@ -201,6 +206,9 @@ void RecordVMMV2Alloc(int device_id,
   ++stats.alloc_count;
   stats.alloc_request_bytes += request_size;
   AddTiming(elapsed_us, &stats.alloc_total_us, &stats.alloc_max_us);
+  AddTiming(lock_wait_us,
+            &stats.alloc_lock_wait_total_us,
+            &stats.alloc_lock_wait_max_us);
   if (pool_type == PoolType::kSmall) {
     ++stats.small_pool_alloc_count;
   } else {
@@ -239,6 +247,7 @@ void RecordVMMV2Free(int device_id,
                      PoolType pool_type,
                      uint64_t allocation_size,
                      uint64_t elapsed_us,
+                     uint64_t lock_wait_us,
                      uint64_t block_count,
                      uint64_t free_blocks,
                      uint64_t unmapped_free_blocks) {
@@ -250,6 +259,9 @@ void RecordVMMV2Free(int device_id,
   ++stats.free_count;
   stats.free_bytes += allocation_size;
   AddTiming(elapsed_us, &stats.free_total_us, &stats.free_max_us);
+  AddTiming(lock_wait_us,
+            &stats.free_lock_wait_total_us,
+            &stats.free_lock_wait_max_us);
   if (pool_type == PoolType::kSmall) {
     ++stats.small_pool_free_count;
   } else {
@@ -331,10 +343,14 @@ std::unordered_map<std::string, uint64_t> SnapshotAndResetVMMV2StepStats(
   result["alloc_count"] = snapshot.alloc_count;
   result["alloc_total_us"] = snapshot.alloc_total_us;
   result["alloc_max_us"] = snapshot.alloc_max_us;
+  result["alloc_lock_wait_total_us"] = snapshot.alloc_lock_wait_total_us;
+  result["alloc_lock_wait_max_us"] = snapshot.alloc_lock_wait_max_us;
   result["alloc_request_bytes"] = snapshot.alloc_request_bytes;
   result["free_count"] = snapshot.free_count;
   result["free_total_us"] = snapshot.free_total_us;
   result["free_max_us"] = snapshot.free_max_us;
+  result["free_lock_wait_total_us"] = snapshot.free_lock_wait_total_us;
+  result["free_lock_wait_max_us"] = snapshot.free_lock_wait_max_us;
   result["free_bytes"] = snapshot.free_bytes;
   result["grow_count"] = snapshot.grow_count;
   result["grow_total_us"] = snapshot.grow_total_us;

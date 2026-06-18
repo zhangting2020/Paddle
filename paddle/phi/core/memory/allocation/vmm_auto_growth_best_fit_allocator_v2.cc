@@ -201,9 +201,14 @@ bool VMMAutoGrowthBestFitBlockAllocationV2::SetVMMRemapEvent(
 }
 
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
-  std::lock_guard<SpinLock> guard(spinlock_);
   const bool trace_perf = VLOG_IS_ON(4);
   const bool trace_step = VMMV2StepStatsEnabled();
+  const auto lock_wait_start =
+      (trace_perf || trace_step) ? Clock::now() : Clock::time_point{};
+  std::lock_guard<SpinLock> guard(spinlock_);
+  const uint64_t lock_wait_us =
+      (trace_perf || trace_step) ? ElapsedMicros(lock_wait_start, Clock::now())
+                                 : 0;
   const auto op_start =
       (trace_perf || trace_step) ? Clock::now() : Clock::time_point{};
   size_t requested_size = AlignedSize(size, alignment_);
@@ -228,6 +233,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
                        path,
                        size,
                        elapsed_us,
+                       lock_wait_us,
                        all_blocks_.size(),
                        free_blocks_.size(),
                        unmapped_free_blocks_.size(),
@@ -528,9 +534,14 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
-  std::lock_guard<SpinLock> guard(spinlock_);
   const bool trace_perf = VLOG_IS_ON(4);
   const bool trace_step = VMMV2StepStatsEnabled();
+  const auto lock_wait_start =
+      (trace_perf || trace_step) ? Clock::now() : Clock::time_point{};
+  std::lock_guard<SpinLock> guard(spinlock_);
+  const uint64_t lock_wait_us =
+      (trace_perf || trace_step) ? ElapsedMicros(lock_wait_start, Clock::now())
+                                 : 0;
   const auto op_start =
       (trace_perf || trace_step) ? Clock::now() : Clock::time_point{};
   auto* wrapped_allocation =
@@ -585,6 +596,7 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
                       pool_type_,
                       allocation_size,
                       elapsed_us,
+                      lock_wait_us,
                       all_blocks_.size(),
                       free_blocks_.size(),
                       unmapped_free_blocks_.size());
