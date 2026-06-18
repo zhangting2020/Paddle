@@ -33,6 +33,7 @@ PHI_DECLARE_bool(vmm_v2_fake_collect_tensor_parts);
 PHI_DECLARE_bool(vmm_v2_record_mapped_free_parts);
 PHI_DECLARE_bool(vmm_v2_round_alloc_to_handle_size);
 PHI_DECLARE_bool(vmm_v2_round_large_pool_alloc_to_handle_size);
+PHI_DECLARE_bool(vmm_v2_fast_hot_path_no_parts);
 
 namespace paddle {
 namespace memory {
@@ -101,6 +102,10 @@ BlockV2 MakeFakeMappedBlock(BlockType type,
   static const std::vector<BlockPartV2> kNoParts;
   return BlockV2::MakeMappedBlock(
       type, ptr, size, kNoParts, 0, size, pool_type);
+}
+
+bool UseFastNoPartsHotPath() {
+  return FLAGS_vmm_v2_fast_hot_path_no_parts || FLAGS_vmm_v2_fake_block_parts;
 }
 
 }  // namespace
@@ -348,7 +353,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   const size_t remaining_size = total_new_size - requested_size;
 
   BlockV2 block =
-      FLAGS_vmm_v2_fake_block_parts
+      UseFastNoPartsHotPath()
           ? MakeFakeMappedBlock(BlockType::kActive,
                                 combined_free_block.ptr_,
                                 requested_size,
@@ -360,7 +365,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
     void* remain_ptr =
         reinterpret_cast<uint8_t*>(combined_free_block.ptr_) + requested_size;
     BlockV2 remaining_block =
-        FLAGS_vmm_v2_fake_block_parts
+        UseFastNoPartsHotPath()
             ? MakeFakeMappedBlock(BlockType::kFree,
                                   remain_ptr,
                                   remaining_size,
@@ -765,7 +770,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
     auto split_start = detail_tick();
     const size_t remaining_size = block_size - size;
     BlockV2 remaining_block =
-        FLAGS_vmm_v2_fake_block_parts
+        UseFastNoPartsHotPath()
             ? MakeFakeMappedBlock(BlockType::kFree,
                                   reinterpret_cast<uint8_t*>(block_ptr) + size,
                                   remaining_size,
@@ -777,7 +782,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
     // The free remainder keeps the source block's remap-safety stream. The
     // reused prefix is cleared by MarkActive().
 
-    if (FLAGS_vmm_v2_fake_block_parts) {
+    if (UseFastNoPartsHotPath()) {
       *block_it = MakeFakeMappedBlock(
           BlockType::kActive, block_ptr, size, block_pool_type);
     } else {
@@ -801,7 +806,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   }
 
   auto mark_active_start = detail_tick();
-  if (FLAGS_vmm_v2_fake_block_parts) {
+  if (UseFastNoPartsHotPath()) {
     if (!has_remainder) {
       *block_it = MakeFakeMappedBlock(
           BlockType::kActive, block_ptr, size, block_pool_type);
@@ -1065,7 +1070,7 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it,
         detail->erase_free_us += detail_elapsed(erase_free_start);
       }
       auto absorb_start = detail_tick();
-      if (FLAGS_vmm_v2_fake_block_parts) {
+      if (UseFastNoPartsHotPath()) {
         prev->size_ += it->size_;
         prev->ipc_exported_ = prev->ipc_exported_ || it->ipc_exported_;
       } else {
@@ -1094,7 +1099,7 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it,
       detail->erase_free_us += detail_elapsed(erase_free_start);
     }
     auto absorb_start = detail_tick();
-    if (FLAGS_vmm_v2_fake_block_parts) {
+    if (UseFastNoPartsHotPath()) {
       it->size_ += next->size_;
       it->ipc_exported_ = it->ipc_exported_ || next->ipc_exported_;
     } else {

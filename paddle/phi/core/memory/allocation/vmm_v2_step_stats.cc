@@ -90,6 +90,14 @@ PHI_DEFINE_EXPORTED_bool(
     "handle size. This is a diagnostic-only mode to reduce steady-state "
     "split/size-class jitter with less small-pool memory blow-up.");
 
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_fast_hot_path_no_parts,
+    false,
+    "Diagnostic-only VMM V2 fast path for normal alloc/free: skip BlockV2 "
+    "backing-part maintenance and remap-safety marking on hot paths. This is "
+    "unsafe for remap, IPC export/import, and real tensor-info part "
+    "inspection.");
+
 namespace paddle::memory::allocation {
 
 namespace {
