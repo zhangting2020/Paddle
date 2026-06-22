@@ -803,7 +803,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
                                   reinterpret_cast<uint8_t*>(block_ptr) + size,
                                   remaining_size,
                                   block_pool_type)
-            : block_it->MakeMappedFreeSubBlock(size, remaining_size);
+            : block_it->SplitMappedFreeSuffixFromPrefix(size);
     if (part_stats != nullptr) {
       remainder_parts = remaining_block.AllocationPartCount();
     }
@@ -813,8 +813,6 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
     if (UseFastNoPartsHotPath()) {
       *block_it = MakeFakeMappedBlock(
           BlockType::kActive, block_ptr, size, block_pool_type);
-    } else {
-      block_it->TrimToPrefix(size);
     }
     if (detail_stats != nullptr) {
       ++detail_stats->split_count;

@@ -539,6 +539,35 @@ struct BlockV2 {
     }
     size_ = keep;
   }
+  BlockV2 SplitMappedFreeSuffixFromPrefix(size_t keep) {
+    PADDLE_ENFORCE_GT(
+        keep,
+        0,
+        common::errors::InvalidArgument(
+            "VMM V2 split prefix size must be greater than zero."));
+    PADDLE_ENFORCE_LT(
+        keep,
+        size_,
+        common::errors::InvalidArgument(
+            "VMM V2 split prefix size %zu must be smaller than block size %zu.",
+            keep,
+            size_));
+    BlockV2 suffix;
+    suffix.Reset(BeginPtr() + keep, size_ - keep, BlockType::kFree, pool_type_);
+    suffix.ipc_exported_ = ipc_exported_;
+#if defined(PADDLE_WITH_CUDA)
+    suffix.CopyRemapSafetyFrom(*this);
+#endif
+    if (HasParts()) {
+      std::vector<BlockPartV2> prefix_parts;
+      std::vector<BlockPartV2> suffix_parts;
+      SplitPartsAt(keep, &prefix_parts, &suffix_parts);
+      parts_ = std::move(prefix_parts);
+      suffix.parts_ = std::move(suffix_parts);
+    }
+    size_ = keep;
+    return suffix;
+  }
   void TrimToSuffix(size_t trim, size_t keep) {
     if (HasParts()) {
       TrimPartsToRange(trim, keep);
@@ -595,6 +624,65 @@ struct BlockV2 {
   }
   void TrimPartsToRange(size_t offset, size_t len) {
     parts_ = SliceBlockPartsForRange(parts_, offset, len);
+  }
+  void SplitPartsAt(size_t split_offset,
+                    std::vector<BlockPartV2>* prefix_parts,
+                    std::vector<BlockPartV2>* suffix_parts) const {
+    prefix_parts->clear();
+    suffix_parts->clear();
+    prefix_parts->reserve(parts_.size());
+    suffix_parts->reserve(parts_.size());
+
+    auto append_part = [](std::vector<BlockPartV2>* parts, BlockPartV2 part) {
+      if (part.ByteSize() == 0) {
+        return;
+      }
+      if (parts->empty() || !parts->back().TryExtend(part)) {
+        parts->push_back(std::move(part));
+      }
+    };
+
+    size_t cursor = 0;
+    size_t prefix_len = 0;
+    size_t suffix_len = 0;
+    for (const auto& part : parts_) {
+      const size_t part_begin = cursor;
+      const size_t part_end = part_begin + part.ByteSize();
+      cursor = part_end;
+
+      if (part_end <= split_offset) {
+        append_part(prefix_parts, part);
+        prefix_len += part.ByteSize();
+        continue;
+      }
+      if (part_begin >= split_offset) {
+        append_part(suffix_parts, part);
+        suffix_len += part.ByteSize();
+        continue;
+      }
+
+      const size_t prefix_part_len = split_offset - part_begin;
+      const size_t suffix_part_len = part_end - split_offset;
+      append_part(prefix_parts, part.Slice(0, prefix_part_len));
+      append_part(suffix_parts, part.Slice(prefix_part_len, suffix_part_len));
+      prefix_len += prefix_part_len;
+      suffix_len += suffix_part_len;
+    }
+
+    PADDLE_ENFORCE_EQ(
+        prefix_len,
+        split_offset,
+        common::errors::InvalidArgument(
+            "Invalid VMM V2 split prefix: expected %zu bytes, got %zu.",
+            split_offset,
+            prefix_len));
+    PADDLE_ENFORCE_EQ(
+        suffix_len,
+        size_ - split_offset,
+        common::errors::InvalidArgument(
+            "Invalid VMM V2 split suffix: expected %zu bytes, got %zu.",
+            size_ - split_offset,
+            suffix_len));
   }
   void SetSinglePart(std::shared_ptr<VMMHandleMeta> meta, size_t len) {
     parts_.clear();
