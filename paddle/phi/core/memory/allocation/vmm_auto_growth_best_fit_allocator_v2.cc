@@ -36,6 +36,7 @@ PHI_DECLARE_bool(vmm_v2_record_mapped_free_parts);
 PHI_DECLARE_bool(vmm_v2_round_alloc_to_handle_size);
 PHI_DECLARE_bool(vmm_v2_round_large_pool_alloc_to_handle_size);
 PHI_DECLARE_bool(vmm_v2_fast_hot_path_no_parts);
+PHI_DECLARE_bool(vmm_v2_lazy_block_parts);
 PHI_DECLARE_bool(vmm_v2_skip_remap_safety_hot_path);
 PHI_DECLARE_bool(vmm_v2_consume_whole_free_block);
 PHI_DECLARE_uint64(vmm_v2_consume_whole_free_block_max_waste_mb);
@@ -100,15 +101,6 @@ bool RangesOverlap(void* lhs_ptr,
   return lhs_end > rhs_begin && rhs_end > lhs_begin;
 }
 
-BlockV2 MakeFakeMappedBlock(BlockType type,
-                            void* ptr,
-                            size_t size,
-                            PoolType pool_type) {
-  static const std::vector<BlockPartV2> kNoParts;
-  return BlockV2::MakeMappedBlock(
-      type, ptr, size, kNoParts, 0, size, pool_type);
-}
-
 bool UseFastNoPartsHotPath() {
   return FLAGS_vmm_v2_fast_hot_path_no_parts || FLAGS_vmm_v2_fake_block_parts;
 }
@@ -117,12 +109,22 @@ bool UseFakeMappedFreeSplitParts() {
   return UseFastNoPartsHotPath() || FLAGS_vmm_v2_fake_mapped_free_split_parts;
 }
 
+bool UseLazyBlockParts() { return FLAGS_vmm_v2_lazy_block_parts; }
+
 bool UseFakeFreeMergeParts() {
-  return UseFastNoPartsHotPath() || FLAGS_vmm_v2_fake_free_merge_parts;
+  return UseFastNoPartsHotPath() || UseLazyBlockParts() ||
+         FLAGS_vmm_v2_fake_free_merge_parts;
+}
+
+bool MayHaveIncompleteParts() {
+  return UseFastNoPartsHotPath() || UseLazyBlockParts() ||
+         FLAGS_vmm_v2_fake_mapped_free_split_parts ||
+         FLAGS_vmm_v2_fake_free_merge_parts;
 }
 
 bool NeedFakeSubBlockView(const BlockV2& block) {
-  return UseFastNoPartsHotPath() || !block.HasCompleteAllocationParts();
+  return UseFastNoPartsHotPath() || UseLazyBlockParts() ||
+         (MayHaveIncompleteParts() && !block.HasCompleteAllocationParts());
 }
 
 bool ShouldConsumeWholeFreeBlock(size_t remainder_size) {
@@ -380,7 +382,11 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
     BlockV2 grow_block = AdoptBackingBlock(&grow_alloc);
     total_new_size += grow_block.size_;
     if (has_tail_reuse) {
-      combined_free_block.AbsorbAdjacentBlock(&grow_block);
+      if (UseLazyBlockParts()) {
+        combined_free_block.AbsorbAdjacentBlockWithoutParts(&grow_block);
+      } else {
+        combined_free_block.AbsorbAdjacentBlock(&grow_block);
+      }
     } else {
       combined_free_block = std::move(grow_block);
     }
@@ -390,22 +396,16 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
 
   BlockV2 block =
       NeedFakeSubBlockView(combined_free_block)
-          ? MakeFakeMappedBlock(BlockType::kActive,
-                                combined_free_block.ptr_,
-                                requested_size,
-                                combined_free_block.pool_type_)
+          ? combined_free_block.MakeMappedActiveSubBlockWithoutParts(
+                0, requested_size)
           : combined_free_block.MakeMappedActiveSubBlock(0, requested_size);
   auto it = all_blocks_.insert(all_blocks_.end(), std::move(block));
 
   if (remaining_size > 0) {
-    void* remain_ptr =
-        reinterpret_cast<uint8_t*>(combined_free_block.ptr_) + requested_size;
     BlockV2 remaining_block =
         NeedFakeSubBlockView(combined_free_block)
-            ? MakeFakeMappedBlock(BlockType::kFree,
-                                  remain_ptr,
-                                  remaining_size,
-                                  combined_free_block.pool_type_)
+            ? combined_free_block.MakeMappedFreeSubBlockWithoutParts(
+                  requested_size, remaining_size)
             : combined_free_block.MakeMappedFreeSubBlock(requested_size,
                                                          remaining_size);
     auto remain_it =
@@ -702,16 +702,14 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
     return true;
   }
 
-  const size_t block_offset = target_va - block_it->BeginVA();
-  BlockV2 tensor_block = block_it->MakeMappedActiveSubBlock(block_offset, size);
   std::vector<BlockPart> collected;
-  if (!underlying_allocator_->CollectBlockIpcParts(tensor_block, &collected)) {
+  if (!underlying_allocator_->CollectIpcParts(
+          target_va, size, parts != nullptr ? &collected : nullptr)) {
     VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit failed to collect backing "
             << "parts for active block ptr=" << block_it->ptr_
             << " block_size=" << block_it->size_ << " target_ptr=" << ptr
             << " target_size=" << size
-            << " pool=" << static_cast<int>(pool_type_)
-            << " part_count=" << tensor_block.AllocationPartCount();
+            << " pool=" << static_cast<int>(pool_type_);
     return false;
   }
   if (mark_ipc_exported && FLAGS_vmm_v2_disable_ipc_export_mark) {
@@ -721,7 +719,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
             << " target_ptr=" << ptr << " target_size=" << size
             << " pool=" << static_cast<int>(pool_type_);
   } else if (mark_ipc_exported) {
-    if (!underlying_allocator_->MarkBlockIpcExported(tensor_block)) {
+    if (!underlying_allocator_->MarkIpcExported(target_va, size)) {
       VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit failed to mark IPC exported "
               << "for active block ptr=" << block_it->ptr_
               << " block_size=" << block_it->size_ << " target_ptr=" << ptr
@@ -797,9 +795,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   auto block_it = it->second;
   const size_t source_parts =
       part_stats == nullptr ? 0 : block_it->AllocationPartCount();
-  void* block_ptr = block_it->ptr_;
   const size_t block_size = block_it->size_;
-  const PoolType block_pool_type = block_it->pool_type_;
   auto erase_free_start = detail_tick();
   EraseFreeBlock(block_it);
   if (detail_stats != nullptr) {
@@ -811,15 +807,13 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   const size_t remaining_size = has_remainder ? block_size - size : 0;
   const bool consume_whole_block = ShouldConsumeWholeFreeBlock(remaining_size);
   const bool use_fake_split =
-      UseFakeMappedFreeSplitParts() || !block_it->HasCompleteAllocationParts();
+      UseFakeMappedFreeSplitParts() || UseLazyBlockParts() ||
+      (MayHaveIncompleteParts() && !block_it->HasCompleteAllocationParts());
   if (has_remainder && !consume_whole_block) {
     auto split_start = detail_tick();
     BlockV2 remaining_block =
         use_fake_split
-            ? MakeFakeMappedBlock(BlockType::kFree,
-                                  reinterpret_cast<uint8_t*>(block_ptr) + size,
-                                  remaining_size,
-                                  block_pool_type)
+            ? block_it->MakeMappedFreeSubBlockWithoutParts(size, remaining_size)
             : block_it->SplitMappedFreeSuffixFromPrefix(size);
     if (part_stats != nullptr) {
       remainder_parts = remaining_block.AllocationPartCount();
@@ -828,8 +822,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
     // reused prefix is cleared by MarkActive().
 
     if (use_fake_split) {
-      *block_it = MakeFakeMappedBlock(
-          BlockType::kActive, block_ptr, size, block_pool_type);
+      *block_it = block_it->MakeMappedActiveSubBlockWithoutParts(0, size);
     }
     if (detail_stats != nullptr) {
       ++detail_stats->split_count;
@@ -851,10 +844,8 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   auto mark_active_start = detail_tick();
   if (use_fake_split) {
     if (!has_remainder || consume_whole_block) {
-      *block_it = MakeFakeMappedBlock(BlockType::kActive,
-                                      block_ptr,
-                                      consume_whole_block ? block_size : size,
-                                      block_pool_type);
+      *block_it = block_it->MakeMappedActiveSubBlockWithoutParts(
+          0, consume_whole_block ? block_size : size);
     }
   } else {
     block_it->MarkActive();
@@ -933,12 +924,17 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
   const PoolType original_pool_type = best->pool_type_;
 
   EraseUnmappedFreeBlock(best);
-  *best = mapped_block.MakeMappedActiveSubBlock(0, size);
+  *best = UseLazyBlockParts()
+              ? mapped_block.MakeMappedActiveSubBlockWithoutParts(0, size)
+              : mapped_block.MakeMappedActiveSubBlock(0, size);
 
   auto insert_pos = std::next(best);
   if (backing_size > size) {
     BlockV2 mapped_remain =
-        mapped_block.MakeMappedFreeSubBlock(size, backing_size - size);
+        UseLazyBlockParts()
+            ? mapped_block.MakeMappedFreeSubBlockWithoutParts(
+                  size, backing_size - size)
+            : mapped_block.MakeMappedFreeSubBlock(size, backing_size - size);
     mapped_remain.owning_stream_ = nullptr;
     mapped_remain.remap_safe_event_.reset();
     mapped_remain.remap_pending_states_.clear();
@@ -1116,8 +1112,7 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it,
       }
       auto absorb_start = detail_tick();
       if (UseFakeFreeMergeParts()) {
-        prev->size_ += it->size_;
-        prev->ipc_exported_ = prev->ipc_exported_ || it->ipc_exported_;
+        prev->AbsorbAdjacentBlockWithoutParts(&*it);
       } else {
         prev->AbsorbAdjacentBlock(&*it);
       }
@@ -1145,8 +1140,7 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it,
     }
     auto absorb_start = detail_tick();
     if (UseFakeFreeMergeParts()) {
-      it->size_ += next->size_;
-      it->ipc_exported_ = it->ipc_exported_ || next->ipc_exported_;
+      it->AbsorbAdjacentBlockWithoutParts(&*next);
     } else {
       it->AbsorbAdjacentBlock(&*next);
     }
@@ -1290,8 +1284,7 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
         if (it->HasCompleteAllocationParts()) {
           it->TrimToPrefix(keep);
         } else {
-          *it =
-              MakeFakeMappedBlock(BlockType::kFree, bptr, keep, it->pool_type_);
+          *it = it->MakeMappedFreeSubBlockWithoutParts(0, keep);
         }
         InsertFreeBlock(it);
       } else {
@@ -1312,8 +1305,7 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
         if (it->HasCompleteAllocationParts()) {
           it->TrimToSuffix(trim, keep);
         } else {
-          *it = MakeFakeMappedBlock(
-              BlockType::kFree, bptr + trim, keep, it->pool_type_);
+          *it = it->MakeMappedFreeSubBlockWithoutParts(trim, keep);
         }
         InsertFreeBlock(it);
       } else {
@@ -1332,19 +1324,15 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
 
       if (!is_unmapped_free) {
         const bool complete_parts = it->HasCompleteAllocationParts();
-        BlockV2 right =
-            complete_parts
-                ? it->MakeMappedFreeSubBlock(right_offset, right_size)
-                : MakeFakeMappedBlock(BlockType::kFree,
-                                      bptr + right_offset,
-                                      right_size,
-                                      it->pool_type_);
+        BlockV2 right = complete_parts ? it->MakeMappedFreeSubBlock(
+                                             right_offset, right_size)
+                                       : it->MakeMappedFreeSubBlockWithoutParts(
+                                             right_offset, right_size);
         EraseFreeBlock(it);
         if (complete_parts) {
           it->TrimToPrefix(left_size);
         } else {
-          *it = MakeFakeMappedBlock(
-              BlockType::kFree, bptr, left_size, it->pool_type_);
+          *it = it->MakeMappedFreeSubBlockWithoutParts(0, left_size);
         }
         InsertFreeBlock(it);
         right.CopyRemapSafetyFrom(*it);

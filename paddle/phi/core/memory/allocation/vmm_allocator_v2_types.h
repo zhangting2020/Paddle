@@ -366,6 +366,15 @@ struct BlockV2 {
         ptr, size, BuildBlockPartsFromHandleLayout(layout), 0, size, pool_type);
   }
 
+  static BlockV2 MakeMappedBlockWithoutParts(BlockType type,
+                                             void* ptr,
+                                             size_t size,
+                                             PoolType pool_type) {
+    BlockV2 block;
+    block.Reset(ptr, size, type, pool_type);
+    return block;
+  }
+
   static BlockV2 MakeUnmappedFreeBlock(void* ptr,
                                        size_t size,
                                        PoolType pool_type) {
@@ -456,6 +465,29 @@ struct BlockV2 {
     auto block = MakeMappedActiveBlock(
         BeginPtr() + offset, len, parts_, offset, len, pool_type_);
     block.ipc_exported_ = ipc_exported_;
+    return block;
+  }
+  BlockV2 MakeMappedSubBlockWithoutParts(BlockType type,
+                                         size_t offset,
+                                         size_t len) const {
+    auto block =
+        MakeMappedBlockWithoutParts(type, BeginPtr() + offset, len, pool_type_);
+    block.ipc_exported_ = ipc_exported_;
+#if defined(PADDLE_WITH_CUDA)
+    block.CopyRemapSafetyFrom(*this);
+#endif
+    return block;
+  }
+  BlockV2 MakeMappedFreeSubBlockWithoutParts(size_t offset, size_t len) const {
+    return MakeMappedSubBlockWithoutParts(BlockType::kFree, offset, len);
+  }
+  BlockV2 MakeMappedActiveSubBlockWithoutParts(size_t offset,
+                                               size_t len) const {
+    auto block =
+        MakeMappedSubBlockWithoutParts(BlockType::kActive, offset, len);
+#if defined(PADDLE_WITH_CUDA)
+    block.ClearRemapSafety();
+#endif
     return block;
   }
   BlockV2 MakeUnmappedFreeSubBlock(size_t offset, size_t len) const {
@@ -598,6 +630,13 @@ struct BlockV2 {
     size_ += src->size_;
     ipc_exported_ = ipc_exported_ || src->ipc_exported_;
     AppendPartsFrom(src);
+#if defined(PADDLE_WITH_CUDA)
+    AppendRemapSafetyFrom(*src);
+#endif
+  }
+  void AbsorbAdjacentBlockWithoutParts(BlockV2* src) {
+    size_ += src->size_;
+    ipc_exported_ = ipc_exported_ || src->ipc_exported_;
 #if defined(PADDLE_WITH_CUDA)
     AppendRemapSafetyFrom(*src);
 #endif

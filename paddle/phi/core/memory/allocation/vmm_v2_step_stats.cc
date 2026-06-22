@@ -115,6 +115,15 @@ PHI_DEFINE_EXPORTED_bool(
     "inspection.");
 
 PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_lazy_block_parts,
+    false,
+    "Experimental VMM V2 mode: keep normal allocator split/merge hot paths "
+    "free of eager BlockV2 backing-part materialization. Backing details are "
+    "queried from the VMM backing map only when IPC/remap/tensor-info needs "
+    "them. Unlike FLAGS_vmm_v2_fast_hot_path_no_parts, this does not skip "
+    "remap-safety metadata.");
+
+PHI_DEFINE_EXPORTED_bool(
     vmm_v2_skip_remap_safety_hot_path,
     false,
     "Diagnostic-only VMM V2 mode: skip remap-safety state marking on normal "

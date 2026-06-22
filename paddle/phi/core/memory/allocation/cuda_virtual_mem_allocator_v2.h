@@ -166,6 +166,10 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   bool IsRangeReleasable(VMMDevicePtr ptr, size_t size) const;
   bool IsRangeReusable(VMMDevicePtr ptr, size_t size) const;
   bool IsDriverVaRangeUnmapped(VMMDevicePtr ptr, size_t size) const;
+  bool CollectIpcParts(VMMDevicePtr ptr,
+                       size_t size,
+                       std::vector<BlockPart>* ipc_parts) const;
+  bool MarkIpcExported(VMMDevicePtr ptr, size_t size);
   bool CollectBlockIpcParts(const BlockV2& block,
                             std::vector<BlockPart>* ipc_parts) const;
   bool MarkBlockIpcExported(const BlockV2& block);
@@ -202,10 +206,6 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
  private:
   void InitOnce();
   bool IsReservedVaRange(VMMDevicePtr ptr, size_t size) const;
-  bool CollectIpcParts(VMMDevicePtr ptr,
-                       size_t size,
-                       std::vector<BlockPart>* ipc_parts) const;
-  bool MarkIpcExported(VMMDevicePtr ptr, size_t size);
   bool SetRemapEvent(VMMDevicePtr ptr,
                      size_t size,
                      gpuStream_t stream,
