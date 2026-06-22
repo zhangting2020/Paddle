@@ -99,6 +99,14 @@ PHI_DEFINE_EXPORTED_bool(
     "inspection.");
 
 PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_skip_remap_safety_hot_path,
+    false,
+    "Diagnostic-only VMM V2 mode: skip remap-safety state marking on normal "
+    "allocator hot paths while keeping BlockV2 backing parts intact. This is "
+    "unsafe when VMM remap/compaction may run and is only intended to isolate "
+    "remap-safety metadata overhead.");
+
+PHI_DEFINE_EXPORTED_bool(
     vmm_v2_consume_whole_free_block,
     false,
     "Diagnostic-only VMM V2 mapped-free allocation mode: when reusing a free "

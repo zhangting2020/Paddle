@@ -34,6 +34,7 @@ PHI_DECLARE_bool(vmm_v2_record_mapped_free_parts);
 PHI_DECLARE_bool(vmm_v2_round_alloc_to_handle_size);
 PHI_DECLARE_bool(vmm_v2_round_large_pool_alloc_to_handle_size);
 PHI_DECLARE_bool(vmm_v2_fast_hot_path_no_parts);
+PHI_DECLARE_bool(vmm_v2_skip_remap_safety_hot_path);
 PHI_DECLARE_bool(vmm_v2_consume_whole_free_block);
 PHI_DECLARE_uint64(vmm_v2_consume_whole_free_block_max_waste_mb);
 
@@ -579,7 +580,7 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
         common::errors::InvalidArgument(
             "Failed to attach explicit VMM V2 remap event for block %p.",
             it->ptr_));
-  } else {
+  } else if (!FLAGS_vmm_v2_skip_remap_safety_hot_path) {
     it->SetRemapSafety(wrapped_allocation->remap_stream(), nullptr);
   }
   VMMV2FreeDetailStats free_detail_stats;
