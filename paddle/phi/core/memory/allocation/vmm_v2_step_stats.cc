@@ -77,6 +77,22 @@ PHI_DEFINE_EXPORTED_bool(
     "export/import, or real tensor-info part inspection.");
 
 PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_fake_mapped_free_split_parts,
+    false,
+    "Diagnostic-only VMM V2 mode: skip BlockV2 backing-part slicing when a "
+    "mapped-free block is split for allocation. This isolates mapped-free "
+    "allocation split overhead and is invalid with remap, IPC export/import, "
+    "or real tensor-info part inspection.");
+
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_fake_free_merge_parts,
+    false,
+    "Diagnostic-only VMM V2 mode: skip BlockV2 backing-part append work when "
+    "adjacent free blocks are merged. This isolates free merge overhead and "
+    "is invalid with remap, IPC export/import, or real tensor-info part "
+    "inspection.");
+
+PHI_DEFINE_EXPORTED_bool(
     vmm_v2_round_alloc_to_handle_size,
     false,
     "Round VMM V2 best-fit allocation requests up to the pool handle size. "
