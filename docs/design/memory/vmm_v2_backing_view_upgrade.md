@@ -60,6 +60,7 @@
 | h2 lazy parts clean | 3655.12 | -3.96% | +2.62% | 215.88ms | 136.04ms | 856.22ms | lazy parts 已生效，但未达到 fake/fast no-parts 收益 |
 | h2 lazy + skip remap-safety | 3844.86 | +1.03% | +7.95% | 226.14ms | 137.94ms | 847.03ms | 剩余 gap 基本由 remap-safety hot path 解释；该配置仅用于诊断 |
 | h2 lazy + remap off 自动跳过 safety | 3794.83 | -0.29% | +6.54% | 240.13ms | 137.17ms | 864.13ms | `remap_on_oom=0` 时不维护 remap-safety，性能接近 h16 clean |
+| h2 lazy + remap on lazy event | 3797.20 | -0.23% | +6.61% | 223.16ms | 148.98ms | 860.09ms | `remap_on_oom=1` 但 clean run 未触发 compact；lazy event 将 per-free event 开销移出稳态热路径 |
 
 由此得到的直接结论：
 
@@ -73,6 +74,7 @@
 5. 初版 `FLAGS_vmm_v2_lazy_block_parts=1` 只恢复约一半 gap：相对 h2 clean 提升 `+2.62%`，但仍比 h16 clean 低 `-3.96%`。这说明 lazy parts 路径已绕过主要 eager parts slice，但为了保持正确性仍保留的 block 级 `ipc_exported_` / remap-safety 元数据传播，或尚未迁移的 release/split range 残余 parts 路径，仍可能贡献剩余开销。此前 fake/fast 实验不能直接视为最终正确实现的性能，因为它们可能同时绕过了部分正确性元数据维护。
 6. `FLAGS_vmm_v2_lazy_block_parts=1` 叠加 `FLAGS_vmm_v2_skip_remap_safety_hot_path=1` 后，h2 clean 吞吐达到 `3844.86 tokens/s/card`，比 h16 clean 高 `+1.03%`。这证明 lazy parts 后剩余性能差距主要来自 remap-safety hot path，而不是 DeepEP GPU kernel、通信路径、IPC/tensor-info 或普通 parts split。该开关会弱化 remap correctness 约束，只能作为诊断实验，不能作为最终默认方案。
 7. 实现 `remap_on_oom=0` 时自动跳过 remap-safety 维护后，h2 lazy 吞吐达到 `3794.83 tokens/s/card`，与 h16 clean 的差距收敛到 `-0.29%`，同时 optimizer-step 从 `1110.23ms` 降到 `915.39ms`。这说明不触发 remap 的 steady-state 性能问题已经由“lazy parts + remap-off 跳过 safety”基本解决；开启 remap 时仍需进一步把 remap-safety 从 block hot path 下沉到 page/backing lazy 查询。
+8. 实现 `remap_on_oom=1` 下的 lazy remap event 后，h2 lazy clean 吞吐达到 `3797.20 tokens/s/card`，与 h16 clean 的差距为 `-0.23%`，optimizer-step 为 `946.01ms`，接近 h16 clean 的 `942.85ms`。该 run 未触发 compact，因此它验证的是“remap 开启但 steady-state 不整理”时的热路径成本：per-free `cudaEventCreateWithFlags` / `cudaEventRecord` 和 block 级 remap-safety 传播已经不再造成 h2 的稳态吞吐损失。后续仍必须用强制碎片/compact run 验证真正 remap 时的 source safety、rollback 和 IPC/remap metadata 正确性。
 
 这组性能实证进一步支持本设计文档的核心方向：`BlockV2::parts_` 不应继续作为正常 allocator hot path 的必备状态。物理 backing 信息应由 Backing View / `backing_map_` 统一维护，Allocation View 只维护逻辑 VA 区间。
 
