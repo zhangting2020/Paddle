@@ -69,7 +69,7 @@ VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVMMV2MultiPoolAllocator(
 void MarkVMMV2RemapPendingStream(StreamSafeCUDAAllocator* allocator,
                                  StreamSafeCUDAAllocation* allocation) {
   if (FLAGS_vmm_v2_fast_hot_path_no_parts ||
-      FLAGS_vmm_v2_skip_remap_safety_hot_path) {
+      FLAGS_vmm_v2_skip_remap_safety_hot_path || !FLAGS_vmm_v2_remap_on_oom) {
     return;
   }
   if (allocator->GetVMMV2Allocator() == nullptr) {

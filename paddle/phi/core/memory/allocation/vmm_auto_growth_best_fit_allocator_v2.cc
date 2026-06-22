@@ -27,6 +27,7 @@
 #include "paddle/phi/core/memory/allocation/vmm_v2_step_stats.h"
 
 COMMON_DECLARE_bool(vmm_v2_compact_all);
+COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
 PHI_DECLARE_bool(vmm_v2_fake_block_parts);
 PHI_DECLARE_bool(vmm_v2_fake_mapped_free_split_parts);
 PHI_DECLARE_bool(vmm_v2_fake_free_merge_parts);
@@ -594,7 +595,8 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
         common::errors::InvalidArgument(
             "Failed to attach explicit VMM V2 remap event for block %p.",
             it->ptr_));
-  } else if (!FLAGS_vmm_v2_skip_remap_safety_hot_path) {
+  } else if (FLAGS_vmm_v2_remap_on_oom &&
+             !FLAGS_vmm_v2_skip_remap_safety_hot_path) {
     it->SetRemapSafety(wrapped_allocation->remap_stream(), nullptr);
   }
   VMMV2FreeDetailStats free_detail_stats;
