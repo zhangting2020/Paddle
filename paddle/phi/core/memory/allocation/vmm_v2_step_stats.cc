@@ -98,6 +98,21 @@ PHI_DEFINE_EXPORTED_bool(
     "unsafe for remap, IPC export/import, and real tensor-info part "
     "inspection.");
 
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_consume_whole_free_block,
+    false,
+    "Diagnostic-only VMM V2 mapped-free allocation mode: when reusing a free "
+    "block, consume the whole selected block instead of splitting a remainder "
+    "block. This trades memory/internal fragmentation for lower allocator "
+    "metadata cost and is only intended to validate split hot-path overhead.");
+
+PHI_DEFINE_EXPORTED_uint64(
+    vmm_v2_consume_whole_free_block_max_waste_mb,
+    0,
+    "Maximum extra bytes, in MiB, allowed when "
+    "FLAGS_vmm_v2_consume_whole_free_block consumes a whole free block. 0 "
+    "means unlimited waste while the diagnostic mode is enabled.");
+
 namespace paddle::memory::allocation {
 
 namespace {

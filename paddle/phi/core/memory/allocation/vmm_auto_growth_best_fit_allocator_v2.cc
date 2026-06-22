@@ -34,6 +34,8 @@ PHI_DECLARE_bool(vmm_v2_record_mapped_free_parts);
 PHI_DECLARE_bool(vmm_v2_round_alloc_to_handle_size);
 PHI_DECLARE_bool(vmm_v2_round_large_pool_alloc_to_handle_size);
 PHI_DECLARE_bool(vmm_v2_fast_hot_path_no_parts);
+PHI_DECLARE_bool(vmm_v2_consume_whole_free_block);
+PHI_DECLARE_uint64(vmm_v2_consume_whole_free_block_max_waste_mb);
 
 namespace paddle {
 namespace memory {
@@ -106,6 +108,19 @@ BlockV2 MakeFakeMappedBlock(BlockType type,
 
 bool UseFastNoPartsHotPath() {
   return FLAGS_vmm_v2_fast_hot_path_no_parts || FLAGS_vmm_v2_fake_block_parts;
+}
+
+bool ShouldConsumeWholeFreeBlock(size_t remainder_size) {
+  if (!FLAGS_vmm_v2_consume_whole_free_block || remainder_size == 0) {
+    return false;
+  }
+  if (FLAGS_vmm_v2_consume_whole_free_block_max_waste_mb == 0) {
+    return true;
+  }
+  const size_t max_waste =
+      static_cast<size_t>(FLAGS_vmm_v2_consume_whole_free_block_max_waste_mb)
+      << 20;
+  return remainder_size <= max_waste;
 }
 
 }  // namespace
@@ -778,9 +793,10 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
 
   size_t remainder_parts = 0;
   const bool has_remainder = block_size > size;
-  if (has_remainder) {
+  const size_t remaining_size = has_remainder ? block_size - size : 0;
+  const bool consume_whole_block = ShouldConsumeWholeFreeBlock(remaining_size);
+  if (has_remainder && !consume_whole_block) {
     auto split_start = detail_tick();
-    const size_t remaining_size = block_size - size;
     BlockV2 remaining_block =
         UseFastNoPartsHotPath()
             ? MakeFakeMappedBlock(BlockType::kFree,
@@ -819,9 +835,11 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
 
   auto mark_active_start = detail_tick();
   if (UseFastNoPartsHotPath()) {
-    if (!has_remainder) {
-      *block_it = MakeFakeMappedBlock(
-          BlockType::kActive, block_ptr, size, block_pool_type);
+    if (!has_remainder || consume_whole_block) {
+      *block_it = MakeFakeMappedBlock(BlockType::kActive,
+                                      block_ptr,
+                                      consume_whole_block ? block_size : size,
+                                      block_pool_type);
     }
   } else {
     block_it->MarkActive();
