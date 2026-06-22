@@ -57,7 +57,7 @@
 | h2 fake split parts | 3702.82 | -2.71% | +3.96% | 241.48ms | 118.88ms | 827.90ms | 主因基本锁定到 allocation split parts |
 | h2 fast no-parts | 3704.10 | -2.68% | +3.99% | 243.18ms | 120.61ms | 828.86ms | 与 fake split parts 几乎一致 |
 | h16 clean | 3806.00 | 0.00% | +6.85% | 252.09ms | 120.07ms | 838.30ms | h16 基线接近 VMM off |
-| h2 lazy parts clean | 3655.12 | -3.96% | +2.62% | 待补充 | 待补充 | 待补充 | lazy parts 已生效，但未达到 fake/fast no-parts 收益 |
+| h2 lazy parts clean | 3655.12 | -3.96% | +2.62% | 215.88ms | 136.04ms | 856.22ms | lazy parts 已生效，但未达到 fake/fast no-parts 收益 |
 
 由此得到的直接结论：
 
