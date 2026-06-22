@@ -230,6 +230,7 @@ bool VMMAutoGrowthBestFitBlockAllocationV2::SetVMMRemapEvent(
   }
   remap_stream_ = stream;
   remap_event_ = std::move(event);
+  has_remap_state_ = true;
   return true;
 }
 
@@ -587,7 +588,7 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
                                "VMMAutoGrowthBestFitAllocatorV2.",
                                allocation->ptr()));
   auto remap_event = wrapped_allocation->TakeRemapEvent();
-  if (remap_event != nullptr) {
+  if (wrapped_allocation->has_remap_state()) {
     PADDLE_ENFORCE_EQ(
         underlying_allocator_->SetBlockRemapEvent(
             *it, wrapped_allocation->remap_stream(), remap_event),

@@ -52,6 +52,7 @@ class VMMAutoGrowthBestFitBlockAllocationV2 : public Allocation,
   bool SetVMMRemapEvent(gpuStream_t stream,
                         std::shared_ptr<CUDAEventGuard> event) override;
   gpuStream_t remap_stream() const { return remap_stream_; }
+  bool has_remap_state() const { return has_remap_state_; }
   std::shared_ptr<CUDAEventGuard> TakeRemapEvent() {
     return std::move(remap_event_);
   }
@@ -61,6 +62,7 @@ class VMMAutoGrowthBestFitBlockAllocationV2 : public Allocation,
   VMMAutoGrowthBestFitAllocatorV2* owner_;
   gpuStream_t remap_stream_{nullptr};
   std::shared_ptr<CUDAEventGuard> remap_event_;
+  bool has_remap_state_{false};
 };
 
 class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
