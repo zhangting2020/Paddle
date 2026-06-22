@@ -57,6 +57,7 @@
 | h2 fake split parts | 3702.82 | -2.71% | +3.96% | 241.48ms | 118.88ms | 827.90ms | 主因基本锁定到 allocation split parts |
 | h2 fast no-parts | 3704.10 | -2.68% | +3.99% | 243.18ms | 120.61ms | 828.86ms | 与 fake split parts 几乎一致 |
 | h16 clean | 3806.00 | 0.00% | +6.85% | 252.09ms | 120.07ms | 838.30ms | h16 基线接近 VMM off |
+| h2 lazy parts clean | 3655.12 | -3.96% | +2.62% | 待补充 | 待补充 | 待补充 | lazy parts 已生效，但未达到 fake/fast no-parts 收益 |
 
 由此得到的直接结论：
 
@@ -67,6 +68,7 @@
    - `BlockV2::SplitPartsAt()`
    - `SliceBlockPartsForRange()`
 4. h=2 时同样大小的 logical block 被切成更多 `BlockPartV2`，每次 allocation split 都 eager materialize prefix/suffix parts vector；该 CPU 热路径被训练中的高频 alloc/free 放大，最终表现为 dispatch/moe-mlp wall time 增加和吞吐下降。
+5. 初版 `FLAGS_vmm_v2_lazy_block_parts=1` 只恢复约一半 gap：相对 h2 clean 提升 `+2.62%`，但仍比 h16 clean 低 `-3.96%`。这说明 lazy parts 路径已绕过主要 eager parts slice，但为了保持正确性仍保留的 block 级 `ipc_exported_` / remap-safety 元数据传播，或尚未迁移的 release/split range 残余 parts 路径，仍可能贡献剩余开销。此前 fake/fast 实验不能直接视为最终正确实现的性能，因为它们可能同时绕过了部分正确性元数据维护。
 
 这组性能实证进一步支持本设计文档的核心方向：`BlockV2::parts_` 不应继续作为正常 allocator hot path 的必备状态。物理 backing 信息应由 Backing View / `backing_map_` 统一维护，Allocation View 只维护逻辑 VA 区间。
 
