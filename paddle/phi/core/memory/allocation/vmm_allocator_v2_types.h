@@ -519,6 +519,16 @@ struct BlockV2 {
   // Logical allocation-view slices. Ownership/reuse/release/remap safety must
   // be decided by the backing-state APIs, not by inspecting part layout.
   size_t AllocationPartCount() const { return parts_.size(); }
+  size_t AllocationPartsByteSize() const {
+    size_t total = 0;
+    for (const auto& part : parts_) {
+      total += part.ByteSize();
+    }
+    return total;
+  }
+  bool HasCompleteAllocationParts() const {
+    return AllocationPartsByteSize() == size_;
+  }
   bool HasSingleAllocationPart(size_t handle_rel_off, size_t len) const {
     return parts_.size() == 1 &&
            parts_.front().HandleRelOffset() == handle_rel_off &&

@@ -121,6 +121,10 @@ bool UseFakeFreeMergeParts() {
   return UseFastNoPartsHotPath() || FLAGS_vmm_v2_fake_free_merge_parts;
 }
 
+bool NeedFakeSubBlockView(const BlockV2& block) {
+  return UseFastNoPartsHotPath() || !block.HasCompleteAllocationParts();
+}
+
 bool ShouldConsumeWholeFreeBlock(size_t remainder_size) {
   if (!FLAGS_vmm_v2_consume_whole_free_block || remainder_size == 0) {
     return false;
@@ -385,7 +389,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   const size_t remaining_size = total_new_size - requested_size;
 
   BlockV2 block =
-      UseFastNoPartsHotPath()
+      NeedFakeSubBlockView(combined_free_block)
           ? MakeFakeMappedBlock(BlockType::kActive,
                                 combined_free_block.ptr_,
                                 requested_size,
@@ -397,7 +401,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
     void* remain_ptr =
         reinterpret_cast<uint8_t*>(combined_free_block.ptr_) + requested_size;
     BlockV2 remaining_block =
-        UseFastNoPartsHotPath()
+        NeedFakeSubBlockView(combined_free_block)
             ? MakeFakeMappedBlock(BlockType::kFree,
                                   remain_ptr,
                                   remaining_size,
@@ -806,10 +810,12 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   const bool has_remainder = block_size > size;
   const size_t remaining_size = has_remainder ? block_size - size : 0;
   const bool consume_whole_block = ShouldConsumeWholeFreeBlock(remaining_size);
+  const bool use_fake_split =
+      UseFakeMappedFreeSplitParts() || !block_it->HasCompleteAllocationParts();
   if (has_remainder && !consume_whole_block) {
     auto split_start = detail_tick();
     BlockV2 remaining_block =
-        UseFakeMappedFreeSplitParts()
+        use_fake_split
             ? MakeFakeMappedBlock(BlockType::kFree,
                                   reinterpret_cast<uint8_t*>(block_ptr) + size,
                                   remaining_size,
@@ -821,7 +827,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
     // The free remainder keeps the source block's remap-safety stream. The
     // reused prefix is cleared by MarkActive().
 
-    if (UseFakeMappedFreeSplitParts()) {
+    if (use_fake_split) {
       *block_it = MakeFakeMappedBlock(
           BlockType::kActive, block_ptr, size, block_pool_type);
     }
@@ -843,7 +849,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   }
 
   auto mark_active_start = detail_tick();
-  if (UseFakeMappedFreeSplitParts()) {
+  if (use_fake_split) {
     if (!has_remainder || consume_whole_block) {
       *block_it = MakeFakeMappedBlock(BlockType::kActive,
                                       block_ptr,
@@ -1281,7 +1287,12 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
       const size_t keep = static_cast<size_t>(base - bptr);
       if (!is_unmapped_free) {
         EraseFreeBlock(it);
-        it->TrimToPrefix(keep);
+        if (it->HasCompleteAllocationParts()) {
+          it->TrimToPrefix(keep);
+        } else {
+          *it =
+              MakeFakeMappedBlock(BlockType::kFree, bptr, keep, it->pool_type_);
+        }
         InsertFreeBlock(it);
       } else {
         EraseUnmappedFreeBlock(it);
@@ -1298,7 +1309,12 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
       const size_t keep = it->size_ - trim;
       if (!is_unmapped_free) {
         EraseFreeBlock(it);
-        it->TrimToSuffix(trim, keep);
+        if (it->HasCompleteAllocationParts()) {
+          it->TrimToSuffix(trim, keep);
+        } else {
+          *it = MakeFakeMappedBlock(
+              BlockType::kFree, bptr + trim, keep, it->pool_type_);
+        }
         InsertFreeBlock(it);
       } else {
         EraseUnmappedFreeBlock(it);
@@ -1315,9 +1331,21 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
       const size_t right_size = it->size_ - right_offset;
 
       if (!is_unmapped_free) {
-        BlockV2 right = it->MakeMappedFreeSubBlock(right_offset, right_size);
+        const bool complete_parts = it->HasCompleteAllocationParts();
+        BlockV2 right =
+            complete_parts
+                ? it->MakeMappedFreeSubBlock(right_offset, right_size)
+                : MakeFakeMappedBlock(BlockType::kFree,
+                                      bptr + right_offset,
+                                      right_size,
+                                      it->pool_type_);
         EraseFreeBlock(it);
-        it->TrimToPrefix(left_size);
+        if (complete_parts) {
+          it->TrimToPrefix(left_size);
+        } else {
+          *it = MakeFakeMappedBlock(
+              BlockType::kFree, bptr, left_size, it->pool_type_);
+        }
         InsertFreeBlock(it);
         right.CopyRemapSafetyFrom(*it);
         auto right_it = all_blocks_.insert(std::next(it), std::move(right));
