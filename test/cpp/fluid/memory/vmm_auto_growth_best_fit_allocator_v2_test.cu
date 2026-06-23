@@ -262,7 +262,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, MergeFreeBlocksWithDifferentStreams) {
   const auto& merged = allocator.all_blocks().front();
   EXPECT_EQ(merged.type_, BlockType::kFree);
   EXPECT_EQ(merged.size_, 2UL * underlying->HandleSize());
-  EXPECT_EQ(merged.remap_pending_states_.size(), 1UL);
+  EXPECT_FALSE(merged.HasUnknownRemapSafety());
 
   ASSERT_EQ(cudaStreamDestroy(first_stream), cudaSuccess);
   ASSERT_EQ(cudaStreamDestroy(second_stream), cudaSuccess);
@@ -651,7 +651,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, VMMTensorPartsVisitorFindsV2Blocks) {
   auto allocation = allocator.Allocate(underlying->HandleSize());
   ASSERT_NE(allocation, nullptr);
 
-  paddle::memory::VMMTensorPartsVisitor visitor(allocation->ptr(),
+  paddle::memory::VmmTensorPartsVisitor visitor(allocation->ptr(),
                                                 allocation->size());
   allocator.Accept(&visitor);
 
@@ -945,7 +945,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactUsesBlockListTailPlacement) {
       underlying->HandleSize());
   ASSERT_EQ(remap_sources.size(), 1UL);
   EXPECT_EQ(remap_sources[0].remap_source_state,
-            VMMBackingMap::RemapSourceState::kReady);
+            VMMBackingMap::RemapSourceState::kRemapDestinationOwned);
 
   auto remapped_active = allocator.Allocate(underlying->HandleSize());
   ASSERT_NE(remapped_active, nullptr);

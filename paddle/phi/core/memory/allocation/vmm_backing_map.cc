@@ -1062,7 +1062,6 @@ bool VMMBackingMap::PageEventsReadyLocked(Page* page,
       it->event = std::make_shared<CUDAEventGuard>(event);
       VLOG(6) << "VMM V2 BackingMap lazily recorded pending event in "
               << context;
-      return false;
     }
     gpuError_t err = cudaEventQuery(it->event->event);
     if (err != cudaSuccess && err != cudaErrorNotReady) {

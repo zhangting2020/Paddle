@@ -131,7 +131,7 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
   ASSERT_NE(small, nullptr);
   ASSERT_NE(large, nullptr);
 
-  paddle::memory::VMMTensorPartsVisitor small_visitor(small->ptr(),
+  paddle::memory::VmmTensorPartsVisitor small_visitor(small->ptr(),
                                                       small->size());
   allocator->Accept(&small_visitor);
 
@@ -140,7 +140,7 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
   EXPECT_EQ(small_visitor.Parts()[0].chunk_rel_off, 0UL);
   EXPECT_EQ(small_visitor.Parts()[0].len, small->size());
 
-  paddle::memory::VMMTensorPartsVisitor large_visitor(large->ptr(),
+  paddle::memory::VmmTensorPartsVisitor large_visitor(large->ptr(),
                                                       large->size());
   allocator->Accept(&large_visitor);
 

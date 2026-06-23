@@ -598,7 +598,12 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
             it->ptr_));
   } else if (FLAGS_vmm_v2_remap_on_oom &&
              !FLAGS_vmm_v2_skip_remap_safety_hot_path) {
-    it->SetRemapSafety(wrapped_allocation->remap_stream(), nullptr);
+    auto remap_stream = wrapped_allocation->remap_stream();
+    if (remap_stream == nullptr) {
+      it->ClearRemapSafety();
+    } else {
+      it->SetRemapSafety(remap_stream, nullptr);
+    }
   }
   VMMV2FreeDetailStats free_detail_stats;
   VMMV2FreeDetailStats* free_detail_stats_ptr =

@@ -636,6 +636,10 @@ struct BlockV2 {
   }
   void AbsorbAdjacentBlockWithoutParts(BlockV2* src) {
     size_ += src->size_;
+    // Once a merge skips part maintenance, the merged block must be treated as
+    // a no-parts block. Keeping the old prefix parts would make parts_ cover
+    // only part of the enlarged block and poison later free/remap cleanup.
+    parts_.clear();
     ipc_exported_ = ipc_exported_ || src->ipc_exported_;
 #if defined(PADDLE_WITH_CUDA)
     AppendRemapSafetyFrom(*src);
