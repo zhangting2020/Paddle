@@ -102,30 +102,39 @@ bool RangesOverlap(void* lhs_ptr,
   return lhs_end > rhs_begin && rhs_end > lhs_begin;
 }
 
-bool UseFastNoPartsHotPath() {
+bool UseDiagnosticNoPartsHotPath() {
   return FLAGS_vmm_v2_fast_hot_path_no_parts || FLAGS_vmm_v2_fake_block_parts;
 }
 
-bool UseFakeMappedFreeSplitParts() {
-  return UseFastNoPartsHotPath() || FLAGS_vmm_v2_fake_mapped_free_split_parts;
+bool UseDiagnosticMappedFreeSplitNoParts() {
+  return UseDiagnosticNoPartsHotPath() ||
+         FLAGS_vmm_v2_fake_mapped_free_split_parts;
 }
 
 bool UseLazyBlockParts() { return FLAGS_vmm_v2_lazy_block_parts; }
 
-bool UseFakeFreeMergeParts() {
-  return UseFastNoPartsHotPath() || UseLazyBlockParts() ||
-         FLAGS_vmm_v2_fake_free_merge_parts;
+bool UseDiagnosticFreeMergeNoParts() {
+  return UseDiagnosticNoPartsHotPath() || FLAGS_vmm_v2_fake_free_merge_parts;
 }
 
 bool MayHaveIncompleteParts() {
-  return UseFastNoPartsHotPath() || UseLazyBlockParts() ||
+  return UseLazyBlockParts() || UseDiagnosticNoPartsHotPath() ||
          FLAGS_vmm_v2_fake_mapped_free_split_parts ||
          FLAGS_vmm_v2_fake_free_merge_parts;
 }
 
-bool NeedFakeSubBlockView(const BlockV2& block) {
-  return UseFastNoPartsHotPath() || UseLazyBlockParts() ||
+bool UseNoPartsSubBlockView(const BlockV2& block) {
+  return UseLazyBlockParts() || UseDiagnosticNoPartsHotPath() ||
          (MayHaveIncompleteParts() && !block.HasCompleteAllocationParts());
+}
+
+bool UseNoPartsMappedFreeSplit(const BlockV2& block) {
+  return UseLazyBlockParts() || UseDiagnosticMappedFreeSplitNoParts() ||
+         (MayHaveIncompleteParts() && !block.HasCompleteAllocationParts());
+}
+
+bool UseNoPartsFreeMerge() {
+  return UseLazyBlockParts() || UseDiagnosticFreeMergeNoParts();
 }
 
 bool ShouldConsumeWholeFreeBlock(size_t remainder_size) {
@@ -397,7 +406,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   const size_t remaining_size = total_new_size - requested_size;
 
   BlockV2 block =
-      NeedFakeSubBlockView(combined_free_block)
+      UseNoPartsSubBlockView(combined_free_block)
           ? combined_free_block.MakeMappedActiveSubBlockWithoutParts(
                 0, requested_size)
           : combined_free_block.MakeMappedActiveSubBlock(0, requested_size);
@@ -405,7 +414,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
 
   if (remaining_size > 0) {
     BlockV2 remaining_block =
-        NeedFakeSubBlockView(combined_free_block)
+        UseNoPartsSubBlockView(combined_free_block)
             ? combined_free_block.MakeMappedFreeSubBlockWithoutParts(
                   requested_size, remaining_size)
             : combined_free_block.MakeMappedFreeSubBlock(requested_size,
@@ -814,13 +823,11 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   const bool has_remainder = block_size > size;
   const size_t remaining_size = has_remainder ? block_size - size : 0;
   const bool consume_whole_block = ShouldConsumeWholeFreeBlock(remaining_size);
-  const bool use_fake_split =
-      UseFakeMappedFreeSplitParts() || UseLazyBlockParts() ||
-      (MayHaveIncompleteParts() && !block_it->HasCompleteAllocationParts());
+  const bool use_no_parts_split = UseNoPartsMappedFreeSplit(*block_it);
   if (has_remainder && !consume_whole_block) {
     auto split_start = detail_tick();
     BlockV2 remaining_block =
-        use_fake_split
+        use_no_parts_split
             ? block_it->MakeMappedFreeSubBlockWithoutParts(size, remaining_size)
             : block_it->SplitMappedFreeSuffixFromPrefix(size);
     if (part_stats != nullptr) {
@@ -829,7 +836,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
     // The free remainder keeps the source block's remap-safety stream. The
     // reused prefix is cleared by MarkActive().
 
-    if (use_fake_split) {
+    if (use_no_parts_split) {
       *block_it = block_it->MakeMappedActiveSubBlockWithoutParts(0, size);
     }
     if (detail_stats != nullptr) {
@@ -850,7 +857,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   }
 
   auto mark_active_start = detail_tick();
-  if (use_fake_split) {
+  if (use_no_parts_split) {
     if (!has_remainder || consume_whole_block) {
       *block_it = block_it->MakeMappedActiveSubBlockWithoutParts(
           0, consume_whole_block ? block_size : size);
@@ -1119,7 +1126,7 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it,
         detail->erase_free_us += detail_elapsed(erase_free_start);
       }
       auto absorb_start = detail_tick();
-      if (UseFakeFreeMergeParts()) {
+      if (UseNoPartsFreeMerge()) {
         prev->AbsorbAdjacentBlockWithoutParts(&*it);
       } else {
         prev->AbsorbAdjacentBlock(&*it);
@@ -1147,7 +1154,7 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it,
       detail->erase_free_us += detail_elapsed(erase_free_start);
     }
     auto absorb_start = detail_tick();
-    if (UseFakeFreeMergeParts()) {
+    if (UseNoPartsFreeMerge()) {
       it->AbsorbAdjacentBlockWithoutParts(&*next);
     } else {
       it->AbsorbAdjacentBlock(&*next);

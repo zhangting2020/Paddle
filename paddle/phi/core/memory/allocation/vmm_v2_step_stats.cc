@@ -117,11 +117,11 @@ PHI_DEFINE_EXPORTED_bool(
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_lazy_block_parts,
     false,
-    "Experimental VMM V2 mode: keep normal allocator split/merge hot paths "
-    "free of eager BlockV2 backing-part materialization. Backing details are "
-    "queried from the VMM backing map only when IPC/remap/tensor-info needs "
-    "them. Unlike FLAGS_vmm_v2_fast_hot_path_no_parts, this does not skip "
-    "remap-safety metadata.");
+    "VMM V2 mode: keep normal allocator split/merge/grow hot paths free of "
+    "eager BlockV2 backing-part materialization. IPC, remap, and tensor-info "
+    "queries collect backing details from the page-level VMM backing map when "
+    "needed. Unlike FLAGS_vmm_v2_fast_hot_path_no_parts, this preserves "
+    "remap-safety metadata and is intended to be compatible with remap.");
 
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_skip_remap_safety_hot_path,

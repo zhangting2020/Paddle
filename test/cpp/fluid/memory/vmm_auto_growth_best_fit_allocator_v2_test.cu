@@ -20,6 +20,7 @@
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator_v2.h"
 
 COMMON_DECLARE_bool(vmm_v2_compact_all);
+PHI_DECLARE_bool(vmm_v2_lazy_block_parts);
 
 namespace paddle {
 namespace memory {
@@ -76,6 +77,19 @@ size_t AllocationPartBytes(const BlockV2& block) {
   }
   return bytes;
 }
+
+class ScopedBoolFlag {
+ public:
+  ScopedBoolFlag(bool* flag, bool value) : flag_(flag), old_value_(*flag) {
+    *flag_ = value;
+  }
+
+  ~ScopedBoolFlag() { *flag_ = old_value_; }
+
+ private:
+  bool* flag_;
+  bool old_value_;
+};
 
 }  // namespace
 
@@ -325,6 +339,56 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, ThreeWayMerge) {
   EXPECT_EQ(merged.type_, BlockType::kFree);
   EXPECT_EQ(merged.size_, underlying->HandleSize() * 3);
   EXPECT_EQ(merged.AllocationPartCount(), 3UL);
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2,
+     LazyBlockPartsSkipsHotPathPartsButCollectsFromBackingMap) {
+  ScopedBoolFlag lazy_guard(&FLAGS_vmm_v2_lazy_block_parts, true);
+
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
+
+  auto a = allocator.Allocate(underlying->HandleSize());
+  auto b = allocator.Allocate(underlying->HandleSize());
+  auto c = allocator.Allocate(underlying->HandleSize());
+  ASSERT_NE(a, nullptr);
+  ASSERT_NE(b, nullptr);
+  ASSERT_NE(c, nullptr);
+
+  a.reset();
+  c.reset();
+  b.reset();
+
+  ASSERT_EQ(allocator.all_blocks().size(), 1UL);
+  const auto& merged = allocator.all_blocks().front();
+  ASSERT_TRUE(merged.IsFree());
+  EXPECT_EQ(merged.size_, underlying->HandleSize() * 3);
+  EXPECT_EQ(merged.AllocationPartCount(), 0UL);
+
+  const size_t requested_size = underlying->HandleSize() + 256UL;
+  auto reused = allocator.Allocate(requested_size);
+  ASSERT_NE(reused, nullptr);
+  ASSERT_EQ(allocator.all_blocks().size(), 2UL);
+
+  auto block_it = allocator.all_blocks().begin();
+  ASSERT_TRUE(block_it->IsActive());
+  EXPECT_EQ(block_it->ptr_, reused->ptr());
+  EXPECT_EQ(block_it->size_, requested_size);
+  EXPECT_EQ(block_it->AllocationPartCount(), 0UL);
+  ++block_it;
+  ASSERT_TRUE(block_it->IsFree());
+  EXPECT_EQ(block_it->size_, underlying->HandleSize() * 2 - 256UL);
+  EXPECT_EQ(block_it->AllocationPartCount(), 0UL);
+
+  std::vector<BlockPart> parts;
+  ASSERT_TRUE(
+      allocator.CollectTensorParts(reused->ptr(), requested_size, &parts));
+  ASSERT_EQ(parts.size(), 2UL);
+  EXPECT_EQ(parts[0].chunk_rel_off, 0UL);
+  EXPECT_EQ(parts[0].len, underlying->HandleSize());
+  EXPECT_EQ(parts[1].chunk_rel_off, 0UL);
+  EXPECT_EQ(parts[1].len, 256UL);
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2, CompactRemapsWholeFreeHandleToTail) {
