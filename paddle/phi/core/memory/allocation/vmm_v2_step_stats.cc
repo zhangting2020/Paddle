@@ -125,12 +125,12 @@ PHI_DEFINE_EXPORTED_bool(
 
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_legacy_mapped_free_split,
-    false,
-    "Diagnostic-only VMM V2 mode: use the pre-optimized mapped-free split "
-    "path (MakeMappedFreeSubBlock + TrimToPrefix) instead of "
-    "SplitMappedFreeSuffixFromPrefix when allocating from a mapped free block. "
-    "This isolates whether the newer split implementation regresses allocator "
-    "hot-path performance.");
+    true,
+    "VMM V2 mapped-free split mode: use the legacy split path "
+    "(MakeMappedFreeSubBlock + TrimToPrefix) when allocating from a mapped "
+    "free block. This is the default because SplitMappedFreeSuffixFromPrefix "
+    "regressed the allocator hot path in large-scale training. Set this flag "
+    "to false only to diagnose or benchmark the newer split implementation.");
 
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_skip_remap_safety_hot_path,

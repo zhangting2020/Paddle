@@ -21,6 +21,7 @@
 
 COMMON_DECLARE_bool(vmm_v2_compact_all);
 PHI_DECLARE_bool(vmm_v2_lazy_block_parts);
+PHI_DECLARE_bool(vmm_v2_legacy_mapped_free_split);
 
 namespace paddle {
 namespace memory {
@@ -339,6 +340,63 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, ThreeWayMerge) {
   EXPECT_EQ(merged.type_, BlockType::kFree);
   EXPECT_EQ(merged.size_, underlying->HandleSize() * 3);
   EXPECT_EQ(merged.AllocationPartCount(), 3UL);
+}
+
+void ExpectMappedFreeSplitKeepsCompleteParts(bool legacy_split) {
+  ScopedBoolFlag split_guard(&FLAGS_vmm_v2_legacy_mapped_free_split,
+                             legacy_split);
+
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
+
+  auto a = allocator.Allocate(underlying->HandleSize());
+  auto b = allocator.Allocate(underlying->HandleSize());
+  auto c = allocator.Allocate(underlying->HandleSize());
+  ASSERT_NE(a, nullptr);
+  ASSERT_NE(b, nullptr);
+  ASSERT_NE(c, nullptr);
+
+  a.reset();
+  c.reset();
+  b.reset();
+
+  ASSERT_EQ(allocator.all_blocks().size(), 1UL);
+  ASSERT_EQ(allocator.all_blocks().front().AllocationPartCount(), 3UL);
+
+  const size_t requested_size = underlying->HandleSize() + 256UL;
+  auto reused = allocator.Allocate(requested_size);
+  ASSERT_NE(reused, nullptr);
+  ASSERT_EQ(allocator.all_blocks().size(), 2UL);
+
+  auto block_it = allocator.all_blocks().begin();
+  ASSERT_TRUE(block_it->IsActive());
+  EXPECT_EQ(block_it->ptr_, reused->ptr());
+  EXPECT_EQ(block_it->size_, requested_size);
+  EXPECT_EQ(AllocationPartBytes(*block_it), requested_size);
+
+  std::vector<BlockPart> parts;
+  ASSERT_TRUE(
+      allocator.CollectTensorParts(reused->ptr(), requested_size, &parts));
+  ASSERT_EQ(parts.size(), 2UL);
+  EXPECT_EQ(parts[0].chunk_rel_off, 0UL);
+  EXPECT_EQ(parts[0].len, underlying->HandleSize());
+  EXPECT_EQ(parts[1].chunk_rel_off, 0UL);
+  EXPECT_EQ(parts[1].len, 256UL);
+
+  ++block_it;
+  ASSERT_TRUE(block_it->IsFree());
+  EXPECT_EQ(block_it->size_, underlying->HandleSize() * 2 - 256UL);
+  EXPECT_EQ(AllocationPartBytes(*block_it), block_it->size_);
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2, LegacyMappedFreeSplitKeepsCompleteParts) {
+  ExpectMappedFreeSplitKeepsCompleteParts(true);
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2,
+     OptimizedMappedFreeSplitKeepsCompleteParts) {
+  ExpectMappedFreeSplitKeepsCompleteParts(false);
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
