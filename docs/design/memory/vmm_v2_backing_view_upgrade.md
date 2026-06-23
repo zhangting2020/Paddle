@@ -1,7 +1,7 @@
 # VMM V2 架构升级：Allocation View / Backing View 分离
 
-> 日期: 2026-05-18
-> 状态: 设计中；Phase 2b 过渡实现已完成 VMM V2 IPC 主链路
+> 日期: 2026-05-18；最近更新: 2026-06-24
+> 状态: VMM V2 no-parts hot path 已正式化；fake/legacy 诊断开关已删除；完整 replay 回归通过
 > 前序: `vmm_allocator_v2_final_plan.md`, `vmm_defrag_v2_free_block_remap.md`
 > 目标: 降低 compactor 复杂度和 bug 面，为 IPC/多设备扩展打基础
 
@@ -81,35 +81,58 @@
 
 #### 本地 no-parts perf 结果
 
-2026-06-23 当前工作区 `build/python` smoke：
+2026-06-24 当前正式 wheel（运行时 commit
+`4bf6c67d277238de7dbeef5c7373e1152499c1c2`）复测：
 
 ```bash
 python tools/vmm_v2_allocator_perf_benchmark.py \
   --device 0 \
   --paddle-build-python /work/dev_tool/Paddle/build/python \
-  --handles-mb 2 16 \
-  --patterns fixed random \
-  --pool-mb 4096 \
-  --alloc-mb 64 \
-  --steps 8 \
-  --allocs-per-step 32 \
-  --output-dir tmp/vmm_v2_allocator_perf_bench_no_parts_post_cleanup
+  --output-dir /work/dev_tool/Paddle/tmp/vmm_v2_allocator_perf_final_20260624
 ```
 
 结果摘要：
 
-| Handle MiB | Pattern | mapped_free cnt | mapped_free time |
-|---:|---|---:|---:|
-| 2 | fixed | 256 | 0.034ms |
-| 2 | random | 256 | 0.028ms |
-| 16 | fixed | 256 | 0.050ms |
-| 16 | random | 256 | 0.048ms |
+| Handle MiB | Pattern | Steps | mapped_free cnt | mapped_free time | h2/h16 ratio |
+|---:|---|---:|---:|---:|---:|
+| 2 | fixed | 20 | 640 | 0.120ms | 1.41x |
+| 16 | fixed | 20 | 640 | 0.085ms | - |
+| 2 | random | 20 | 640 | 0.083ms | 1.14x |
+| 16 | random | 20 | 640 | 0.073ms | - |
 
 该结果说明：
 
 1. 正常 mapped-free reuse/split 路径已经不再 materialize `BlockV2::parts_`。
 2. h=2 和 h=16 的 allocator CPU 代价已经同量级；旧的 h=2 parts 粒度放大不再复现。
-3. 端到端仍需安装包后用 h=2 clean 训练和强制 compact 回归确认模型吞吐与 remap correctness。
+3. 该 benchmark 已不再包含 fake/legacy parts 模式，只覆盖正式 h=2/h=16、fixed/random 组合。
+4. 端到端模型吞吐仍需在 4 机 clean 训练环境补测；这不是本地 allocator benchmark 能替代的验证。
+
+#### 2026-06-24 正式回归状态
+
+`4bf6c67d27` 删除 fake/legacy 诊断开关后，重新编译 wheel 并安装，完成以下验证：
+
+| 验证项 | 结果 |
+|---|---|
+| VMM V2 C++ targeted tests | PASS: `cuda_virtual_mem_allocator_v2_test`、`vmm_auto_growth_best_fit_allocator_v2_test`、`vmm_auto_growth_best_fit_multi_pool_allocator_v2_test` |
+| VMM V2 Python IPC smoke | PASS: `_share_cuda/_new_shared_cuda`、slice export、multiprocessing reductions、reduce-scatter fused buffer、FusionStorage |
+| VMM V2 full replay regression | PASS: `/work/MemoryTools/logs/regression/20260624_000834/`, 8/8 passed |
+| allocator mapped-free perf | PASS: `/work/dev_tool/Paddle/tmp/vmm_v2_allocator_perf_final_20260624/summary.md` |
+
+full replay 关键指标：
+
+| case | result |
+|---|---|
+| `ernie_35g_remap_on` | OOM 48, cleanup 0 |
+| `ernie_35g_remap_off` | OOM 61, cleanup 0 |
+| `dsv3_30g` | OOM 38, cleanup 0 |
+| `dsv3_45g_bounded` | OOM 3509, cleanup 0 |
+| `dsv3_45g_compact_all` | OOM 3501, cleanup 0 |
+| `probe_standard` | success=1 |
+| `probe_split_fill` | 8/10 |
+| `compact_no_grow` | SUCCESS, cleanup 0 |
+
+错误信号 grep 未发现 force-release、BackingMap mismatch、validation failed、invalid range、
+cudaError、corrupted size、double free、NCCL error 或 crash。
 
 #### 本地 perf benchmark
 
