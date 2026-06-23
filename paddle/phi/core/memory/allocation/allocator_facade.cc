@@ -148,6 +148,20 @@ namespace {
 
 constexpr size_t kVMMV2DefaultHandleSize = 2UL << 20;
 
+void ClearGpuLastErrorBeforeRelease(const Place& place) {
+#if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
+  if (phi::is_gpu_place(place)) {
+    // Release/empty_cache may run after user code catches OOM. Clear the CUDA
+    // runtime error slot before allocator lookup/device guard; otherwise a
+    // stale cudaErrorMemoryAllocation can make cudaSetDevice fail before the
+    // actual pool release starts.
+    (void)platform::GpuGetLastError();
+  }
+#else
+  (void)place;
+#endif
+}
+
 }  // namespace
 
 static bool IsCUDAGraphCapturing() {
@@ -1848,6 +1862,7 @@ AllocationPtr AllocatorFacade::Alloc(const Place& place, size_t size) {
 }
 
 uint64_t AllocatorFacade::Release(const Place& place) {
+  ClearGpuLastErrorBeforeRelease(place);
   return GetPrivate()
       ->GetAllocator(place, /* A non-zero num to choose allocator_ */ 1)
       ->Release(place);
@@ -1951,6 +1966,7 @@ bool AllocatorFacade::IsCUDAMallocAsyncAllocatorUsed() {
 
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
 uint64_t AllocatorFacade::Release(const GPUPlace& place, gpuStream_t stream) {
+  ClearGpuLastErrorBeforeRelease(place);
   AllocatorFacadePrivate* m = GetPrivate();
   if (!m->IsStreamSafeCUDAAllocatorUsed() &&
       !m->IsCUDAMallocAsyncAllocatorUsed()) {

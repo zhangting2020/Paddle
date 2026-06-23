@@ -25,6 +25,7 @@
 #include "paddle/phi/core/enforce.h"
 #include "paddle/phi/core/memory/allocation/free_block_remap_compactor.h"
 #include "paddle/phi/core/memory/allocation/vmm_v2_step_stats.h"
+#include "paddle/phi/core/platform/device/gpu/gpu_info.h"
 
 COMMON_DECLARE_bool(vmm_v2_compact_all);
 COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
@@ -52,6 +53,8 @@ uint64_t ElapsedMicros(Clock::time_point start, Clock::time_point end) {
       std::chrono::duration_cast<std::chrono::microseconds>(end - start)
           .count());
 }
+
+void ClearGpuLastError() { (void)platform::GpuGetLastError(); }
 
 template <typename Map, typename Key, typename Value>
 void EmplaceOrEnforce(Map* map,
@@ -313,6 +316,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
                                               std::move(combined_free_block));
         InsertFreeBlock(restored_it);
       }
+      ClearGpuLastError();
       PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
           "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes.\n"
           "Underlying VMM allocation failure:\n%s",
@@ -326,6 +330,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
                                               std::move(combined_free_block));
         InsertFreeBlock(restored_it);
       }
+      ClearGpuLastError();
       PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
           "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes.\n"
           "Underlying VMM allocation exception:\n%s",
@@ -339,6 +344,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
                                               std::move(combined_free_block));
         InsertFreeBlock(restored_it);
       }
+      ClearGpuLastError();
       PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
           "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes "
           "with an unknown underlying VMM allocation exception.",

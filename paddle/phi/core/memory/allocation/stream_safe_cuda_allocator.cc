@@ -48,6 +48,8 @@ uint64_t ElapsedMicros(Clock::time_point start, Clock::time_point end) {
           .count());
 }
 
+void ClearGpuLastError() { (void)phi::backends::gpu::GpuGetLastError(); }
+
 VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVMMV2MultiPoolAllocator(
     const std::shared_ptr<Allocator>& allocator) {
   if (allocator == nullptr) {
@@ -308,6 +310,7 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
           try {
             underlying_allocation = underlying_allocator_->Allocate(size);
           } catch (const BadAlloc& final_bad_alloc) {
+            ClearGpuLastError();
             PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
                 "Allocation of %zu bytes failed after compact "
                 "(remap defrag, %zu bytes compacted).\n"
@@ -321,6 +324,7 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
                 final_bad_alloc.what()));
           }
         } else {
+          ClearGpuLastError();
           PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
               "Allocation of %zu bytes failed after VMM V2 compact pre-check "
               "found no useful remap work.\n"
@@ -331,6 +335,7 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
               second_failure.c_str()));
         }
       } else {
+        ClearGpuLastError();
         PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
             "Allocation of %zu bytes failed.\n"
             "Initial allocation failure:\n%s\n"

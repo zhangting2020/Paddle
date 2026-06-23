@@ -1,6 +1,6 @@
 # VMM V2 回归验证 Checklist
 
-> 最后验证日期: 2026-06-01 (GPU 7 for VMM V2 replay cases)
+> 最后验证日期: 2026-06-23 (GPU 0 for VMM V2 stale-OOM cleanup replay cases)
 > 验证分支: `vmm_v2_pr3` (`/work/Paddle`), `vmm_v2_pr4` (`/work/dev_tool/Paddle`)
 > Backing View 实验分支: `feature/vmm-v2-backing-view`
 > 环境: A100-80G, CUDA 12.9, Python 3.12
@@ -326,6 +326,7 @@ grep -Ei "BackingMap.*(mismatch|validation failed|invalid range|reconfigure)" "$
 
 | 日期/时间 | 范围 | 日志/验证 | 结论 |
 |-----------|------|-----------|------|
+| 2026-06-23 19:37-20:25 | no-parts hot path 后 stale CUDA OOM cleanup 修复验证 | 失败批次: `/work/MemoryTools/logs/regression/20260623_194247/`、`20260623_194251/`、`20260623_194253/`、`20260623_194255/`; 修复后补跑: `/work/MemoryTools/logs/regression/20260623_201605/`、`20260623_201651/`、`20260623_201734/`、`20260623_201817/` | C++ VMM 单测 3/3 PASS；初始批次中 `dsv3_30g`、`ernie_35g_remap_on/off`、`dsv3_45g_compact_all` 均在 replay 结束后 `paddle.device.cuda.empty_cache()` 入口因 stale `cudaErrorMemoryAllocation` 失败；monkey-patch `core._check_last_cuda_error()` 后可通过，定位为 CUDA runtime error slot 未清理，而不是 VMM release 泄漏；在 `AllocatorFacade::Release` 入口清理后补跑通过：`dsv3_30g ooms=38 post_cleanup=0.0G elapsed=6.77s`、`ernie_35g_remap_off ooms=61 post_cleanup=0.0G elapsed=10.88s`、`ernie_35g_remap_on ooms=48 post_cleanup=0.0G elapsed=10.08s`、`dsv3_45g_compact_all ooms=3501 post_cleanup=0.0G elapsed=416.0s` |
 | 2026-06-23 11:20-11:39 | lazy remap event / no-parts merge / no-stream safety 修复后 clean GPU 完整回归 | `/work/MemoryTools/logs/regression/20260623_112045/` | 8/8 PASS，用时 18m41s；运行前 GPU 7 起始占用为 0MiB，Python 运行时 commit 为 `7b1f3b06a235e519f20cc7359a24bed97925121f`，wheel 包含当前 working tree 编译产物；`ernie_35g_remap_on=48`、`ernie_35g_remap_off=61`、`dsv3_30g=38`、`dsv3_45g_bounded=3509`、`dsv3_45g_compact_all=3501`、`probe_standard success=1`、`probe_split_fill=8/10`、`compact_no_grow cleanup=0.000G`；所有 case 单日志 grep 无 force-release、BackingMap mismatch/validation failed/invalid range、crash/double-free 等硬错误，主要 replay case `post_cleanup_reserved_gib=0.0`；结果与 `20260608_184225` 对齐 |
 | 2026-06-23 10:51-11:14 | lazy remap event / no-parts merge / no-stream safety 修复后非 clean GPU 对照回归 | `/work/MemoryTools/logs/regression/20260623_105127/` | 8/8 PASS，但运行前 GPU 7 已占用 428MiB，导致 `peak_reserved_gib` 降到约 78.320GiB，OOM/elapsed 相比历史最新显著变差：`ernie_35g_remap_on=183`、`ernie_35g_remap_off=181`、`dsv3_45g_bounded=4265`、`dsv3_45g_compact_all=3875`；清理残留进程并在 0MiB 起始占用下重跑后恢复到 `20260623_112045`，因此本轮不作为代码回退依据，只保留为 GPU 起始占用敏感性的对照记录 |
 | 2026-06-09 | PR 拆分与 upstream/develop rebase 后静态检查 | PR1 `166c99da45`、PR2 `d5a5f4c512`、PR3 `d45791a9c1` | 3 个串行 PR 已基于 `upstream/develop e313387970` 重新整理：PR1 backing map + CUDA VMM allocator，PR2 best-fit/remap/compact，PR3 runtime facade + StreamSafe/multi-pool + IPC/Python；`merge-base --is-ancestor` 依赖链检查通过，PR1/PR2/PR3 `git diff --check` 通过。最终 accessor 命名恢复为小写后尚未在 split worktree 单独编译 |
