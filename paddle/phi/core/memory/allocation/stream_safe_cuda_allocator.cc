@@ -27,7 +27,6 @@
 #include "paddle/phi/core/memory/allocation/vmm_v2_step_stats.h"
 
 COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
-PHI_DECLARE_bool(vmm_v2_fast_hot_path_no_parts);
 PHI_DECLARE_bool(vmm_v2_skip_remap_safety_hot_path);
 
 #if defined(PADDLE_WITH_CUDA)
@@ -70,8 +69,7 @@ VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVMMV2MultiPoolAllocator(
 
 void MarkVMMV2RemapPendingStream(StreamSafeCUDAAllocator* allocator,
                                  StreamSafeCUDAAllocation* allocation) {
-  if (FLAGS_vmm_v2_fast_hot_path_no_parts ||
-      FLAGS_vmm_v2_skip_remap_safety_hot_path || !FLAGS_vmm_v2_remap_on_oom) {
+  if (FLAGS_vmm_v2_skip_remap_safety_hot_path || !FLAGS_vmm_v2_remap_on_oom) {
     return;
   }
   if (allocator->GetVMMV2Allocator() == nullptr) {

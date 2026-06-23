@@ -69,14 +69,9 @@
 5. remap restore 残留 mapped-free segment 使用 no-parts block。
 6. IPC、tensor-info、remap source collect 继续从 page-level `backing_map_` 查询 backing details。
 
-保留但已降级为兼容/诊断语义的开关：
-
-| FLAG | 当前语义 |
-|---|---|
-| `FLAGS_vmm_v2_lazy_block_parts` | 默认 true，但正常 hot path 已始终 no-parts；该 flag 不再切换核心路径 |
-| `FLAGS_vmm_v2_legacy_mapped_free_split` | 默认 false，旧 parts-based split 不再作为正常 hot path |
-| `FLAGS_vmm_v2_fast_hot_path_no_parts` | deprecated，hot path 默认已经 no-parts |
-| `FLAGS_vmm_v2_fake_block_parts` / `FLAGS_vmm_v2_fake_mapped_free_split_parts` / `FLAGS_vmm_v2_fake_free_merge_parts` | deprecated，保留用于旧脚本兼容 |
+此前用于定位性能问题的 fake/legacy parts 诊断开关已经移除。当前实现不再通过 flag
+切换 no-parts hot path；正常 allocator block-list 路径始终不维护
+`BlockV2::parts_`。
 
 去 parts 后仍必须保留的正确性约束：
 
@@ -93,7 +88,6 @@ python tools/vmm_v2_allocator_perf_benchmark.py \
   --device 0 \
   --paddle-build-python /work/dev_tool/Paddle/build/python \
   --handles-mb 2 16 \
-  --split-modes legacy optimized lazy \
   --patterns fixed random \
   --pool-mb 4096 \
   --alloc-mb 64 \
@@ -104,27 +98,18 @@ python tools/vmm_v2_allocator_perf_benchmark.py \
 
 结果摘要：
 
-| Handle MiB | Split label | Pattern | mapped_free cnt | mapped_free time | avg src parts | avg alloc parts | avg rem parts |
-|---:|---|---|---:|---:|---:|---:|---:|
-| 2 | legacy | fixed | 256 | 0.034ms | 0.0 | 0.0 | 0.0 |
-| 2 | legacy | random | 256 | 0.028ms | 0.0 | 0.0 | 0.0 |
-| 2 | optimized | fixed | 256 | 0.058ms | 0.0 | 0.0 | 0.0 |
-| 2 | optimized | random | 256 | 0.071ms | 0.0 | 0.0 | 0.0 |
-| 2 | lazy | fixed | 256 | 0.044ms | 0.0 | 0.0 | 0.0 |
-| 2 | lazy | random | 256 | 0.034ms | 0.0 | 0.0 | 0.0 |
-| 16 | legacy | fixed | 256 | 0.050ms | 0.0 | 0.0 | 0.0 |
-| 16 | legacy | random | 256 | 0.048ms | 0.0 | 0.0 | 0.0 |
-| 16 | optimized | fixed | 256 | 0.063ms | 0.0 | 0.0 | 0.0 |
-| 16 | optimized | random | 256 | 0.038ms | 0.0 | 0.0 | 0.0 |
-| 16 | lazy | fixed | 256 | 0.032ms | 0.0 | 0.0 | 0.0 |
-| 16 | lazy | random | 256 | 0.063ms | 0.0 | 0.0 | 0.0 |
+| Handle MiB | Pattern | mapped_free cnt | mapped_free time |
+|---:|---|---:|---:|
+| 2 | fixed | 256 | 0.034ms |
+| 2 | random | 256 | 0.028ms |
+| 16 | fixed | 256 | 0.050ms |
+| 16 | random | 256 | 0.048ms |
 
 该结果说明：
 
 1. 正常 mapped-free reuse/split 路径已经不再 materialize `BlockV2::parts_`。
 2. h=2 和 h=16 的 allocator CPU 代价已经同量级；旧的 h=2 parts 粒度放大不再复现。
-3. `legacy/optimized/lazy` 现在只是兼容标签；当前 smoke 的差异是几十微秒内的测量波动，不再有旧实现的数量级 gap。
-4. 端到端仍需安装包后用 h=2 clean 训练和强制 compact 回归确认模型吞吐与 remap correctness。
+3. 端到端仍需安装包后用 h=2 clean 训练和强制 compact 回归确认模型吞吐与 remap correctness。
 
 #### 本地 perf benchmark
 
@@ -134,7 +119,6 @@ python tools/vmm_v2_allocator_perf_benchmark.py \
 python tools/vmm_v2_allocator_perf_benchmark.py \
   --device 0 \
   --handles-mb 2 16 \
-  --split-modes legacy optimized lazy \
   --patterns fixed random \
   --pool-mb 4096 \
   --alloc-mb 64 \
@@ -154,15 +138,14 @@ python tools/vmm_v2_allocator_perf_benchmark.py \
 1. 先分配一个大 VMM tensor 使 pool grow。
 2. 释放该 tensor，制造 mapped-free backing。
 3. 反复从 mapped-free block 中分配/释放较小 tensor。
-4. 通过 `_vmm_v2_step_stats_snapshot_and_reset(device)` 采集 `mapped_free_total_us`、`alloc_total_us`、`free_total_us` 和 parts 统计。
+4. 通过 `_vmm_v2_step_stats_snapshot_and_reset(device)` 采集 `mapped_free_total_us`、`alloc_total_us` 和 `free_total_us`。
 
 判读优先级：
 
 | 指标 | 用途 |
 |---|---|
-| `avg/max src parts` | 当前默认应为 0；若非 0，说明某条正常 split/merge/grow/remap block-list 路径仍在维护 parts |
-| `h2 legacy / h16 legacy mapped_free` | 观察 handle size 对 allocator CPU 热路径的剩余影响；no-parts 后不应再有数量级差异 |
-| `legacy/optimized/lazy` 之间的差异 | 当前应基本等价；若差异明显，说明兼容开关仍在影响正常 hot path |
+| `mapped_free_total_us` | 观察 mapped-free reuse/split 热路径 CPU 成本 |
+| `h2 / h16 mapped_free` | 观察 handle size 对 allocator CPU 热路径的剩余影响；no-parts 后不应再有数量级差异 |
 
 这个 benchmark 不是 DeepEP 或完整模型吞吐替代品。它只用于快速确认 allocator mapped-free reuse/split 路径是否发生明显 CPU 回退；模型侧仍需用 clean 训练日志确认端到端吞吐。
 

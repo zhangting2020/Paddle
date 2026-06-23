@@ -257,7 +257,6 @@ COMMON_DECLARE_bool(use_mkldnn);
 COMMON_DECLARE_bool(use_onednn);
 COMMON_DECLARE_int64(offload_retry_times);
 COMMON_DECLARE_string(prim_backward_blacklist);
-PHI_DECLARE_bool(vmm_tensor_info_fake);
 
 // disable auto conversion to list in Python
 PYBIND11_MAKE_OPAQUE(phi::TensorArray);
@@ -3838,22 +3837,6 @@ All parameter, weight, gradient are variables in Paddle.
     info["ptr"] = reinterpret_cast<uintptr_t>(data_ptr);
     info["bytes"] = bytes;
     info["device_id"] = place.GetDeviceId();
-
-    if (FLAGS_vmm_tensor_info_fake) {
-      info["found"] = true;
-      info["reason"] = "fake";
-      info["part_count"] = 0;
-      info["handle_count"] = 0;
-      info["handle_size"] = 0;
-      info["handle_size_count"] = 0;
-      info["first_handle_base"] = 0;
-      info["last_handle_base"] = 0;
-      info["first_slice_base"] = reinterpret_cast<uintptr_t>(data_ptr);
-      info["last_slice_end"] = reinterpret_cast<uintptr_t>(data_ptr) + bytes;
-      info["mapped_range_count"] = 0;
-      info["parts"] = py::list();
-      return info;
-    }
 
     auto *mutable_ptr = const_cast<void *>(data_ptr);
     paddle::memory::VmmTensorPartsVisitor parts_visitor(

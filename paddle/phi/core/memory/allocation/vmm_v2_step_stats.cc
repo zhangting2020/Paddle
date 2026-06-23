@@ -35,59 +35,6 @@ PHI_DEFINE_EXPORTED_bool(
     "only.");
 
 PHI_DEFINE_EXPORTED_bool(
-    vmm_tensor_info_fake,
-    false,
-    "Return a cheap fake result from core.vmm_tensor_info without walking VMM "
-    "backing parts. This is for VMM performance diagnosis only.");
-
-PHI_DEFINE_EXPORTED_bool(
-    vmm_v2_disable_ipc_export_mark,
-    false,
-    "Skip marking VMM V2 backing pages as IPC-exported in CollectTensorParts. "
-    "This is for performance diagnosis only and may be unsafe for real IPC "
-    "users.");
-
-PHI_DEFINE_EXPORTED_bool(
-    vmm_v2_fake_collect_tensor_parts,
-    false,
-    "Make VMM V2 CollectTensorParts return a fake successful result after "
-    "active-block lookup, without collecting backing parts or marking IPC "
-    "exported. This is for performance diagnosis only and may be unsafe for "
-    "real IPC users.");
-
-PHI_DEFINE_EXPORTED_bool(
-    vmm_v2_record_mapped_free_parts,
-    false,
-    "Record mapped-free block part counts in VMM V2 allocation step stats. "
-    "Disabled by default because it walks block parts on the allocation hot "
-    "path.");
-
-PHI_DEFINE_EXPORTED_bool(
-    vmm_v2_fake_share_cuda_ipc_meta,
-    false,
-    "Make DenseTensor._share_cuda return fake VMM IPC metadata without "
-    "collecting/exporting VMM chunks. This is for diagnostics only and is only "
-    "valid when the returned metadata is not consumed by _new_shared_cuda.");
-
-PHI_DEFINE_EXPORTED_bool(
-    vmm_v2_fake_block_parts,
-    false,
-    "Deprecated diagnostic flag. VMM V2 no longer maintains BlockV2 backing "
-    "parts on normal alloc/free split and merge paths.");
-
-PHI_DEFINE_EXPORTED_bool(
-    vmm_v2_fake_mapped_free_split_parts,
-    false,
-    "Deprecated diagnostic flag. VMM V2 mapped-free allocation split no "
-    "longer slices BlockV2 backing parts on the normal hot path.");
-
-PHI_DEFINE_EXPORTED_bool(
-    vmm_v2_fake_free_merge_parts,
-    false,
-    "Deprecated diagnostic flag. VMM V2 free block merge no longer appends "
-    "BlockV2 backing parts on the normal hot path.");
-
-PHI_DEFINE_EXPORTED_bool(
     vmm_v2_round_alloc_to_handle_size,
     false,
     "Round VMM V2 best-fit allocation requests up to the pool handle size. "
@@ -100,29 +47,6 @@ PHI_DEFINE_EXPORTED_bool(
     "Round only VMM V2 large-pool best-fit allocation requests up to the pool "
     "handle size. This is a diagnostic-only mode to reduce steady-state "
     "split/size-class jitter with less small-pool memory blow-up.");
-
-PHI_DEFINE_EXPORTED_bool(
-    vmm_v2_fast_hot_path_no_parts,
-    false,
-    "Deprecated diagnostic flag. VMM V2 normal alloc/free/remap block-list "
-    "paths no longer maintain BlockV2 backing parts by default, so this flag "
-    "does not switch the allocator hot path.");
-
-PHI_DEFINE_EXPORTED_bool(
-    vmm_v2_lazy_block_parts,
-    true,
-    "Deprecated compatibility flag. VMM V2 now always keeps normal allocator "
-    "split/merge/grow/remap block-list paths free of eager BlockV2 "
-    "backing-part "
-    "materialization. IPC, remap, and tensor-info queries collect backing "
-    "details from the page-level VMM backing map when needed.");
-
-PHI_DEFINE_EXPORTED_bool(
-    vmm_v2_legacy_mapped_free_split,
-    false,
-    "Deprecated compatibility flag. VMM V2 mapped-free allocation no longer "
-    "uses the old parts-based legacy split path on the normal allocator hot "
-    "path; backing details are queried from the page-level backing map.");
 
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_skip_remap_safety_hot_path,
@@ -170,13 +94,6 @@ struct StepStats {
   uint64_t grow_total_us{0};
   uint64_t mapped_free_count{0};
   uint64_t mapped_free_total_us{0};
-  uint64_t mapped_free_split_count{0};
-  uint64_t mapped_free_source_parts_total{0};
-  uint64_t mapped_free_source_parts_max{0};
-  uint64_t mapped_free_alloc_parts_total{0};
-  uint64_t mapped_free_alloc_parts_max{0};
-  uint64_t mapped_free_remainder_parts_total{0};
-  uint64_t mapped_free_remainder_parts_max{0};
   uint64_t mapped_free_lower_bound_us{0};
   uint64_t mapped_free_stale_erase_count{0};
   uint64_t mapped_free_stale_erase_us{0};
@@ -243,10 +160,7 @@ void RecordVMMV2Alloc(int device_id,
                       uint64_t block_count,
                       uint64_t free_blocks,
                       uint64_t unmapped_free_blocks,
-                      uint64_t tail_offset,
-                      uint64_t mapped_free_source_parts,
-                      uint64_t mapped_free_alloc_parts,
-                      uint64_t mapped_free_remainder_parts) {
+                      uint64_t tail_offset) {
   if (!FLAGS_vmm_v2_step_stats || !IsValidDeviceId(device_id)) {
     return;
   }
@@ -270,18 +184,6 @@ void RecordVMMV2Alloc(int device_id,
   } else if (path_name == "mapped_free") {
     ++stats.mapped_free_count;
     stats.mapped_free_total_us += elapsed_us;
-    stats.mapped_free_source_parts_total += mapped_free_source_parts;
-    stats.mapped_free_source_parts_max =
-        std::max(stats.mapped_free_source_parts_max, mapped_free_source_parts);
-    stats.mapped_free_alloc_parts_total += mapped_free_alloc_parts;
-    stats.mapped_free_alloc_parts_max =
-        std::max(stats.mapped_free_alloc_parts_max, mapped_free_alloc_parts);
-    stats.mapped_free_remainder_parts_total += mapped_free_remainder_parts;
-    stats.mapped_free_remainder_parts_max = std::max(
-        stats.mapped_free_remainder_parts_max, mapped_free_remainder_parts);
-    if (mapped_free_remainder_parts > 0) {
-      ++stats.mapped_free_split_count;
-    }
   } else if (path_name == "unmapped_free") {
     ++stats.unmapped_free_count;
     stats.unmapped_free_total_us += elapsed_us;
@@ -405,18 +307,6 @@ std::unordered_map<std::string, uint64_t> SnapshotAndResetVMMV2StepStats(
   result["grow_total_us"] = snapshot.grow_total_us;
   result["mapped_free_count"] = snapshot.mapped_free_count;
   result["mapped_free_total_us"] = snapshot.mapped_free_total_us;
-  result["mapped_free_split_count"] = snapshot.mapped_free_split_count;
-  result["mapped_free_source_parts_total"] =
-      snapshot.mapped_free_source_parts_total;
-  result["mapped_free_source_parts_max"] =
-      snapshot.mapped_free_source_parts_max;
-  result["mapped_free_alloc_parts_total"] =
-      snapshot.mapped_free_alloc_parts_total;
-  result["mapped_free_alloc_parts_max"] = snapshot.mapped_free_alloc_parts_max;
-  result["mapped_free_remainder_parts_total"] =
-      snapshot.mapped_free_remainder_parts_total;
-  result["mapped_free_remainder_parts_max"] =
-      snapshot.mapped_free_remainder_parts_max;
   result["mapped_free_lower_bound_us"] = snapshot.mapped_free_lower_bound_us;
   result["mapped_free_stale_erase_count"] =
       snapshot.mapped_free_stale_erase_count;

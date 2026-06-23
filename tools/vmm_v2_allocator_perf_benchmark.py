@@ -27,18 +27,13 @@ model kernels:
    core._vmm_v2_step_stats_snapshot_and_reset(device).
 
 The parent process launches children because Paddle FLAGS must be set before
-importing paddle. By default the benchmark compares h=2 and h=16 under these
-compatibility labels:
-
-- legacy:   FLAGS_vmm_v2_legacy_mapped_free_split=1
-- optimized:FLAGS_vmm_v2_legacy_mapped_free_split=0
-- lazy:     FLAGS_vmm_v2_lazy_block_parts=1
+importing paddle. By default the benchmark compares h=2 and h=16 with fixed
+and deterministic pseudo-random allocation sizes.
 
 Current VMM v2 no longer maintains BlockV2 backing parts on the normal
-allocator block-list hot path, so these labels should be equivalent for normal
-mapped-free reuse. Use this as a local performance regression guard before
-relying on 4-machine model throughput. A healthy build should keep avg/max
-parts at 0 and avoid order-of-magnitude h=2 vs h=16 mapped_free_total_us gaps.
+allocator block-list hot path. Use this as a local performance regression guard
+before relying on 4-machine model throughput. A healthy build should avoid
+order-of-magnitude h=2 vs h=16 mapped_free_total_us gaps.
 """
 
 from __future__ import annotations
@@ -94,7 +89,6 @@ def child_main(args: argparse.Namespace) -> int:
             "label": args.label,
             "device": args.device,
             "handle_mb": args.handle_mb,
-            "split_mode": args.split_mode,
             "pool_mb": args.pool_mb,
             "pattern": args.pattern,
             "alloc_mb": args.alloc_mb,
@@ -175,7 +169,7 @@ def child_main(args: argparse.Namespace) -> int:
 
 
 def run_child(
-    args: argparse.Namespace, handle_mb: int, split_mode: str, pattern: str
+    args: argparse.Namespace, handle_mb: int, pattern: str
 ) -> tuple[int, str]:
     env = os.environ.copy()
     _set_optional_pythonpath(env, args.paddle_build_python)
@@ -187,19 +181,11 @@ def run_child(
             "FLAGS_vmm_v2_remap_on_oom": "0",
             "FLAGS_vmm_v2_small_pool_handle_size_in_mb": str(handle_mb),
             "FLAGS_vmm_v2_large_pool_handle_size_in_mb": str(handle_mb),
-            "FLAGS_vmm_v2_legacy_mapped_free_split": "1",
-            "FLAGS_vmm_v2_lazy_block_parts": "0",
             "GLOG_v": env.get("GLOG_v", "0"),
         }
     )
-    if split_mode == "optimized":
-        env["FLAGS_vmm_v2_legacy_mapped_free_split"] = "0"
-    elif split_mode == "lazy":
-        env["FLAGS_vmm_v2_lazy_block_parts"] = "1"
-    elif split_mode != "legacy":
-        raise ValueError(f"unknown split mode: {split_mode}")
 
-    label = f"h{handle_mb}_{split_mode}_{pattern}"
+    label = f"h{handle_mb}_{pattern}"
     cmd = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -210,8 +196,6 @@ def run_child(
         label,
         "--handle-mb",
         str(handle_mb),
-        "--split-mode",
-        split_mode,
         "--pattern",
         pattern,
         "--pool-mb",
@@ -255,25 +239,12 @@ def summarize(records: list[dict]) -> dict:
     alloc_rows = [r for r in records if r.get("name") == "step_alloc"]
     free_rows = [r for r in records if r.get("name") == "step_free"]
     mapped_count = sum_field(alloc_rows, "mapped_free_count")
-    source_parts = sum_field(alloc_rows, "mapped_free_source_parts_total")
-    alloc_parts = sum_field(alloc_rows, "mapped_free_alloc_parts_total")
-    remainder_parts = sum_field(alloc_rows, "mapped_free_remainder_parts_total")
     return {
         "steps": len(alloc_rows),
         "mapped_count": mapped_count,
         "mapped_free_total_us": sum_field(alloc_rows, "mapped_free_total_us"),
         "alloc_total_us": sum_field(alloc_rows, "alloc_total_us"),
         "free_total_us": sum_field(free_rows, "free_total_us"),
-        "avg_source_parts": source_parts / mapped_count
-        if mapped_count
-        else 0.0,
-        "avg_alloc_parts": alloc_parts / mapped_count if mapped_count else 0.0,
-        "avg_remainder_parts": remainder_parts / mapped_count
-        if mapped_count
-        else 0.0,
-        "max_source_parts": max_field(
-            alloc_rows, "mapped_free_source_parts_max"
-        ),
         "max_blocks": max_field(alloc_rows, "last_block_count"),
         "max_free_blocks": max_field(alloc_rows, "last_free_blocks"),
     }
@@ -286,82 +257,52 @@ def parent_main(args: argparse.Namespace) -> int:
     rows = [
         "# VMM v2 Allocator Perf Benchmark",
         "",
-        "| Handle MiB | Split mode | Pattern | Steps | mapped_free cnt | mapped_free time | alloc total | free total | avg src parts | avg alloc parts | avg rem parts | max src parts | max blocks | max free blocks | raw |",
-        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Handle MiB | Pattern | Steps | mapped_free cnt | mapped_free time | alloc total | free total | max blocks | max free blocks | raw |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
-    summaries: dict[tuple[int, str, str], dict] = {}
+    summaries: dict[tuple[int, str], dict] = {}
     ok = True
 
     for handle_mb in args.handles_mb:
-        for split_mode in args.split_modes:
-            for pattern in args.patterns:
-                code, output = run_child(args, handle_mb, split_mode, pattern)
-                label = f"h{handle_mb}_{split_mode}_{pattern}"
-                raw_path = out_dir / f"{label}.log"
-                raw_path.write_text(output)
-                records = parse_records(output)
-                if code != 0 or not records:
-                    ok = False
-                    rows.append(
-                        f"| {handle_mb} | {split_mode} | {pattern} | failed exit={code} | | | | | | | | | | | {raw_path} |"
-                    )
-                    continue
-                summary = summarize(records)
-                summaries[(handle_mb, split_mode, pattern)] = summary
+        for pattern in args.patterns:
+            code, output = run_child(args, handle_mb, pattern)
+            label = f"h{handle_mb}_{pattern}"
+            raw_path = out_dir / f"{label}.log"
+            raw_path.write_text(output)
+            records = parse_records(output)
+            if code != 0 or not records:
+                ok = False
                 rows.append(
-                    "| {h} | {mode} | {pattern} | {steps} | {cnt} | {mapped} | "
-                    "{alloc} | {free} | {src:.1f} | {ap:.1f} | {rp:.1f} | "
-                    "{max_src} | {max_blocks} | {max_free} | {raw} |".format(
-                        h=handle_mb,
-                        mode=split_mode,
-                        pattern=pattern,
-                        steps=summary["steps"],
-                        cnt=summary["mapped_count"],
-                        mapped=fmt_ms(summary["mapped_free_total_us"]),
-                        alloc=fmt_ms(summary["alloc_total_us"]),
-                        free=fmt_ms(summary["free_total_us"]),
-                        src=summary["avg_source_parts"],
-                        ap=summary["avg_alloc_parts"],
-                        rp=summary["avg_remainder_parts"],
-                        max_src=summary["max_source_parts"],
-                        max_blocks=summary["max_blocks"],
-                        max_free=summary["max_free_blocks"],
-                        raw=raw_path,
-                    )
+                    f"| {handle_mb} | {pattern} | failed exit={code} | | | | | | | {raw_path} |"
                 )
+                continue
+            summary = summarize(records)
+            summaries[(handle_mb, pattern)] = summary
+            rows.append(
+                "| {h} | {pattern} | {steps} | {cnt} | {mapped} | "
+                "{alloc} | {free} | {max_blocks} | {max_free} | {raw} |".format(
+                    h=handle_mb,
+                    pattern=pattern,
+                    steps=summary["steps"],
+                    cnt=summary["mapped_count"],
+                    mapped=fmt_ms(summary["mapped_free_total_us"]),
+                    alloc=fmt_ms(summary["alloc_total_us"]),
+                    free=fmt_ms(summary["free_total_us"]),
+                    max_blocks=summary["max_blocks"],
+                    max_free=summary["max_free_blocks"],
+                    raw=raw_path,
+                )
+            )
 
     rows.extend(["", "## Ratios", ""])
     rows.append("| Pattern | Ratio | Value |")
     rows.append("|---|---|---:|")
     for pattern in args.patterns:
-        h2_legacy = summaries.get((2, "legacy", pattern))
-        h2_optimized = summaries.get((2, "optimized", pattern))
-        h2_lazy = summaries.get((2, "lazy", pattern))
-        h16_legacy = summaries.get((16, "legacy", pattern))
-        if h2_legacy and h2_optimized and h2_legacy["mapped_free_total_us"] > 0:
-            ratio = (
-                h2_optimized["mapped_free_total_us"]
-                / h2_legacy["mapped_free_total_us"]
-            )
-            rows.append(
-                f"| {pattern} | h2 optimized / h2 legacy mapped_free | {ratio:.2f}x |"
-            )
-        if h2_lazy and h2_legacy and h2_legacy["mapped_free_total_us"] > 0:
-            ratio = (
-                h2_lazy["mapped_free_total_us"]
-                / h2_legacy["mapped_free_total_us"]
-            )
-            rows.append(
-                f"| {pattern} | h2 lazy / h2 legacy mapped_free | {ratio:.2f}x |"
-            )
-        if h2_legacy and h16_legacy and h16_legacy["mapped_free_total_us"] > 0:
-            ratio = (
-                h2_legacy["mapped_free_total_us"]
-                / h16_legacy["mapped_free_total_us"]
-            )
-            rows.append(
-                f"| {pattern} | h2 legacy / h16 legacy mapped_free | {ratio:.2f}x |"
-            )
+        h2 = summaries.get((2, pattern))
+        h16 = summaries.get((16, pattern))
+        if h2 and h16 and h16["mapped_free_total_us"] > 0:
+            ratio = h2["mapped_free_total_us"] / h16["mapped_free_total_us"]
+            rows.append(f"| {pattern} | h2 / h16 mapped_free | {ratio:.2f}x |")
 
     report = "\n".join(rows) + "\n"
     report_path = out_dir / "summary.md"
@@ -378,18 +319,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--label", default="")
     parser.add_argument("--handles-mb", type=int, nargs="+", default=[2, 16])
-    parser.add_argument(
-        "--split-modes",
-        nargs="+",
-        choices=["legacy", "optimized", "lazy"],
-        default=["legacy", "optimized", "lazy"],
-    )
     parser.add_argument("--handle-mb", type=int, default=16)
-    parser.add_argument(
-        "--split-mode",
-        choices=["legacy", "optimized", "lazy"],
-        default="legacy",
-    )
     parser.add_argument(
         "--patterns",
         nargs="+",

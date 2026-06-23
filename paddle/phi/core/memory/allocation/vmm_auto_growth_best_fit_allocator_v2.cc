@@ -29,9 +29,6 @@
 
 COMMON_DECLARE_bool(vmm_v2_compact_all);
 COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
-PHI_DECLARE_bool(vmm_v2_disable_ipc_export_mark);
-PHI_DECLARE_bool(vmm_v2_fake_collect_tensor_parts);
-PHI_DECLARE_bool(vmm_v2_record_mapped_free_parts);
 PHI_DECLARE_bool(vmm_v2_round_alloc_to_handle_size);
 PHI_DECLARE_bool(vmm_v2_round_large_pool_alloc_to_handle_size);
 PHI_DECLARE_bool(vmm_v2_skip_remap_safety_hot_path);
@@ -224,9 +221,6 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
     requested_size =
         AlignedSize(requested_size, underlying_allocator_->HandleSize());
   }
-  MappedFreePartStats mapped_free_part_stats;
-  MappedFreePartStats* mapped_free_part_stats_ptr =
-      FLAGS_vmm_v2_record_mapped_free_parts ? &mapped_free_part_stats : nullptr;
   VMMV2MappedFreeDetailStats mapped_free_detail_stats;
   VMMV2MappedFreeDetailStats* mapped_free_detail_stats_ptr =
       VMMV2DetailStatsEnabled() ? &mapped_free_detail_stats : nullptr;
@@ -243,10 +237,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
                        all_blocks_.size(),
                        free_blocks_.size(),
                        unmapped_free_blocks_.size(),
-                       underlying_allocator_->TailOffset(),
-                       mapped_free_part_stats.source_parts,
-                       mapped_free_part_stats.alloc_parts,
-                       mapped_free_part_stats.remainder_parts);
+                       underlying_allocator_->TailOffset());
     }
     if (!trace_perf) {
       return;
@@ -264,9 +255,8 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
             << " unmapped_free_blocks=" << unmapped_free_blocks_.size()
             << " tail_offset=" << underlying_allocator_->TailOffset();
   };
-  if (auto* allocation = AllocFromFreeBlocks(requested_size,
-                                             mapped_free_part_stats_ptr,
-                                             mapped_free_detail_stats_ptr)) {
+  if (auto* allocation =
+          AllocFromFreeBlocks(requested_size, mapped_free_detail_stats_ptr)) {
     if (mapped_free_detail_stats_ptr != nullptr) {
       RecordVMMV2MappedFreeDetail(place_.device, mapped_free_detail_stats);
     }
@@ -663,18 +653,6 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
     return false;
   }
 
-  if (FLAGS_vmm_v2_fake_collect_tensor_parts) {
-    if (parts != nullptr) {
-      parts->clear();
-    }
-    VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit fake CollectTensorParts "
-            << "for active block ptr=" << block_it->ptr_
-            << " block_size=" << block_it->size_ << " target_ptr=" << ptr
-            << " target_size=" << size
-            << " pool=" << static_cast<int>(pool_type_);
-    return true;
-  }
-
   std::vector<BlockPart> collected;
   if (!underlying_allocator_->CollectIpcParts(
           target_va, size, parts != nullptr ? &collected : nullptr)) {
@@ -685,13 +663,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
             << " pool=" << static_cast<int>(pool_type_);
     return false;
   }
-  if (mark_ipc_exported && FLAGS_vmm_v2_disable_ipc_export_mark) {
-    VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit skipped IPC exported mark "
-            << "by FLAGS_vmm_v2_disable_ipc_export_mark for active block ptr="
-            << block_it->ptr_ << " block_size=" << block_it->size_
-            << " target_ptr=" << ptr << " target_size=" << size
-            << " pool=" << static_cast<int>(pool_type_);
-  } else if (mark_ipc_exported) {
+  if (mark_ipc_exported) {
     if (!underlying_allocator_->MarkIpcExported(target_va, size)) {
       VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit failed to mark IPC exported "
               << "for active block ptr=" << block_it->ptr_
@@ -739,9 +711,7 @@ BlockList VMMAutoGrowthBestFitAllocatorV2::SnapshotAllBlocks() const {
 }
 
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
-    size_t size,
-    MappedFreePartStats* part_stats,
-    VMMV2MappedFreeDetailStats* detail_stats) {
+    size_t size, VMMV2MappedFreeDetailStats* detail_stats) {
   auto detail_tick = [&]() {
     return detail_stats != nullptr ? Clock::now() : Clock::time_point{};
   };
@@ -766,8 +736,6 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   }
 
   auto block_it = it->second;
-  const size_t source_parts =
-      part_stats == nullptr ? 0 : block_it->AllocationPartCount();
   const size_t block_size = block_it->size_;
   auto erase_free_start = detail_tick();
   EraseFreeBlock(block_it);
@@ -775,7 +743,6 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
     detail_stats->erase_free_us += detail_elapsed(erase_free_start);
   }
 
-  size_t remainder_parts = 0;
   const bool has_remainder = block_size > size;
   const size_t remaining_size = has_remainder ? block_size - size : 0;
   const bool consume_whole_block = ShouldConsumeWholeFreeBlock(remaining_size);
@@ -783,9 +750,6 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
     auto split_start = detail_tick();
     BlockV2 remaining_block =
         block_it->MakeMappedFreeSubBlockWithoutParts(size, remaining_size);
-    if (part_stats != nullptr) {
-      remainder_parts = remaining_block.AllocationPartCount();
-    }
     // The free remainder keeps the source block's remap-safety stream. The
     // reused prefix is cleared by MarkActive().
 
@@ -814,11 +778,6 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   }
   if (detail_stats != nullptr) {
     detail_stats->mark_active_us += detail_elapsed(mark_active_start);
-  }
-  if (part_stats != nullptr) {
-    part_stats->source_parts = source_parts;
-    part_stats->alloc_parts = block_it->AllocationPartCount();
-    part_stats->remainder_parts = remainder_parts;
   }
   auto wrapper_new_start = detail_tick();
   auto* allocation =
