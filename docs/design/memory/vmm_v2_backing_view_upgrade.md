@@ -76,6 +76,84 @@
 7. 实现 `remap_on_oom=0` 时自动跳过 remap-safety 维护后，h2 lazy 吞吐达到 `3794.83 tokens/s/card`，与 h16 clean 的差距收敛到 `-0.29%`，同时 optimizer-step 从 `1110.23ms` 降到 `915.39ms`。这说明不触发 remap 的 steady-state 性能问题已经由“lazy parts + remap-off 跳过 safety”基本解决；开启 remap 时仍需进一步把 remap-safety 从 block hot path 下沉到 page/backing lazy 查询。
 8. 实现 `remap_on_oom=1` 下的 lazy remap event 后，h2 lazy clean 吞吐达到 `3797.20 tokens/s/card`，与 h16 clean 的差距为 `-0.23%`，optimizer-step 为 `946.01ms`，接近 h16 clean 的 `942.85ms`。该 run 未触发 compact，因此它验证的是“remap 开启但 steady-state 不整理”时的热路径成本：per-free `cudaEventCreateWithFlags` / `cudaEventRecord` 和 block 级 remap-safety 传播已经不再造成 h2 的稳态吞吐损失。后续仍必须用强制碎片/compact run 验证真正 remap 时的 source safety、rollback 和 IPC/remap metadata 正确性。
 
+#### 2026-06-23 f8b3 同 commit 稳态性能闭环
+
+前面多轮实验中曾混入不同 commit、不同机器、不同调试开关的结果，因此不能直接用绝对吞吐做回归判断。2026-06-23 重新以 `f8b3ba0cec` 为共同代码基线，对 VMM off、h16 legacy、h16 optimized split、h2 lazy、remap on/off 做了同 commit 对比。
+
+| 日志 | 关键配置 | 是否触发 compact | tokens/s/card mean | 结论 |
+|---|---|---:|---:|---|
+| `vmm_off_f8b3_clean_623` | VMM off | 否 | 3766.03 | 同 commit off 基线 |
+| `vmm_h16_optimized_split_f8b3_clean_623` | h16, `FLAGS_vmm_v2_legacy_mapped_free_split=0`, remap off | 否 | 3675.09 | `SplitMappedFreeSuffixFromPrefix()` 明确带来稳态回退 |
+| `vmm_h16_default_legacy_clean_623` | h16, 默认 legacy split, remap off | 否 | 3741.59 | 与 off 接近；单轮略低，属于同机波动范围 |
+| 用户复测 h16 default | h16, small=2MB, large=16MB, remap off | 否 | 3799.15 | 证明 h16 default legacy 可达到 off 同级 |
+| `vmm_h16_remap_on_clean_623` | h16, 默认 legacy split, remap on | 否 | 3800.76 | remap 开启但不触发 compact 时无 steady-state 额外损失 |
+| `vmm_h2_lazy_f8b3_clean_623` | h2, lazy parts, remap off | 否 | 3789.45 | h2 lazy 在当前实现下已恢复到 off/h16 同级 |
+| `vmm_h2_lazy_remap_on_clean_623` | h2, lazy parts, remap on | 否 | 3816.82 | remap 开启但不触发 compact 时，h2 lazy 也无 steady-state 额外损失 |
+
+该组同 commit 结果给出更明确的闭环结论：
+
+1. h2/h16 稳态性能问题的直接回归点是 `SplitMappedFreeSuffixFromPrefix()` 的 eager parts split，而不是 DeepEP GPU kernel、RDMA/NVSHMEM 通信、IPC/tensor-info、NCCL 或 remap 开关本身。
+2. `FLAGS_vmm_v2_legacy_mapped_free_split=true` 作为默认路径是必要的。它恢复旧的 mapped-free split 行为，避免 optimized split 在 allocator 热路径中反复切分 `parts_`。
+3. `FLAGS_vmm_v2_remap_on_oom=1` 在未实际触发 compact 的 clean run 中没有可见 steady-state 性能惩罚；此前“remap 开启导致慢”的判断应限定为旧实现或混合日志条件，不能作为当前 f8b3 结论。
+4. 当前仍未被 clean run 覆盖的是“真正触发 compact/remap 后”的正确性和整理代价，包括 source safety、rollback/restore、IPC exported backing、remap destination ownership 等路径。这部分必须继续用强制碎片或 replay 回归验证。
+
+#### 本地 perf benchmark
+
+为了避免每次都依赖 4 机训练吞吐来判断 allocator 热路径是否回退，新增本地 benchmark：
+
+```bash
+python tools/vmm_v2_allocator_perf_benchmark.py \
+  --device 0 \
+  --handles-mb 2 16 \
+  --split-modes legacy optimized lazy \
+  --patterns fixed random \
+  --pool-mb 4096 \
+  --alloc-mb 64 \
+  --steps 20 \
+  --allocs-per-step 32 \
+  --output-dir vmm_v2_allocator_perf_bench_$(date +%m%d_%H%M)
+```
+
+如果要直接使用源码构建目录中的 Paddle Python 包，可额外指定：
+
+```bash
+--paddle-build-python /work/dev_tool/Paddle/build/python
+```
+
+该 benchmark 的设计目标是隔离非 remap allocator 热路径：
+
+1. 先分配一个大 VMM tensor 使 pool grow。
+2. 释放该 tensor，制造 mapped-free backing。
+3. 反复从 mapped-free block 中分配/释放较小 tensor。
+4. 通过 `_vmm_v2_step_stats_snapshot_and_reset(device)` 采集 `mapped_free_total_us`、`alloc_total_us`、`free_total_us` 和 parts 统计。
+
+判读优先级：
+
+| 指标 | 用途 |
+|---|---|
+| `h2 optimized / h2 legacy mapped_free` | 直接确认 `SplitMappedFreeSuffixFromPrefix()` 是否仍显著慢于默认 legacy split |
+| `h2 lazy / h2 legacy mapped_free` | 确认 lazy parts 不应比 legacy 更差；如果更差，说明 no-parts/lazy 消费点仍有额外成本 |
+| `h2 legacy / h16 legacy mapped_free` | 观察 handle size 对 allocator CPU 热路径的剩余影响；该值受本地环境和分配图影响，不作为单独硬阈值 |
+| `avg/max src parts` | 判断某轮结果是否真的覆盖了 parts 粒度放大场景；若旧包没有这些字段，只能用 `mapped_free_total_us` 做粗判 |
+
+这个 benchmark 不是 DeepEP 或完整模型吞吐替代品。它只用于快速确认 allocator mapped-free reuse/split 路径是否发生明显 CPU 回退；模型侧仍需用 clean 训练日志确认端到端吞吐。
+
+2026-06-23 在当前工作区 `build/python` 上的 smoke 结果：
+
+| 场景 | fixed mapped_free | random mapped_free | 观察 |
+|---|---:|---:|---|
+| h2 legacy | 8.150ms | 9.690ms | h2 非 lazy mapped-free CPU 开销仍明显高于 h16 |
+| h2 optimized | 8.189ms | 9.273ms | 该 micro 场景未复现 optimized split 比 legacy 更慢 |
+| h2 lazy | 0.039ms | 0.036ms | lazy parts 能基本移除该 micro 场景中的 mapped-free CPU 开销 |
+| h16 legacy | 1.226ms | 1.367ms | h16 非 lazy 开销显著低于 h2 |
+| h16 lazy | 0.034ms | 0.045ms | lazy 后 h2/h16 差异基本消失 |
+
+这轮本地 benchmark 的结论和限制：
+
+1. 它明确复现了 handle size 对非 lazy mapped-free CPU 热路径的放大：h2 legacy / h16 legacy 约 `6.65x` 到 `7.09x`。
+2. 它也明确验证了 lazy parts 对该 micro 场景有效：h2 lazy 的 `mapped_free_total_us` 降到与 h16 lazy 同级。
+3. 它没有复现 `optimized split` 相比 `legacy split` 更慢，且 `avg/max parts` 为 0，说明该 micro 场景没有覆盖“已有完整 `BlockV2::parts_` 后继续 split”的模型形态。因此它适合作为 allocator CPU hot path 的本地回归 guard，但不能覆盖全部 parts materialization 回归；这类问题仍需模型 clean 日志或更强的 parts-materialization microbench 继续验证。
+
 这组性能实证进一步支持本设计文档的核心方向：`BlockV2::parts_` 不应继续作为正常 allocator hot path 的必备状态。物理 backing 信息应由 Backing View / `backing_map_` 统一维护，Allocation View 只维护逻辑 VA 区间。
 
 ### 1.4 过渡期优化目标：lazy parts / backing view 查询
