@@ -506,13 +506,14 @@ struct BlockV2 {
     }
 
     segments->clear();
+    (void)meta;
     const size_t prefix = va - BeginVA();
     const size_t suffix = EndVA() - (va + size);
     if (prefix > 0) {
       segments->push_back(MakeUnmappedFreeSubBlock(0, prefix));
     }
-    segments->push_back(MakeSinglePartMappedFreeBlock(
-        reinterpret_cast<void*>(va), size, meta, pool_type_));
+    segments->push_back(MakeMappedBlockWithoutParts(
+        BlockType::kFree, reinterpret_cast<void*>(va), size, pool_type_));
     if (suffix > 0) {
       segments->push_back(MakeUnmappedFreeSubBlock(prefix + size, suffix));
     }

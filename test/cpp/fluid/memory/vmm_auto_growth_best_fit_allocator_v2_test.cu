@@ -20,9 +20,6 @@
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator_v2.h"
 
 COMMON_DECLARE_bool(vmm_v2_compact_all);
-PHI_DECLARE_bool(vmm_v2_lazy_block_parts);
-PHI_DECLARE_bool(vmm_v2_legacy_mapped_free_split);
-
 namespace paddle {
 namespace memory {
 namespace allocation {
@@ -70,27 +67,6 @@ void ExpectIndexedFreeStats(VMMAutoGrowthBestFitAllocatorV2* allocator,
   EXPECT_EQ(actual_total_free, total_free);
   EXPECT_EQ(actual_max_free, max_free);
 }
-
-size_t AllocationPartBytes(const BlockV2& block) {
-  size_t bytes = 0;
-  for (size_t i = 0; i < block.AllocationPartCount(); ++i) {
-    bytes += block.AllocationPartByteSize(i);
-  }
-  return bytes;
-}
-
-class ScopedBoolFlag {
- public:
-  ScopedBoolFlag(bool* flag, bool value) : flag_(flag), old_value_(*flag) {
-    *flag_ = value;
-  }
-
-  ~ScopedBoolFlag() { *flag_ = old_value_; }
-
- private:
-  bool* flag_;
-  bool old_value_;
-};
 
 }  // namespace
 
@@ -150,15 +126,14 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, SplitGrowBlockOnFirstAllocation) {
   auto it = allocator.all_blocks().begin();
   ASSERT_EQ(it->type_, BlockType::kActive);
   EXPECT_EQ(it->size_, 256UL);
-  EXPECT_TRUE(it->HasSingleAllocationPart(0UL, 256UL));
+  EXPECT_EQ(it->AllocationPartCount(), 0UL);
 
   ++it;
   ASSERT_EQ(it, std::prev(allocator.all_blocks().end()));
   ASSERT_EQ(it->type_, BlockType::kFree);
   EXPECT_EQ(it->size_, underlying->HandleSize() - 256UL);
   EXPECT_EQ(it->owning_stream_, nullptr);
-  EXPECT_TRUE(
-      it->HasSingleAllocationPart(256UL, underlying->HandleSize() - 256UL));
+  EXPECT_EQ(it->AllocationPartCount(), 0UL);
   ExpectIndexedFreeStats(&allocator,
                          underlying->HandleSize() - 256UL,
                          underlying->HandleSize() - 256UL);
@@ -177,18 +152,13 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, SplitGrowBlockAcrossTwoHandles) {
   auto it = allocator.all_blocks().begin();
   ASSERT_EQ(it->type_, BlockType::kActive);
   EXPECT_EQ(it->size_, requested_size);
-  ASSERT_EQ(it->AllocationPartCount(), 2UL);
-  EXPECT_EQ(it->AllocationPartHandleRelOffset(0), 0UL);
-  EXPECT_EQ(it->AllocationPartByteSize(0), underlying->HandleSize());
-  EXPECT_EQ(it->AllocationPartHandleRelOffset(1), 0UL);
-  EXPECT_EQ(it->AllocationPartByteSize(1), 256UL);
+  ASSERT_EQ(it->AllocationPartCount(), 0UL);
 
   ++it;
   ASSERT_EQ(it, std::prev(allocator.all_blocks().end()));
   ASSERT_EQ(it->type_, BlockType::kFree);
   EXPECT_EQ(it->size_, underlying->HandleSize() - 256UL);
-  EXPECT_TRUE(
-      it->HasSingleAllocationPart(256UL, underlying->HandleSize() - 256UL));
+  EXPECT_EQ(it->AllocationPartCount(), 0UL);
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
@@ -205,7 +175,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   const auto& merged = allocator.all_blocks().front();
   EXPECT_EQ(merged.type_, BlockType::kFree);
   EXPECT_EQ(merged.size_, underlying->HandleSize());
-  EXPECT_TRUE(merged.HasSingleAllocationPart(0UL, underlying->HandleSize()));
+  EXPECT_EQ(merged.AllocationPartCount(), 0UL);
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2, SplitFreeBlockAfterRemapEvent) {
@@ -241,7 +211,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, SplitFreeBlockAfterRemapEvent) {
     ++free_count;
     // owning_stream_ is cleared; nobody "owns" a free fragment.
     EXPECT_EQ(block.owning_stream_, nullptr);
-    ASSERT_GT(block.AllocationPartCount(), 0UL);
+    ASSERT_EQ(block.AllocationPartCount(), 0UL);
   }
   EXPECT_EQ(free_count, 1UL);
 
@@ -339,13 +309,10 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, ThreeWayMerge) {
   const auto& merged = allocator.all_blocks().front();
   EXPECT_EQ(merged.type_, BlockType::kFree);
   EXPECT_EQ(merged.size_, underlying->HandleSize() * 3);
-  EXPECT_EQ(merged.AllocationPartCount(), 3UL);
+  EXPECT_EQ(merged.AllocationPartCount(), 0UL);
 }
 
-void ExpectMappedFreeSplitKeepsCompleteParts(bool legacy_split) {
-  ScopedBoolFlag split_guard(&FLAGS_vmm_v2_legacy_mapped_free_split,
-                             legacy_split);
-
+void ExpectMappedFreeSplitUsesNoParts() {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
       underlying, 256, phi::GPUPlace(), PoolType::kLarge);
@@ -362,7 +329,7 @@ void ExpectMappedFreeSplitKeepsCompleteParts(bool legacy_split) {
   b.reset();
 
   ASSERT_EQ(allocator.all_blocks().size(), 1UL);
-  ASSERT_EQ(allocator.all_blocks().front().AllocationPartCount(), 3UL);
+  ASSERT_EQ(allocator.all_blocks().front().AllocationPartCount(), 0UL);
 
   const size_t requested_size = underlying->HandleSize() + 256UL;
   auto reused = allocator.Allocate(requested_size);
@@ -373,7 +340,7 @@ void ExpectMappedFreeSplitKeepsCompleteParts(bool legacy_split) {
   ASSERT_TRUE(block_it->IsActive());
   EXPECT_EQ(block_it->ptr_, reused->ptr());
   EXPECT_EQ(block_it->size_, requested_size);
-  EXPECT_EQ(AllocationPartBytes(*block_it), requested_size);
+  EXPECT_EQ(block_it->AllocationPartCount(), 0UL);
 
   std::vector<BlockPart> parts;
   ASSERT_TRUE(
@@ -387,22 +354,15 @@ void ExpectMappedFreeSplitKeepsCompleteParts(bool legacy_split) {
   ++block_it;
   ASSERT_TRUE(block_it->IsFree());
   EXPECT_EQ(block_it->size_, underlying->HandleSize() * 2 - 256UL);
-  EXPECT_EQ(AllocationPartBytes(*block_it), block_it->size_);
+  EXPECT_EQ(block_it->AllocationPartCount(), 0UL);
 }
 
-TEST(VMMAutoGrowthBestFitAllocatorV2, LegacyMappedFreeSplitKeepsCompleteParts) {
-  ExpectMappedFreeSplitKeepsCompleteParts(true);
-}
-
-TEST(VMMAutoGrowthBestFitAllocatorV2,
-     OptimizedMappedFreeSplitKeepsCompleteParts) {
-  ExpectMappedFreeSplitKeepsCompleteParts(false);
+TEST(VMMAutoGrowthBestFitAllocatorV2, MappedFreeSplitUsesNoParts) {
+  ExpectMappedFreeSplitUsesNoParts();
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
      LazyBlockPartsSkipsHotPathPartsButCollectsFromBackingMap) {
-  ScopedBoolFlag lazy_guard(&FLAGS_vmm_v2_lazy_block_parts, true);
-
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
       underlying, 256, phi::GPUPlace(), PoolType::kLarge);
@@ -489,7 +449,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactRemapsWholeFreeHandleToTail) {
   ++it;
   ASSERT_EQ(it->type_, BlockType::kFree);
   EXPECT_EQ(it->size_, underlying->HandleSize());
-  EXPECT_TRUE(it->HasSingleAllocationPart(0UL, underlying->HandleSize()));
+  EXPECT_EQ(it->AllocationPartCount(), 0UL);
   std::vector<std::pair<VMMDevicePtr, size_t>> tail_range = {
       {reinterpret_cast<VMMDevicePtr>(it->ptr_), underlying->HandleSize()}};
   const auto tail_pages =
@@ -806,8 +766,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactSkipsPartialFreeHandle) {
   EXPECT_EQ(it->ptr_,
             reinterpret_cast<uint8_t*>(allocation->ptr()) + allocation->size());
   EXPECT_EQ(it->size_, underlying->HandleSize() - 256UL);
-  EXPECT_TRUE(
-      it->HasSingleAllocationPart(256UL, underlying->HandleSize() - 256UL));
+  EXPECT_EQ(it->AllocationPartCount(), 0UL);
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
@@ -1053,7 +1012,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactUsesBlockListTailPlacement) {
   for (const auto& block : allocator.all_blocks()) {
     if (block.type_ == BlockType::kFree &&
         block.size_ == underlying->HandleSize()) {
-      EXPECT_TRUE(block.HasSingleAllocationPart(0UL, underlying->HandleSize()));
+      EXPECT_EQ(block.AllocationPartCount(), 0UL);
       remapped_free_ptr = block.ptr_;
       break;
     }
@@ -1097,14 +1056,14 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactKeepsPartialSourceParts) {
 
   for (const auto& block : allocator.all_blocks()) {
     if (block.IsMappedFree()) {
-      EXPECT_EQ(AllocationPartBytes(block), block.Size());
+      EXPECT_EQ(block.AllocationPartCount(), 0UL);
     }
   }
 
   prefix.reset();
   for (const auto& block : allocator.all_blocks()) {
     if (block.IsMappedFree()) {
-      EXPECT_EQ(AllocationPartBytes(block), block.Size());
+      EXPECT_EQ(block.AllocationPartCount(), 0UL);
     }
   }
 
@@ -1148,12 +1107,12 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   const auto* target_a_block = FindBlockByPtr(allocator, target_a_ptr);
   ASSERT_NE(target_a_block, nullptr);
   EXPECT_TRUE(target_a_block->IsFree());
-  EXPECT_TRUE(target_a_block->HasSingleAllocationPart(0UL, handle_size));
+  EXPECT_EQ(target_a_block->AllocationPartCount(), 0UL);
 
   const auto* target_b_block = FindBlockByPtr(allocator, target_b_ptr);
   ASSERT_NE(target_b_block, nullptr);
   EXPECT_TRUE(target_b_block->IsFree());
-  EXPECT_TRUE(target_b_block->HasSingleAllocationPart(0UL, handle_size));
+  EXPECT_EQ(target_b_block->AllocationPartCount(), 0UL);
 
   const auto* source_a_block = FindBlockByPtr(allocator, source_a_ptr);
   ASSERT_NE(source_a_block, nullptr);

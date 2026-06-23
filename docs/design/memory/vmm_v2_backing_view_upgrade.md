@@ -39,63 +39,92 @@
 4. **事务化 remap**：所有 cuMemMap/Unmap 通过 RemapTransaction，失败一行 Rollback
 5. **渐进迁移**：不推翻 PR4，双写验证后再移除旧逻辑
 
-### 1.3 2026-06 性能问题发现：h=2 下 parts eager split 成为热路径瓶颈
+### 1.3 2026-06 性能问题发现：h=2 下 `BlockV2::parts_` 成为热路径瓶颈
 
-2026-06 的 4 机 MoE/DeepEP 训练压测发现：在不触发 remap 的 steady-state 下，VMM V2 使用较小 handle size（尤其 h=2MB）时吞吐明显低于 h=16MB 和 VMM off。该问题最初表现为：
+2026-06 的 4 机 MoE/DeepEP 训练压测发现：在不触发 compact/remap 的 steady-state 下，VMM V2 使用较小 handle size（尤其 h=2MB）时吞吐低于 h=16MB 和 VMM off。多轮排查排除了以下方向：
 
-- `FLAGS_vmm_v2_remap_on_oom=0` 时仍存在 h=2 稳态吞吐下降。
-- `dispatch` / `moe-mlp` 的 wall time 显著增加，但 DeepEP microbenchmark 中 CUDA event 时间对 handle size 不敏感。
-- `h=16` clean 与 VMM off 接近，说明 VMM V2 的基础路径并非一定慢；问题集中在 h=2 带来的 handle/parts 粒度放大。
+- DeepEP / NVSHMEM / RDMA kernel 本身：单机和多机 microbenchmark 中 CUDA event 时间对 handle size 基本不敏感。
+- IPC / tensor-info：fake `_share_cuda`、fake tensor-info、fake collect-parts 后吞吐改善很小。
+- remap 本身：`FLAGS_vmm_v2_remap_on_oom=0` 时仍能复现 h=2 稳态慢；remap on 但 clean run 不触发 compact 时也不必然慢。
 
-关键实验数据（step 11-20，`tokens/s/card`）：
+关键结论是：性能损失集中在 allocator mapped-free 复用路径。h=2 时同样大小的 logical block 被切成更多 backing handles，`AllocFromFreeBlocks()` 每次 split/merge 都会放大以下 parts vector 操作：
 
-| 实验 | tokens/s/card mean | 相对 h16 clean | 相对 h2 clean | dispatch | combine | moe-mlp | 结论 |
-|---|---:|---:|---:|---:|---:|---:|---|
-| h2 clean | 3561.88 | -6.41% | 0.00% | 312.40ms | 141.76ms | 971.83ms | h2 存在真实稳态性能损失 |
-| h2 skip remap-safety | 3609.75 | -5.16% | +1.34% | 309.58ms | 141.47ms | 967.25ms | remap-safety hot path 不是主因 |
-| h2 split-once | 3627.42 | -4.69% | +1.84% | 297.53ms | 139.57ms | 954.54ms | mapped-free split 路径有真实成本 |
-| h2 fake split parts | 3702.82 | -2.71% | +3.96% | 241.48ms | 118.88ms | 827.90ms | 主因基本锁定到 allocation split parts |
-| h2 fast no-parts | 3704.10 | -2.68% | +3.99% | 243.18ms | 120.61ms | 828.86ms | 与 fake split parts 几乎一致 |
-| h16 clean | 3806.00 | 0.00% | +6.85% | 252.09ms | 120.07ms | 838.30ms | h16 基线接近 VMM off |
-| h2 lazy parts clean | 3655.12 | -3.96% | +2.62% | 215.88ms | 136.04ms | 856.22ms | lazy parts 已生效，但未达到 fake/fast no-parts 收益 |
-| h2 lazy + skip remap-safety | 3844.86 | +1.03% | +7.95% | 226.14ms | 137.94ms | 847.03ms | 剩余 gap 基本由 remap-safety hot path 解释；该配置仅用于诊断 |
-| h2 lazy + remap off 自动跳过 safety | 3794.83 | -0.29% | +6.54% | 240.13ms | 137.17ms | 864.13ms | `remap_on_oom=0` 时不维护 remap-safety，性能接近 h16 clean |
-| h2 lazy + remap on lazy event | 3797.20 | -0.23% | +6.61% | 223.16ms | 148.98ms | 860.09ms | `remap_on_oom=1` 但 clean run 未触发 compact；lazy event 将 per-free event 开销移出稳态热路径 |
+- `BlockV2::SplitMappedFreeSuffixFromPrefix()`
+- `BlockV2::SplitPartsAt()`
+- `SliceBlockPartsForRange()`
+- free merge 时的 `AbsorbAdjacentBlock()` parts append
 
-由此得到的直接结论：
+这些操作是 CPU 热路径，训练侧高频 alloc/free 会把它放大成可见的 dispatch/moe-mlp wall time 抖动和吞吐下降。此前的 fake/fast 实验已经证明，只跳过 mapped-free split parts 就能收回大部分 h=2 gap。
 
-1. h=2 的主要性能损失不是 remap，也不是 IPC/tensor-info，也不是 remap-safety 标记。
-2. `fast_no_parts` 的收益几乎完全可由“只 fake mapped-free allocation split parts”复现。
-3. 当前瓶颈在 `AllocFromFreeBlocks()` 复用 mapped-free block 时调用的：
-   - `BlockV2::SplitMappedFreeSuffixFromPrefix()`
-   - `BlockV2::SplitPartsAt()`
-   - `SliceBlockPartsForRange()`
-4. h=2 时同样大小的 logical block 被切成更多 `BlockPartV2`，每次 allocation split 都 eager materialize prefix/suffix parts vector；该 CPU 热路径被训练中的高频 alloc/free 放大，最终表现为 dispatch/moe-mlp wall time 增加和吞吐下降。
-5. 初版 `FLAGS_vmm_v2_lazy_block_parts=1` 只恢复约一半 gap：相对 h2 clean 提升 `+2.62%`，但仍比 h16 clean 低 `-3.96%`。这说明 lazy parts 路径已绕过主要 eager parts slice，但为了保持正确性仍保留的 block 级 `ipc_exported_` / remap-safety 元数据传播，或尚未迁移的 release/split range 残余 parts 路径，仍可能贡献剩余开销。此前 fake/fast 实验不能直接视为最终正确实现的性能，因为它们可能同时绕过了部分正确性元数据维护。
-6. `FLAGS_vmm_v2_lazy_block_parts=1` 叠加 `FLAGS_vmm_v2_skip_remap_safety_hot_path=1` 后，h2 clean 吞吐达到 `3844.86 tokens/s/card`，比 h16 clean 高 `+1.03%`。这证明 lazy parts 后剩余性能差距主要来自 remap-safety hot path，而不是 DeepEP GPU kernel、通信路径、IPC/tensor-info 或普通 parts split。该开关会弱化 remap correctness 约束，只能作为诊断实验，不能作为最终默认方案。
-7. 实现 `remap_on_oom=0` 时自动跳过 remap-safety 维护后，h2 lazy 吞吐达到 `3794.83 tokens/s/card`，与 h16 clean 的差距收敛到 `-0.29%`，同时 optimizer-step 从 `1110.23ms` 降到 `915.39ms`。这说明不触发 remap 的 steady-state 性能问题已经由“lazy parts + remap-off 跳过 safety”基本解决；开启 remap 时仍需进一步把 remap-safety 从 block hot path 下沉到 page/backing lazy 查询。
-8. 实现 `remap_on_oom=1` 下的 lazy remap event 后，h2 lazy clean 吞吐达到 `3797.20 tokens/s/card`，与 h16 clean 的差距为 `-0.23%`，optimizer-step 为 `946.01ms`，接近 h16 clean 的 `942.85ms`。该 run 未触发 compact，因此它验证的是“remap 开启但 steady-state 不整理”时的热路径成本：per-free `cudaEventCreateWithFlags` / `cudaEventRecord` 和 block 级 remap-safety 传播已经不再造成 h2 的稳态吞吐损失。后续仍必须用强制碎片/compact run 验证真正 remap 时的 source safety、rollback 和 IPC/remap metadata 正确性。
+因此当前实现不再把 `BlockV2::parts_` 作为正常 allocator block-list 路径的必备状态。Allocation View 只维护逻辑 VA 区间和 block 级 gate 状态；physical backing 明细由 `backing_map_` 作为 truth，在 IPC、tensor-info、remap 等确实需要时按 VA range 查询。
 
-#### 2026-06-23 f8b3 同 commit 稳态性能闭环
+### 1.4 当前实现：正常 block-list 路径 no-parts
 
-前面多轮实验中曾混入不同 commit、不同机器、不同调试开关的结果，因此不能直接用绝对吞吐做回归判断。2026-06-23 重新以 `f8b3ba0cec` 为共同代码基线，对 VMM off、h16 legacy、h16 optimized split、h2 lazy、remap on/off 做了同 commit 对比。
+当前 VMM V2 的默认策略是：
 
-| 日志 | 关键配置 | 是否触发 compact | tokens/s/card mean | 结论 |
-|---|---|---:|---:|---|
-| `vmm_off_f8b3_clean_623` | VMM off | 否 | 3766.03 | 同 commit off 基线 |
-| `vmm_h16_optimized_split_f8b3_clean_623` | h16, `FLAGS_vmm_v2_legacy_mapped_free_split=0`, remap off | 否 | 3675.09 | `SplitMappedFreeSuffixFromPrefix()` 明确带来稳态回退 |
-| `vmm_h16_default_legacy_clean_623` | h16, 默认 legacy split, remap off | 否 | 3741.59 | 与 off 接近；单轮略低，属于同机波动范围 |
-| 用户复测 h16 default | h16, small=2MB, large=16MB, remap off | 否 | 3799.15 | 证明 h16 default legacy 可达到 off 同级 |
-| `vmm_h16_remap_on_clean_623` | h16, 默认 legacy split, remap on | 否 | 3800.76 | remap 开启但不触发 compact 时无 steady-state 额外损失 |
-| `vmm_h2_lazy_f8b3_clean_623` | h2, lazy parts, remap off | 否 | 3789.45 | h2 lazy 在当前实现下已恢复到 off/h16 同级 |
-| `vmm_h2_lazy_remap_on_clean_623` | h2, lazy parts, remap on | 否 | 3816.82 | remap 开启但不触发 compact 时，h2 lazy 也无 steady-state 额外损失 |
+1. grow / tail reuse 产生的 free block 不再从 handle layout 构造完整 `BlockV2::parts_`。
+2. mapped-free allocation split 使用 `MakeMappedActiveSubBlockWithoutParts()` / `MakeMappedFreeSubBlockWithoutParts()`。
+3. unmapped-free 原地补 backing 后，也生成 no-parts active/remainder block。
+4. free merge 和 remap transaction 的 block-list 重建使用 `AbsorbAdjacentBlockWithoutParts()`。
+5. remap restore 残留 mapped-free segment 使用 no-parts block。
+6. IPC、tensor-info、remap source collect 继续从 page-level `backing_map_` 查询 backing details。
 
-该组同 commit 结果给出更明确的闭环结论：
+保留但已降级为兼容/诊断语义的开关：
 
-1. h2/h16 稳态性能问题的直接回归点是 `SplitMappedFreeSuffixFromPrefix()` 的 eager parts split，而不是 DeepEP GPU kernel、RDMA/NVSHMEM 通信、IPC/tensor-info、NCCL 或 remap 开关本身。
-2. `FLAGS_vmm_v2_legacy_mapped_free_split=true` 作为默认路径是必要的。它恢复旧的 mapped-free split 行为，避免 optimized split 在 allocator 热路径中反复切分 `parts_`。
-3. `FLAGS_vmm_v2_remap_on_oom=1` 在未实际触发 compact 的 clean run 中没有可见 steady-state 性能惩罚；此前“remap 开启导致慢”的判断应限定为旧实现或混合日志条件，不能作为当前 f8b3 结论。
-4. 当前仍未被 clean run 覆盖的是“真正触发 compact/remap 后”的正确性和整理代价，包括 source safety、rollback/restore、IPC exported backing、remap destination ownership 等路径。这部分必须继续用强制碎片或 replay 回归验证。
+| FLAG | 当前语义 |
+|---|---|
+| `FLAGS_vmm_v2_lazy_block_parts` | 默认 true，但正常 hot path 已始终 no-parts；该 flag 不再切换核心路径 |
+| `FLAGS_vmm_v2_legacy_mapped_free_split` | 默认 false，旧 parts-based split 不再作为正常 hot path |
+| `FLAGS_vmm_v2_fast_hot_path_no_parts` | deprecated，hot path 默认已经 no-parts |
+| `FLAGS_vmm_v2_fake_block_parts` / `FLAGS_vmm_v2_fake_mapped_free_split_parts` / `FLAGS_vmm_v2_fake_free_merge_parts` | deprecated，保留用于旧脚本兼容 |
+
+去 parts 后仍必须保留的正确性约束：
+
+- `CollectIpcPartDescriptorsLocked` 的 page 级 fail-fast 语义不能放宽。遇到 `!page.mapped`、`page.meta == nullptr` 或 `IsOwnedByRemapDestination()` 必须失败；这是 IPC 脱离 `BlockV2::parts_` 后的主要正确性防线。
+- `ipc_exported_`、`owning_stream_`、`remap_safe_event_`、`remap_pending_states_` 是 block 级 gate 元数据，不属于 parts vector。no-parts split/merge/remap 残留段仍要复制或保守合并这些状态。
+- 真正 compact/remap 时，source safety、rollback/restore、remap destination ownership 仍必须用强制碎片回归覆盖；clean run 只能证明 steady-state 热路径成本。
+
+#### 本地 no-parts perf 结果
+
+2026-06-23 当前工作区 `build/python` smoke：
+
+```bash
+python tools/vmm_v2_allocator_perf_benchmark.py \
+  --device 0 \
+  --paddle-build-python /work/dev_tool/Paddle/build/python \
+  --handles-mb 2 16 \
+  --split-modes legacy optimized lazy \
+  --patterns fixed random \
+  --pool-mb 4096 \
+  --alloc-mb 64 \
+  --steps 8 \
+  --allocs-per-step 32 \
+  --output-dir tmp/vmm_v2_allocator_perf_bench_no_parts_post_cleanup
+```
+
+结果摘要：
+
+| Handle MiB | Split label | Pattern | mapped_free cnt | mapped_free time | avg src parts | avg alloc parts | avg rem parts |
+|---:|---|---|---:|---:|---:|---:|---:|
+| 2 | legacy | fixed | 256 | 0.034ms | 0.0 | 0.0 | 0.0 |
+| 2 | legacy | random | 256 | 0.028ms | 0.0 | 0.0 | 0.0 |
+| 2 | optimized | fixed | 256 | 0.058ms | 0.0 | 0.0 | 0.0 |
+| 2 | optimized | random | 256 | 0.071ms | 0.0 | 0.0 | 0.0 |
+| 2 | lazy | fixed | 256 | 0.044ms | 0.0 | 0.0 | 0.0 |
+| 2 | lazy | random | 256 | 0.034ms | 0.0 | 0.0 | 0.0 |
+| 16 | legacy | fixed | 256 | 0.050ms | 0.0 | 0.0 | 0.0 |
+| 16 | legacy | random | 256 | 0.048ms | 0.0 | 0.0 | 0.0 |
+| 16 | optimized | fixed | 256 | 0.063ms | 0.0 | 0.0 | 0.0 |
+| 16 | optimized | random | 256 | 0.038ms | 0.0 | 0.0 | 0.0 |
+| 16 | lazy | fixed | 256 | 0.032ms | 0.0 | 0.0 | 0.0 |
+| 16 | lazy | random | 256 | 0.063ms | 0.0 | 0.0 | 0.0 |
+
+该结果说明：
+
+1. 正常 mapped-free reuse/split 路径已经不再 materialize `BlockV2::parts_`。
+2. h=2 和 h=16 的 allocator CPU 代价已经同量级；旧的 h=2 parts 粒度放大不再复现。
+3. `legacy/optimized/lazy` 现在只是兼容标签；当前 smoke 的差异是几十微秒内的测量波动，不再有旧实现的数量级 gap。
+4. 端到端仍需安装包后用 h=2 clean 训练和强制 compact 回归确认模型吞吐与 remap correctness。
 
 #### 本地 perf benchmark
 
@@ -131,162 +160,11 @@ python tools/vmm_v2_allocator_perf_benchmark.py \
 
 | 指标 | 用途 |
 |---|---|
-| `h2 optimized / h2 legacy mapped_free` | 直接确认 `SplitMappedFreeSuffixFromPrefix()` 是否仍显著慢于默认 legacy split |
-| `h2 lazy / h2 legacy mapped_free` | 确认 lazy parts 不应比 legacy 更差；如果更差，说明 no-parts/lazy 消费点仍有额外成本 |
-| `h2 legacy / h16 legacy mapped_free` | 观察 handle size 对 allocator CPU 热路径的剩余影响；该值受本地环境和分配图影响，不作为单独硬阈值 |
-| `avg/max src parts` | 判断某轮结果是否真的覆盖了 parts 粒度放大场景；若旧包没有这些字段，只能用 `mapped_free_total_us` 做粗判 |
+| `avg/max src parts` | 当前默认应为 0；若非 0，说明某条正常 split/merge/grow/remap block-list 路径仍在维护 parts |
+| `h2 legacy / h16 legacy mapped_free` | 观察 handle size 对 allocator CPU 热路径的剩余影响；no-parts 后不应再有数量级差异 |
+| `legacy/optimized/lazy` 之间的差异 | 当前应基本等价；若差异明显，说明兼容开关仍在影响正常 hot path |
 
 这个 benchmark 不是 DeepEP 或完整模型吞吐替代品。它只用于快速确认 allocator mapped-free reuse/split 路径是否发生明显 CPU 回退；模型侧仍需用 clean 训练日志确认端到端吞吐。
-
-2026-06-23 在当前工作区 `build/python` 上的 smoke 结果：
-
-| 场景 | fixed mapped_free | random mapped_free | 观察 |
-|---|---:|---:|---|
-| h2 legacy | 8.150ms | 9.690ms | h2 非 lazy mapped-free CPU 开销仍明显高于 h16 |
-| h2 optimized | 8.189ms | 9.273ms | 该 micro 场景未复现 optimized split 比 legacy 更慢 |
-| h2 lazy | 0.039ms | 0.036ms | lazy parts 能基本移除该 micro 场景中的 mapped-free CPU 开销 |
-| h16 legacy | 1.226ms | 1.367ms | h16 非 lazy 开销显著低于 h2 |
-| h16 lazy | 0.034ms | 0.045ms | lazy 后 h2/h16 差异基本消失 |
-
-这轮本地 benchmark 的结论和限制：
-
-1. 它明确复现了 handle size 对非 lazy mapped-free CPU 热路径的放大：h2 legacy / h16 legacy 约 `6.65x` 到 `7.09x`。
-2. 它也明确验证了 lazy parts 对该 micro 场景有效：h2 lazy 的 `mapped_free_total_us` 降到与 h16 lazy 同级。
-3. 它没有复现 `optimized split` 相比 `legacy split` 更慢，且 `avg/max parts` 为 0，说明该 micro 场景没有覆盖“已有完整 `BlockV2::parts_` 后继续 split”的模型形态。因此它适合作为 allocator CPU hot path 的本地回归 guard，但不能覆盖全部 parts materialization 回归；这类问题仍需模型 clean 日志或更强的 parts-materialization microbench 继续验证。
-
-这组性能实证进一步支持本设计文档的核心方向：`BlockV2::parts_` 不应继续作为正常 allocator hot path 的必备状态。物理 backing 信息应由 Backing View / `backing_map_` 统一维护，Allocation View 只维护逻辑 VA 区间。
-
-### 1.4 过渡期优化目标：lazy parts / backing view 查询
-
-完整 Allocation View / Backing View 分离是最终目标，但当前代码仍处于渐进迁移阶段。为了先解决 h=2 性能问题，可以先引入过渡期的 `lazy parts` 策略：
-
-- allocator 正常 alloc/free/split/merge 热路径不 eager 维护完整 `BlockV2::parts_`。
-- `BlockV2` 只保留逻辑 VA 信息：`ptr_`、`size_`、`type_`、`pool_type_`、必要的 remap-safety / IPC gate 状态。
-- `backing_map_` 作为 physical backing truth，记录 VA page 到 handle/meta/event/ipc 的映射。
-- 只有 IPC、tensor-info、remap 事务等确实需要 backing 明细时，才按 VA range 从 `backing_map_` materialize parts 或 page list。
-
-该过渡策略的关键约束是：不能简单把 `parts_` 清空后保留现有所有调用。只要仍有代码从 no-parts block 调用 `MakeMapped*SubBlock()` / `SplitPartsAt()` / `SliceBlockPartsForRange()`，就会出现不完整 parts slice，例如：
-
-```text
-Invalid VMM V2 block-part slice range: requested ... bytes at offset 0,
-but only sliced ... bytes from ... parts.
-```
-
-因此 lazy parts 必须与消费点迁移一起完成。
-
-#### IPC 路径可行性
-
-底层 VMM V2 已经支持基于 VA range 查询 IPC parts，不要求 `BlockV2::parts_` 是完整状态：
-
-```cpp
-CUDAVirtualMemAllocatorV2::CollectBlockIpcParts(block, parts)
-  -> CollectIpcParts(block.BeginVA(), block.Size(), parts)
-
-CUDAVirtualMemAllocatorV2::MarkBlockIpcExported(block)
-  -> MarkIpcExported(block.BeginVA(), block.Size())
-```
-
-但 best-fit 层当前仍会先构造临时 tensor block：
-
-```cpp
-BlockV2 tensor_block = block_it->MakeMappedActiveSubBlock(block_offset, size);
-underlying_allocator_->CollectBlockIpcParts(tensor_block, &collected);
-underlying_allocator_->MarkBlockIpcExported(tensor_block);
-```
-
-lazy parts 下应改为直接按目标 VA range 访问 backing map：
-
-```cpp
-underlying_allocator_->CollectIpcParts(target_va, size, &collected);
-underlying_allocator_->MarkIpcExported(target_va, size);
-```
-
-因此 IPC 方向可行，但必须移除 best-fit 层对 `MakeMappedActiveSubBlock()` 的依赖。
-
-实现时必须保留 `CollectIpcPartDescriptorsLocked` 的 fail-fast 语义。该函数在 page 级遇到以下状态时直接返回 `false`：
-
-- `!page.mapped`
-- `page.meta == nullptr`
-- `page.meta->IsOwnedByRemapDestination()`
-
-去掉 hot-path parts 后，这条 page 级校验会成为 IPC 正确性的主要防线：只有 backing map 确认目标 VA range 覆盖的每个 page 都是已映射、meta 有效且不属于 remap-destination 临时 ownership，才能导出 IPC metadata。这也是 IPC 可以脱离 `BlockV2::parts_` 的前提；校验本来就应该发生在 page/backing 维度，而不是 parts vector 维度。
-
-#### Remap 路径可行性
-
-remap 的核心 source 选择已经主要基于 free VA ranges 和 `backing_map_`：
-
-```cpp
-CollectFreeRanges(blocks)
-underlying_allocator_->CollectRemapSourcePages(source_ranges, requested_size)
-```
-
-`SetBlockRemapEvent()` 也已经下沉为 VA range 操作：
-
-```cpp
-SetBlockRemapEvent(block)
-  -> SetRemapEvent(block.BeginVA(), block.Size(), stream, event)
-```
-
-这说明 remap source 选择、page readiness、event gate 和 handle move 本身不需要 `BlockV2::parts_` 作为 truth。
-
-仍需迁移的残余点是 remap transaction 中的 block list 重建：
-
-```cpp
-AppendMappedFreeSubRange()
-  -> source.MakeMappedFreeSubBlock(...)
-
-MergeAdjacentFreeBlocks()
-  -> AbsorbAdjacentBlock(...)
-```
-
-这些调用会 eager slice/append `BlockV2::parts_`。lazy parts 下应构造 no-parts mapped-free block，或者由 `backing_map_` 在确需 parts 时按 VA range 临时 materialize。
-
-同时，去 parts 时不能误删 remap 残留段的 block 级元数据传播。`MakeMappedFreeSubBlock()` 当前除了 slice parts，还会做：
-
-- `ipc_exported_ = source.ipc_exported_`
-- `CopyRemapSafetyFrom(source)`
-
-这些与 parts 无关，仍然必须保留。lazy parts 只是移除 backing parts 的 eager materialization，不等于移除 block 级 IPC gate 或 remap-safety 状态。remap transaction 在生成残留 free segment、合并相邻 free block 时，仍需正确传播：
-
-- `ipc_exported_`：合并时按 OR 传播，避免被 IPC export 过的 backing 被误复用、误搬迁或误释放。
-- `owning_stream_` / `remap_safe_event_` / `remap_pending_states_`：残留段必须继承 source 的 remap-safety 约束，合并时也必须保守合并。
-
-#### 过渡实现建议
-
-第一阶段建议引入受控开关，例如：
-
-```bash
-FLAGS_vmm_v2_lazy_block_parts=1
-```
-
-在该开关下：
-
-1. `AllocFromFreeBlocks()` 复用 mapped-free block 时，不调用 `SplitMappedFreeSuffixFromPrefix()`；直接按 VA/size 生成 active prefix 和 free suffix。
-2. `TryMerge()` 只合并 VA range、IPC gate 和 remap-safety 状态，不 append parts vector。
-3. grow / tail reuse 产生的 active/remainder block 也允许 no-parts view。
-4. `CollectTensorParts()` 改为直接 `CollectIpcParts(target_va, size)`。
-5. `MarkBlockIpcExported()` 改为直接 `MarkIpcExported(target_va, size)`。
-6. `remap_transaction.cc::AppendMappedFreeSubRange()` 生成 no-parts mapped-free block。
-7. release / split range helper 遇到 no-parts block 时不得调用 parts slice，应继续生成 no-parts block。
-8. no-parts subblock / merge 仍必须复制或合并 `ipc_exported_` 和 remap-safety metadata；只跳过 parts vector。
-9. IPC export 仍必须依赖 `CollectIpcPartDescriptorsLocked` 的 page 级 fail-fast 校验，不能因为去 parts 而放宽导出条件。
-
-该开关只用于过渡验证；默认仍可保持旧 eager parts 路径，直到 IPC/remap/tensor-info smoke 全部通过。
-
-#### 验证标准
-
-lazy parts 方案需要同时通过性能和正确性验证：
-
-| 验证 | 目标 |
-|---|---|
-| h2 lazy clean | 吞吐接近 `h2 fake split parts` / `h2 fast no-parts`，即约 `3700+ tokens/s/card` |
-| h16 lazy clean | 不比 h16 clean 明显下降 |
-| h2 lazy stats | `mapped_free_split_us` 显著下降，且 block/free index 数量稳定 |
-| IPC smoke | `_share_cuda()` / `CollectIpcParts(target_va, size)` 成功，不依赖完整 `BlockV2::parts_`；未 mapped / meta 为空 / remap-destination ownership 的 page 必须 fail-fast |
-| remap smoke | 触发一次 compact，source collect / move / rollback / restore 正常；残留 free segment 的 `ipc_exported_` 和 remap-safety metadata 必须保留 |
-| tensor-info smoke | `vmm_tensor_info` 从 backing map 查询，不触发 parts eager slice 或显存泄漏 |
-
-若上述验证通过，说明可以把 `BlockV2::parts_` 从 allocator hot path 中正式移除，并把 backing 信息收敛到 Backing View。
 
 ---
 

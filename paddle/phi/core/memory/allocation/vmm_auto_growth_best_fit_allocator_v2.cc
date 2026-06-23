@@ -28,17 +28,11 @@
 
 COMMON_DECLARE_bool(vmm_v2_compact_all);
 COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
-PHI_DECLARE_bool(vmm_v2_fake_block_parts);
-PHI_DECLARE_bool(vmm_v2_fake_mapped_free_split_parts);
-PHI_DECLARE_bool(vmm_v2_fake_free_merge_parts);
 PHI_DECLARE_bool(vmm_v2_disable_ipc_export_mark);
 PHI_DECLARE_bool(vmm_v2_fake_collect_tensor_parts);
 PHI_DECLARE_bool(vmm_v2_record_mapped_free_parts);
 PHI_DECLARE_bool(vmm_v2_round_alloc_to_handle_size);
 PHI_DECLARE_bool(vmm_v2_round_large_pool_alloc_to_handle_size);
-PHI_DECLARE_bool(vmm_v2_fast_hot_path_no_parts);
-PHI_DECLARE_bool(vmm_v2_lazy_block_parts);
-PHI_DECLARE_bool(vmm_v2_legacy_mapped_free_split);
 PHI_DECLARE_bool(vmm_v2_skip_remap_safety_hot_path);
 PHI_DECLARE_bool(vmm_v2_consume_whole_free_block);
 PHI_DECLARE_uint64(vmm_v2_consume_whole_free_block_max_waste_mb);
@@ -101,41 +95,6 @@ bool RangesOverlap(void* lhs_ptr,
   const auto* rhs_begin = reinterpret_cast<const uint8_t*>(rhs_ptr);
   const auto* rhs_end = rhs_begin + rhs_size;
   return lhs_end > rhs_begin && rhs_end > lhs_begin;
-}
-
-bool UseDiagnosticNoPartsHotPath() {
-  return FLAGS_vmm_v2_fast_hot_path_no_parts || FLAGS_vmm_v2_fake_block_parts;
-}
-
-bool UseDiagnosticMappedFreeSplitNoParts() {
-  return UseDiagnosticNoPartsHotPath() ||
-         FLAGS_vmm_v2_fake_mapped_free_split_parts;
-}
-
-bool UseLazyBlockParts() { return FLAGS_vmm_v2_lazy_block_parts; }
-
-bool UseDiagnosticFreeMergeNoParts() {
-  return UseDiagnosticNoPartsHotPath() || FLAGS_vmm_v2_fake_free_merge_parts;
-}
-
-bool MayHaveIncompleteParts() {
-  return UseLazyBlockParts() || UseDiagnosticNoPartsHotPath() ||
-         FLAGS_vmm_v2_fake_mapped_free_split_parts ||
-         FLAGS_vmm_v2_fake_free_merge_parts;
-}
-
-bool UseNoPartsSubBlockView(const BlockV2& block) {
-  return UseLazyBlockParts() || UseDiagnosticNoPartsHotPath() ||
-         (MayHaveIncompleteParts() && !block.HasCompleteAllocationParts());
-}
-
-bool UseNoPartsMappedFreeSplit(const BlockV2& block) {
-  return UseLazyBlockParts() || UseDiagnosticMappedFreeSplitNoParts() ||
-         (MayHaveIncompleteParts() && !block.HasCompleteAllocationParts());
-}
-
-bool UseNoPartsFreeMerge() {
-  return UseLazyBlockParts() || UseDiagnosticFreeMergeNoParts();
 }
 
 bool ShouldConsumeWholeFreeBlock(size_t remainder_size) {
@@ -394,11 +353,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
     BlockV2 grow_block = AdoptBackingBlock(&grow_alloc);
     total_new_size += grow_block.size_;
     if (has_tail_reuse) {
-      if (UseLazyBlockParts()) {
-        combined_free_block.AbsorbAdjacentBlockWithoutParts(&grow_block);
-      } else {
-        combined_free_block.AbsorbAdjacentBlock(&grow_block);
-      }
+      combined_free_block.AbsorbAdjacentBlockWithoutParts(&grow_block);
     } else {
       combined_free_block = std::move(grow_block);
     }
@@ -406,20 +361,14 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
 
   const size_t remaining_size = total_new_size - requested_size;
 
-  BlockV2 block =
-      UseNoPartsSubBlockView(combined_free_block)
-          ? combined_free_block.MakeMappedActiveSubBlockWithoutParts(
-                0, requested_size)
-          : combined_free_block.MakeMappedActiveSubBlock(0, requested_size);
+  BlockV2 block = combined_free_block.MakeMappedActiveSubBlockWithoutParts(
+      0, requested_size);
   auto it = all_blocks_.insert(all_blocks_.end(), std::move(block));
 
   if (remaining_size > 0) {
     BlockV2 remaining_block =
-        UseNoPartsSubBlockView(combined_free_block)
-            ? combined_free_block.MakeMappedFreeSubBlockWithoutParts(
-                  requested_size, remaining_size)
-            : combined_free_block.MakeMappedFreeSubBlock(requested_size,
-                                                         remaining_size);
+        combined_free_block.MakeMappedFreeSubBlockWithoutParts(requested_size,
+                                                               remaining_size);
     auto remain_it =
         all_blocks_.insert(std::next(it), std::move(remaining_block));
     InsertFreeBlock(remain_it);
@@ -824,28 +773,17 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   const bool has_remainder = block_size > size;
   const size_t remaining_size = has_remainder ? block_size - size : 0;
   const bool consume_whole_block = ShouldConsumeWholeFreeBlock(remaining_size);
-  const bool use_no_parts_split = UseNoPartsMappedFreeSplit(*block_it);
-  const bool use_legacy_parts_split =
-      FLAGS_vmm_v2_legacy_mapped_free_split && !use_no_parts_split;
   if (has_remainder && !consume_whole_block) {
     auto split_start = detail_tick();
     BlockV2 remaining_block =
-        use_no_parts_split
-            ? block_it->MakeMappedFreeSubBlockWithoutParts(size, remaining_size)
-            : (use_legacy_parts_split
-                   ? block_it->MakeMappedFreeSubBlock(size, remaining_size)
-                   : block_it->SplitMappedFreeSuffixFromPrefix(size));
+        block_it->MakeMappedFreeSubBlockWithoutParts(size, remaining_size);
     if (part_stats != nullptr) {
       remainder_parts = remaining_block.AllocationPartCount();
     }
     // The free remainder keeps the source block's remap-safety stream. The
     // reused prefix is cleared by MarkActive().
 
-    if (use_no_parts_split) {
-      *block_it = block_it->MakeMappedActiveSubBlockWithoutParts(0, size);
-    } else if (use_legacy_parts_split) {
-      block_it->TrimToPrefix(size);
-    }
+    *block_it = block_it->MakeMappedActiveSubBlockWithoutParts(0, size);
     if (detail_stats != nullptr) {
       ++detail_stats->split_count;
       detail_stats->split_us += detail_elapsed(split_start);
@@ -864,13 +802,9 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   }
 
   auto mark_active_start = detail_tick();
-  if (use_no_parts_split) {
-    if (!has_remainder || consume_whole_block) {
-      *block_it = block_it->MakeMappedActiveSubBlockWithoutParts(
-          0, consume_whole_block ? block_size : size);
-    }
-  } else {
-    block_it->MarkActive();
+  if (!has_remainder || consume_whole_block) {
+    *block_it = block_it->MakeMappedActiveSubBlockWithoutParts(
+        0, consume_whole_block ? block_size : size);
   }
   if (detail_stats != nullptr) {
     detail_stats->mark_active_us += detail_elapsed(mark_active_start);
@@ -946,17 +880,12 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
   const PoolType original_pool_type = best->pool_type_;
 
   EraseUnmappedFreeBlock(best);
-  *best = UseLazyBlockParts()
-              ? mapped_block.MakeMappedActiveSubBlockWithoutParts(0, size)
-              : mapped_block.MakeMappedActiveSubBlock(0, size);
+  *best = mapped_block.MakeMappedActiveSubBlockWithoutParts(0, size);
 
   auto insert_pos = std::next(best);
   if (backing_size > size) {
-    BlockV2 mapped_remain =
-        UseLazyBlockParts()
-            ? mapped_block.MakeMappedFreeSubBlockWithoutParts(
-                  size, backing_size - size)
-            : mapped_block.MakeMappedFreeSubBlock(size, backing_size - size);
+    BlockV2 mapped_remain = mapped_block.MakeMappedFreeSubBlockWithoutParts(
+        size, backing_size - size);
     mapped_remain.owning_stream_ = nullptr;
     mapped_remain.remap_safe_event_.reset();
     mapped_remain.remap_pending_states_.clear();
@@ -1133,11 +1062,7 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it,
         detail->erase_free_us += detail_elapsed(erase_free_start);
       }
       auto absorb_start = detail_tick();
-      if (UseNoPartsFreeMerge()) {
-        prev->AbsorbAdjacentBlockWithoutParts(&*it);
-      } else {
-        prev->AbsorbAdjacentBlock(&*it);
-      }
+      prev->AbsorbAdjacentBlockWithoutParts(&*it);
       if (detail != nullptr) {
         detail->absorb_us += detail_elapsed(absorb_start);
       }
@@ -1161,11 +1086,7 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it,
       detail->erase_free_us += detail_elapsed(erase_free_start);
     }
     auto absorb_start = detail_tick();
-    if (UseNoPartsFreeMerge()) {
-      it->AbsorbAdjacentBlockWithoutParts(&*next);
-    } else {
-      it->AbsorbAdjacentBlock(&*next);
-    }
+    it->AbsorbAdjacentBlockWithoutParts(&*next);
     if (detail != nullptr) {
       detail->absorb_us += detail_elapsed(absorb_start);
     }

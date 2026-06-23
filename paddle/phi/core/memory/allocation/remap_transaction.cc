@@ -25,8 +25,6 @@
 #include "paddle/common/flags.h"
 #include "paddle/phi/core/enforce.h"
 
-PHI_DECLARE_bool(vmm_v2_lazy_block_parts);
-
 namespace paddle {
 namespace memory {
 namespace allocation {
@@ -169,17 +167,10 @@ void AppendMappedFreeSubRange(std::vector<BlockV2>* segments,
   }
 
   BlockV2 segment =
-      FLAGS_vmm_v2_lazy_block_parts
-          ? source.MakeMappedFreeSubBlockWithoutParts(va - source.BeginVA(),
-                                                      size)
-          : source.MakeMappedFreeSubBlock(va - source.BeginVA(), size);
+      source.MakeMappedFreeSubBlockWithoutParts(va - source.BeginVA(), size);
   if (!segments->empty() &&
       segments->back().CanAbsorbAdjacentFreeBlock(segment)) {
-    if (FLAGS_vmm_v2_lazy_block_parts) {
-      segments->back().AbsorbAdjacentBlockWithoutParts(&segment);
-    } else {
-      segments->back().AbsorbAdjacentBlock(&segment);
-    }
+    segments->back().AbsorbAdjacentBlockWithoutParts(&segment);
     return;
   }
   segments->push_back(std::move(segment));
@@ -1096,11 +1087,7 @@ void RemapTransaction::InstallTailFreeBlock(BlockList* blocks,
   if (!blocks->empty()) {
     auto last = std::prev(blocks->end());
     if (last->CanAbsorbAdjacentFreeBlock(free_block)) {
-      if (FLAGS_vmm_v2_lazy_block_parts) {
-        last->AbsorbAdjacentBlockWithoutParts(&free_block);
-      } else {
-        last->AbsorbAdjacentBlock(&free_block);
-      }
+      last->AbsorbAdjacentBlockWithoutParts(&free_block);
       return;
     }
   }
@@ -1132,11 +1119,7 @@ RemapTransaction::InstallMappedUnmappedFreeRange(BlockList* blocks,
   if (result != blocks->begin()) {
     auto prev = std::prev(result);
     if (prev->CanAbsorbAdjacentFreeBlock(*result)) {
-      if (FLAGS_vmm_v2_lazy_block_parts) {
-        prev->AbsorbAdjacentBlockWithoutParts(&*result);
-      } else {
-        prev->AbsorbAdjacentBlock(&*result);
-      }
+      prev->AbsorbAdjacentBlockWithoutParts(&*result);
       blocks->erase(result);
       result = prev;
     }
@@ -1144,11 +1127,7 @@ RemapTransaction::InstallMappedUnmappedFreeRange(BlockList* blocks,
 
   auto next = std::next(result);
   if (next != blocks->end() && result->CanAbsorbAdjacentFreeBlock(*next)) {
-    if (FLAGS_vmm_v2_lazy_block_parts) {
-      result->AbsorbAdjacentBlockWithoutParts(&*next);
-    } else {
-      result->AbsorbAdjacentBlock(&*next);
-    }
+    result->AbsorbAdjacentBlockWithoutParts(&*next);
     blocks->erase(next);
   }
   return result;
@@ -1181,11 +1160,7 @@ void RemapTransaction::MergeAdjacentFreeBlocks(BlockList* blocks) const {
     }
     auto next = std::next(it);
     if (next != blocks->end() && it->CanAbsorbAdjacentFreeBlock(*next)) {
-      if (FLAGS_vmm_v2_lazy_block_parts) {
-        it->AbsorbAdjacentBlockWithoutParts(&*next);
-      } else {
-        it->AbsorbAdjacentBlock(&*next);
-      }
+      it->AbsorbAdjacentBlockWithoutParts(&*next);
       blocks->erase(next);
       continue;
     }

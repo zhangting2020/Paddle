@@ -851,10 +851,10 @@ CUDAVirtualMemAllocatorV2::AllocationWithBlock
 CUDAVirtualMemAllocatorV2::BuildAllocationWithBlock(
     AllocationWithLayout allocation_with_layout) {
   AllocationWithBlock result;
-  result.block = BlockV2::MakeMappedFreeBlockFromLayout(
+  result.block = BlockV2::MakeMappedBlockWithoutParts(
+      BlockType::kFree,
       allocation_with_layout.allocation->ptr(),
       allocation_with_layout.allocation->size(),
-      allocation_with_layout.layout,
       pool_type_);
   result.allocation = std::move(allocation_with_layout.allocation);
   return result;
@@ -918,8 +918,11 @@ CUDAVirtualMemAllocatorV2::CreateStagedRemapDestinationAllocationWithBlock(
   try {
     result.allocation =
         CreateStagedSyntheticAllocation(ptr, result.bytes, layout);
-    result.block = BlockV2::MakeMappedFreeBlockFromLayout(
-        reinterpret_cast<void*>(ptr), result.bytes, layout, pool_type);
+    result.block =
+        BlockV2::MakeMappedBlockWithoutParts(BlockType::kFree,
+                                             reinterpret_cast<void*>(ptr),
+                                             result.bytes,
+                                             pool_type);
     MarkRemapDestinationLayoutMapped(layout);
   } catch (const std::exception& e) {
     VLOG(0) << "CreateStagedRemapDestinationAllocationWithBlock: failed to "

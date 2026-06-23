@@ -27,15 +27,18 @@ model kernels:
    core._vmm_v2_step_stats_snapshot_and_reset(device).
 
 The parent process launches children because Paddle FLAGS must be set before
-importing paddle. By default the benchmark compares h=2 and h=16 under:
+importing paddle. By default the benchmark compares h=2 and h=16 under these
+compatibility labels:
 
 - legacy:   FLAGS_vmm_v2_legacy_mapped_free_split=1
 - optimized:FLAGS_vmm_v2_legacy_mapped_free_split=0
 - lazy:     FLAGS_vmm_v2_lazy_block_parts=1
 
-Use this as a local performance regression guard before relying on 4-machine
-model throughput. A healthy build should show optimized split clearly slower
-than legacy/lazy on h=2 for mapped_free_total_us.
+Current VMM v2 no longer maintains BlockV2 backing parts on the normal
+allocator block-list hot path, so these labels should be equivalent for normal
+mapped-free reuse. Use this as a local performance regression guard before
+relying on 4-machine model throughput. A healthy build should keep avg/max
+parts at 0 and avoid order-of-magnitude h=2 vs h=16 mapped_free_total_us gaps.
 """
 
 from __future__ import annotations

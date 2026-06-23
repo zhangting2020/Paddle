@@ -72,25 +72,20 @@ PHI_DEFINE_EXPORTED_bool(
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_fake_block_parts,
     false,
-    "Skip maintaining BlockV2 backing parts in VMM V2 alloc/free split and "
-    "merge paths. This is for diagnostics only and is invalid with remap, IPC "
-    "export/import, or real tensor-info part inspection.");
+    "Deprecated diagnostic flag. VMM V2 no longer maintains BlockV2 backing "
+    "parts on normal alloc/free split and merge paths.");
 
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_fake_mapped_free_split_parts,
     false,
-    "Diagnostic-only VMM V2 mode: skip BlockV2 backing-part slicing when a "
-    "mapped-free block is split for allocation. This isolates mapped-free "
-    "allocation split overhead and is invalid with remap, IPC export/import, "
-    "or real tensor-info part inspection.");
+    "Deprecated diagnostic flag. VMM V2 mapped-free allocation split no "
+    "longer slices BlockV2 backing parts on the normal hot path.");
 
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_fake_free_merge_parts,
     false,
-    "Diagnostic-only VMM V2 mode: skip BlockV2 backing-part append work when "
-    "adjacent free blocks are merged. This isolates free merge overhead and "
-    "is invalid with remap, IPC export/import, or real tensor-info part "
-    "inspection.");
+    "Deprecated diagnostic flag. VMM V2 free block merge no longer appends "
+    "BlockV2 backing parts on the normal hot path.");
 
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_round_alloc_to_handle_size,
@@ -109,28 +104,25 @@ PHI_DEFINE_EXPORTED_bool(
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_fast_hot_path_no_parts,
     false,
-    "Diagnostic-only VMM V2 fast path for normal alloc/free: skip BlockV2 "
-    "backing-part maintenance and remap-safety marking on hot paths. This is "
-    "unsafe for remap, IPC export/import, and real tensor-info part "
-    "inspection.");
+    "Deprecated diagnostic flag. VMM V2 normal alloc/free/remap block-list "
+    "paths no longer maintain BlockV2 backing parts by default, so this flag "
+    "does not switch the allocator hot path.");
 
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_lazy_block_parts,
-    false,
-    "VMM V2 mode: keep normal allocator split/merge/grow hot paths free of "
-    "eager BlockV2 backing-part materialization. IPC, remap, and tensor-info "
-    "queries collect backing details from the page-level VMM backing map when "
-    "needed. Unlike FLAGS_vmm_v2_fast_hot_path_no_parts, this preserves "
-    "remap-safety metadata and is intended to be compatible with remap.");
+    true,
+    "Deprecated compatibility flag. VMM V2 now always keeps normal allocator "
+    "split/merge/grow/remap block-list paths free of eager BlockV2 "
+    "backing-part "
+    "materialization. IPC, remap, and tensor-info queries collect backing "
+    "details from the page-level VMM backing map when needed.");
 
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_legacy_mapped_free_split,
-    true,
-    "VMM V2 mapped-free split mode: use the legacy split path "
-    "(MakeMappedFreeSubBlock + TrimToPrefix) when allocating from a mapped "
-    "free block. This is the default because SplitMappedFreeSuffixFromPrefix "
-    "regressed the allocator hot path in large-scale training. Set this flag "
-    "to false only to diagnose or benchmark the newer split implementation.");
+    false,
+    "Deprecated compatibility flag. VMM V2 mapped-free allocation no longer "
+    "uses the old parts-based legacy split path on the normal allocator hot "
+    "path; backing details are queried from the page-level backing map.");
 
 PHI_DEFINE_EXPORTED_bool(
     vmm_v2_skip_remap_safety_hot_path,
