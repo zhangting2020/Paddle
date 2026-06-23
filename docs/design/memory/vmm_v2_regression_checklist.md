@@ -1,6 +1,6 @@
 # VMM V2 回归验证 Checklist
 
-> 最后验证日期: 2026-06-23 (GPU 0 for VMM V2 full replay regression)
+> 最后验证日期: 2026-06-24 (GPU 7 for VMM V2 full replay regression)
 > 验证分支: `vmm_v2_pr3` (`/work/Paddle`), `vmm_v2_pr4` (`/work/dev_tool/Paddle`)
 > Backing View 实验分支: `feature/vmm-v2-backing-view`
 > 环境: A100-80G, CUDA 12.9, Python 3.12
@@ -326,6 +326,7 @@ grep -Ei "BackingMap.*(mismatch|validation failed|invalid range|reconfigure)" "$
 
 | 日期/时间 | 范围 | 日志/验证 | 结论 |
 |-----------|------|-----------|------|
+| 2026-06-24 00:08-00:27 | `4bf6c67d27` 移除 fake/legacy 诊断开关后的完整 8/8 回归 | `/work/MemoryTools/logs/regression/20260624_000834/` | 8/8 PASS，用时 18m40s；运行前 GPU 7 为 0MiB，wheel 重新编译并 `--force-reinstall --no-deps` 安装，Python 运行时 commit 为 `4bf6c67d277238de7dbeef5c7373e1152499c1c2`；结果：`ernie_35g_remap_on ooms=48 elapsed=10.23s`、`ernie_35g_remap_off ooms=61 elapsed=10.09s`、`dsv3_30g ooms=38 elapsed=6.79s`、`dsv3_45g_bounded ooms=3509 elapsed=417.59s`、`dsv3_45g_compact_all ooms=3501 elapsed=414.47s`、`probe_standard success=1`、`probe_split_fill=8/10 elapsed=1.41s`、`compact_no_grow SUCCESS time=112.5ms cleanup=0.000G`；主要 replay case `post_cleanup_reserved_gib=0.0`，GPU 7 结束后回到 0MiB；grep 未发现 force-release、BackingMap mismatch、validation failed、invalid range、cudaError、corrupted size、double free、NCCL error、crash 等错误信号 |
 | 2026-06-23 23:57 | 移除 fake/legacy parts 诊断开关后 allocator mapped-free 热路径性能回归 | `/work/dev_tool/Paddle/tmp/vmm_v2_allocator_perf_no_fake_20260623_235744/summary.md` | PASS；脚本 `tools/vmm_v2_allocator_perf_benchmark.py` 现在只跑正式 h=2/h=16、fixed/random 4 组；每组 `mapped_free cnt=640`；h2 fixed/random mapped_free 总耗时 `0.141ms/0.096ms`，h16 fixed/random 为 `0.155ms/0.113ms`；h2/h16 无数量级差异，ratio：fixed `0.91x`，random `0.85x` |
 | 2026-06-23 23:03-23:22 | `112b0b2f5b` stale CUDA OOM cleanup 修复后完整 8/8 回归 | `/work/MemoryTools/logs/regression/20260623_230352/` | 8/8 PASS，用时 18m41s；运行前后 GPU 0-7 均为 0MiB；wheel 由当前 working tree 编译，Python 运行时 commit 字段仍显示上一个提交 `4a6b699093cad0752cd68c054243596f9ba32a2f`，但包含 `112b0b2f5b` 的 stale-OOM cleanup 改动；结果：`ernie_35g_remap_on ooms=48 elapsed=10.19s`、`ernie_35g_remap_off ooms=61 elapsed=10.18s`、`dsv3_30g ooms=38 elapsed=7.11s`、`dsv3_45g_bounded ooms=3509 elapsed=418.31s`、`dsv3_45g_compact_all ooms=3501 elapsed=414.60s`、`probe_standard success=1`、`probe_split_fill=8/10 elapsed=1.45s`、`compact_no_grow SUCCESS time=111.9ms cleanup=0.000G`；所有 replay `post_cleanup_reserved_gib=0.0`，grep 未发现 force-release、BackingMap mismatch、validation failed、invalid range、cudaError、corrupted size、NCCL error、crash 等错误信号 |
 | 2026-06-23 | 模型侧最近一次正常性能基线，当前机器暂不可复测 | 正常基线提交: `4a6b699093cad0752cd68c054243596f9ba32a2f`; 日志: `vmm_h2_no_parts_remap_on_clean_623`、`vmm_h16_remap_on_clean_623`、`vmm_off_623` | `4a6b699` 是 no-parts hot path 主体修复后的模型性能基线：h2 no-parts remap-on clean 最后 10 step mean 约 `3796.160`，h16 remap-on clean mean 约 `3800.760`，vmm off mean 约 `3845.320`，h2 相比 h16 基本持平、相比 off 约 -1.28%；`112b0b2f5b` 仅改 OOM/Release cleanup 路径，理论上不影响稳态模型热路径，但由于 4 机模型环境暂不可用，模型 clean 性能复测标记为待补 |
