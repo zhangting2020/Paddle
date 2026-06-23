@@ -124,6 +124,15 @@ PHI_DEFINE_EXPORTED_bool(
     "remap-safety metadata and is intended to be compatible with remap.");
 
 PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_legacy_mapped_free_split,
+    false,
+    "Diagnostic-only VMM V2 mode: use the pre-optimized mapped-free split "
+    "path (MakeMappedFreeSubBlock + TrimToPrefix) instead of "
+    "SplitMappedFreeSuffixFromPrefix when allocating from a mapped free block. "
+    "This isolates whether the newer split implementation regresses allocator "
+    "hot-path performance.");
+
+PHI_DEFINE_EXPORTED_bool(
     vmm_v2_skip_remap_safety_hot_path,
     false,
     "Diagnostic-only VMM V2 mode: skip remap-safety state marking on normal "

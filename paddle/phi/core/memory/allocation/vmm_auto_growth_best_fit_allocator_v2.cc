@@ -38,6 +38,7 @@ PHI_DECLARE_bool(vmm_v2_round_alloc_to_handle_size);
 PHI_DECLARE_bool(vmm_v2_round_large_pool_alloc_to_handle_size);
 PHI_DECLARE_bool(vmm_v2_fast_hot_path_no_parts);
 PHI_DECLARE_bool(vmm_v2_lazy_block_parts);
+PHI_DECLARE_bool(vmm_v2_legacy_mapped_free_split);
 PHI_DECLARE_bool(vmm_v2_skip_remap_safety_hot_path);
 PHI_DECLARE_bool(vmm_v2_consume_whole_free_block);
 PHI_DECLARE_uint64(vmm_v2_consume_whole_free_block_max_waste_mb);
@@ -824,12 +825,16 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   const size_t remaining_size = has_remainder ? block_size - size : 0;
   const bool consume_whole_block = ShouldConsumeWholeFreeBlock(remaining_size);
   const bool use_no_parts_split = UseNoPartsMappedFreeSplit(*block_it);
+  const bool use_legacy_parts_split =
+      FLAGS_vmm_v2_legacy_mapped_free_split && !use_no_parts_split;
   if (has_remainder && !consume_whole_block) {
     auto split_start = detail_tick();
     BlockV2 remaining_block =
         use_no_parts_split
             ? block_it->MakeMappedFreeSubBlockWithoutParts(size, remaining_size)
-            : block_it->SplitMappedFreeSuffixFromPrefix(size);
+            : (use_legacy_parts_split
+                   ? block_it->MakeMappedFreeSubBlock(size, remaining_size)
+                   : block_it->SplitMappedFreeSuffixFromPrefix(size));
     if (part_stats != nullptr) {
       remainder_parts = remaining_block.AllocationPartCount();
     }
@@ -838,6 +843,8 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
 
     if (use_no_parts_split) {
       *block_it = block_it->MakeMappedActiveSubBlockWithoutParts(0, size);
+    } else if (use_legacy_parts_split) {
+      block_it->TrimToPrefix(size);
     }
     if (detail_stats != nullptr) {
       ++detail_stats->split_count;
