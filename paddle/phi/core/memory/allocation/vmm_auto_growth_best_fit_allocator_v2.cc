@@ -554,25 +554,27 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
     return free_detail_stats_ptr != nullptr ? ElapsedMicros(start, Clock::now())
                                             : 0;
   };
-  auto remap_safety_start = detail_tick();
   bool remap_safety_touched = false;
   auto remap_event = wrapped_allocation->TakeRemapEvent();
-  if (wrapped_allocation->has_remap_state()) {
+  const bool has_remap_state = wrapped_allocation->has_remap_state();
+  const auto remap_stream = wrapped_allocation->remap_stream();
+  if (has_remap_state) {
     remap_safety_touched = true;
-    it->SetRemapSafety(wrapped_allocation->remap_stream(), remap_event);
   } else if (FLAGS_vmm_v2_remap_on_oom &&
              !FLAGS_vmm_v2_skip_remap_safety_hot_path) {
     remap_safety_touched = true;
-    auto remap_stream = wrapped_allocation->remap_stream();
+    auto remap_safety_start = detail_tick();
     if (remap_stream == nullptr) {
       it->ClearRemapSafety();
     } else {
       it->SetRemapSafety(remap_stream, nullptr);
     }
+    if (free_detail_stats_ptr != nullptr) {
+      free_detail_stats.remap_safety_us += detail_elapsed(remap_safety_start);
+    }
   }
   if (free_detail_stats_ptr != nullptr && remap_safety_touched) {
     free_detail_stats.remap_safety_count += 1;
-    free_detail_stats.remap_safety_us += detail_elapsed(remap_safety_start);
   }
   auto mark_start = detail_tick();
   it->MarkFree();
@@ -580,9 +582,18 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
     free_detail_stats.mark_free_us += detail_elapsed(mark_start);
   }
   auto merge_start = detail_tick();
-  TryMerge(it, free_detail_stats_ptr);
+  it = TryMerge(it, free_detail_stats_ptr);
   if (free_detail_stats_ptr != nullptr) {
     free_detail_stats.try_merge_us += detail_elapsed(merge_start);
+  }
+  if (has_remap_state) {
+    auto remap_safety_start = detail_tick();
+    it->AppendRemapSafety(remap_stream, remap_event);
+    if (free_detail_stats_ptr != nullptr) {
+      free_detail_stats.remap_safety_us += detail_elapsed(remap_safety_start);
+    }
+  }
+  if (free_detail_stats_ptr != nullptr) {
     RecordVMMV2FreeDetail(place_.device, free_detail_stats);
   }
   if (trace_perf || trace_step) {
@@ -1035,8 +1046,8 @@ BlockListIt VMMAutoGrowthBestFitAllocatorV2::TryPopExactFreeBlock(size_t size) {
   return cached;
 }
 
-void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it,
-                                               VMMV2FreeDetailStats* detail) {
+BlockListIt VMMAutoGrowthBestFitAllocatorV2::TryMerge(
+    BlockListIt it, VMMV2FreeDetailStats* detail) {
   auto detail_tick = [&]() {
     return detail != nullptr ? Clock::now() : Clock::time_point{};
   };
@@ -1101,6 +1112,7 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it,
       detail->insert_free_us += detail_elapsed(insert_free_start);
     }
   }
+  return it;
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::TryMergeUnmappedFree(BlockListIt it) {
