@@ -190,16 +190,6 @@ struct BlockPartV2 {
   size_t len_{0};
 };
 
-inline std::vector<BlockPartV2> BuildBlockPartsFromHandleLayout(
-    const HandleLayout& layout) {
-  std::vector<BlockPartV2> parts;
-  parts.reserve(layout.size());
-  for (const auto& handle : layout) {
-    parts.push_back(BlockPartV2{handle, 0, handle->Size()});
-  }
-  return parts;
-}
-
 inline std::vector<BlockPartV2> SliceBlockPartsForRange(
     const std::vector<BlockPartV2>& parts,
     size_t range_offset,
@@ -323,49 +313,6 @@ struct BlockV2 {
     return block;
   }
 
-  static BlockV2 MakeMappedActiveBlock(void* ptr,
-                                       size_t size,
-                                       const std::vector<BlockPartV2>& parts,
-                                       size_t parts_offset,
-                                       size_t parts_len,
-                                       PoolType pool_type) {
-    return MakeMappedBlock(BlockType::kActive,
-                           ptr,
-                           size,
-                           parts,
-                           parts_offset,
-                           parts_len,
-                           pool_type);
-  }
-
-  static BlockV2 MakeMappedFreeBlock(void* ptr,
-                                     size_t size,
-                                     const std::vector<BlockPartV2>& parts,
-                                     size_t parts_offset,
-                                     size_t parts_len,
-                                     PoolType pool_type) {
-    return MakeMappedBlock(
-        BlockType::kFree, ptr, size, parts, parts_offset, parts_len, pool_type);
-  }
-
-  static BlockV2 MakeMappedFreeBlock(void* ptr,
-                                     size_t size,
-                                     std::vector<BlockPartV2>&& parts,
-                                     PoolType pool_type) {
-    BlockV2 block;
-    block.Reset(ptr, size, BlockType::kFree, pool_type);
-    block.SetParts(std::move(parts));
-    return block;
-  }
-
-  static BlockV2 MakeMappedFreeBlockFromLayout(void* ptr,
-                                               size_t size,
-                                               const HandleLayout& layout,
-                                               PoolType pool_type) {
-    return MakeMappedFreeBlock(
-        ptr, size, BuildBlockPartsFromHandleLayout(layout), 0, size, pool_type);
-  }
-
   static BlockV2 MakeMappedBlockWithoutParts(BlockType type,
                                              void* ptr,
                                              size_t size,
@@ -380,16 +327,6 @@ struct BlockV2 {
                                        PoolType pool_type) {
     BlockV2 block;
     block.Reset(ptr, size, BlockType::kUnmappedFree, pool_type);
-    return block;
-  }
-
-  static BlockV2 MakeSinglePartMappedFreeBlock(
-      void* ptr,
-      size_t size,
-      std::shared_ptr<VMMHandleMeta> meta,
-      PoolType pool_type) {
-    BlockV2 block;
-    block.ResetAsSinglePartMappedFree(ptr, size, std::move(meta), pool_type);
     return block;
   }
 
@@ -451,21 +388,6 @@ struct BlockV2 {
   }
   bool CanAbsorbAdjacentUnmappedFreeBlock(const BlockV2& next) const {
     return IsUnmappedFree() && next.IsUnmappedFree() && IsAdjacentBefore(next);
-  }
-  BlockV2 MakeMappedFreeSubBlock(size_t offset, size_t len) const {
-    auto block = MakeMappedFreeBlock(
-        BeginPtr() + offset, len, parts_, offset, len, pool_type_);
-    block.ipc_exported_ = ipc_exported_;
-#if defined(PADDLE_WITH_CUDA)
-    block.CopyRemapSafetyFrom(*this);
-#endif
-    return block;
-  }
-  BlockV2 MakeMappedActiveSubBlock(size_t offset, size_t len) const {
-    auto block = MakeMappedActiveBlock(
-        BeginPtr() + offset, len, parts_, offset, len, pool_type_);
-    block.ipc_exported_ = ipc_exported_;
-    return block;
   }
   BlockV2 MakeMappedSubBlockWithoutParts(BlockType type,
                                          size_t offset,
@@ -559,9 +481,6 @@ struct BlockV2 {
     }
     return total;
   }
-  bool HasCompleteAllocationParts() const {
-    return AllocationPartsByteSize() == size_;
-  }
   bool HasSingleAllocationPart(size_t handle_rel_off, size_t len) const {
     return parts_.size() == 1 &&
            parts_.front().HandleRelOffset() == handle_rel_off &&
@@ -576,64 +495,10 @@ struct BlockV2 {
   size_t AllocationPartByteSize(size_t index) const {
     return parts_.at(index).ByteSize();
   }
-  void TrimToPrefix(size_t keep) {
-    if (HasParts()) {
-      TrimPartsToRange(0, keep);
-    }
-    size_ = keep;
-  }
-  BlockV2 SplitMappedFreeSuffixFromPrefix(size_t keep) {
-    PADDLE_ENFORCE_GT(
-        keep,
-        0,
-        common::errors::InvalidArgument(
-            "VMM V2 split prefix size must be greater than zero."));
-    PADDLE_ENFORCE_LT(
-        keep,
-        size_,
-        common::errors::InvalidArgument(
-            "VMM V2 split prefix size %zu must be smaller than block size %zu.",
-            keep,
-            size_));
-    BlockV2 suffix;
-    suffix.Reset(BeginPtr() + keep, size_ - keep, BlockType::kFree, pool_type_);
-    suffix.ipc_exported_ = ipc_exported_;
-#if defined(PADDLE_WITH_CUDA)
-    suffix.CopyRemapSafetyFrom(*this);
-#endif
-    if (HasParts()) {
-      std::vector<BlockPartV2> prefix_parts;
-      std::vector<BlockPartV2> suffix_parts;
-      SplitPartsAt(keep, &prefix_parts, &suffix_parts);
-      parts_ = std::move(prefix_parts);
-      suffix.parts_ = std::move(suffix_parts);
-    }
-    size_ = keep;
-    return suffix;
-  }
+  void TrimToPrefix(size_t keep) { size_ = keep; }
   void TrimToSuffix(size_t trim, size_t keep) {
-    if (HasParts()) {
-      TrimPartsToRange(trim, keep);
-    }
     ptr_ = reinterpret_cast<uint8_t*>(ptr_) + trim;
     size_ = keep;
-  }
-  template <typename Fn>
-  void ForEachPartWithPtr(Fn&& fn) const {
-    auto* base = reinterpret_cast<uint8_t*>(ptr_);
-    size_t offset = 0;
-    for (const auto& part : parts_) {
-      fn(part, base + offset);
-      offset += part.ByteSize();
-    }
-  }
-  void AbsorbAdjacentBlock(BlockV2* src) {
-    size_ += src->size_;
-    ipc_exported_ = ipc_exported_ || src->ipc_exported_;
-    AppendPartsFrom(src);
-#if defined(PADDLE_WITH_CUDA)
-    AppendRemapSafetyFrom(*src);
-#endif
   }
   void AbsorbAdjacentBlockWithoutParts(BlockV2* src) {
     size_ += src->size_;
@@ -655,92 +520,16 @@ struct BlockV2 {
       TryAppendPart(*part);
     }
   }
-  void ResetAsSinglePartMappedFree(void* ptr,
-                                   size_t size,
-                                   std::shared_ptr<VMMHandleMeta> meta,
-                                   PoolType pool_type) {
-    Reset(ptr, size, BlockType::kFree, pool_type);
-    SetSinglePart(std::move(meta), size);
-  }
-
   void* ptr_{nullptr};
   size_t size_{0};
   BlockType type_{BlockType::kUnmappedFree};
   bool ipc_exported_{false};
 
  private:
-  void SetParts(const std::vector<BlockPartV2>& parts) { parts_ = parts; }
-  void SetParts(std::vector<BlockPartV2>&& parts) { parts_ = std::move(parts); }
   void SetPartsFromRange(const std::vector<BlockPartV2>& parts,
                          size_t offset,
                          size_t len) {
     parts_ = SliceBlockPartsForRange(parts, offset, len);
-  }
-  void TrimPartsToRange(size_t offset, size_t len) {
-    parts_ = SliceBlockPartsForRange(parts_, offset, len);
-  }
-  void SplitPartsAt(size_t split_offset,
-                    std::vector<BlockPartV2>* prefix_parts,
-                    std::vector<BlockPartV2>* suffix_parts) const {
-    prefix_parts->clear();
-    suffix_parts->clear();
-    prefix_parts->reserve(parts_.size());
-    suffix_parts->reserve(parts_.size());
-
-    auto append_part = [](std::vector<BlockPartV2>* parts, BlockPartV2 part) {
-      if (part.ByteSize() == 0) {
-        return;
-      }
-      if (parts->empty() || !parts->back().TryExtend(part)) {
-        parts->push_back(std::move(part));
-      }
-    };
-
-    size_t cursor = 0;
-    size_t prefix_len = 0;
-    size_t suffix_len = 0;
-    for (const auto& part : parts_) {
-      const size_t part_begin = cursor;
-      const size_t part_end = part_begin + part.ByteSize();
-      cursor = part_end;
-
-      if (part_end <= split_offset) {
-        append_part(prefix_parts, part);
-        prefix_len += part.ByteSize();
-        continue;
-      }
-      if (part_begin >= split_offset) {
-        append_part(suffix_parts, part);
-        suffix_len += part.ByteSize();
-        continue;
-      }
-
-      const size_t prefix_part_len = split_offset - part_begin;
-      const size_t suffix_part_len = part_end - split_offset;
-      append_part(prefix_parts, part.Slice(0, prefix_part_len));
-      append_part(suffix_parts, part.Slice(prefix_part_len, suffix_part_len));
-      prefix_len += prefix_part_len;
-      suffix_len += suffix_part_len;
-    }
-
-    PADDLE_ENFORCE_EQ(
-        prefix_len,
-        split_offset,
-        common::errors::InvalidArgument(
-            "Invalid VMM V2 split prefix: expected %zu bytes, got %zu.",
-            split_offset,
-            prefix_len));
-    PADDLE_ENFORCE_EQ(
-        suffix_len,
-        size_ - split_offset,
-        common::errors::InvalidArgument(
-            "Invalid VMM V2 split suffix: expected %zu bytes, got %zu.",
-            size_ - split_offset,
-            suffix_len));
-  }
-  void SetSinglePart(std::shared_ptr<VMMHandleMeta> meta, size_t len) {
-    parts_.clear();
-    parts_.push_back(BlockPartV2{std::move(meta), 0, len});
   }
   bool TryAppendPart(const BlockPartV2& part) {
     if (parts_.empty() || !parts_.back().TryExtend(part)) {
@@ -748,9 +537,6 @@ struct BlockV2 {
       return false;
     }
     return true;
-  }
-  void AppendPartsFrom(BlockV2* src) {
-    AppendBlockPartsTail(&parts_, &src->parts_);
   }
   void AddPart(BlockPartV2 part) { parts_.push_back(std::move(part)); }
 

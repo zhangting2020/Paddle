@@ -110,6 +110,8 @@ struct StepStats {
   uint64_t large_pool_alloc_count{0};
   uint64_t small_pool_free_count{0};
   uint64_t large_pool_free_count{0};
+  uint64_t free_remap_safety_count{0};
+  uint64_t free_remap_safety_us{0};
   uint64_t free_mark_free_us{0};
   uint64_t free_try_merge_us{0};
   uint64_t free_merge_prev_count{0};
@@ -248,6 +250,8 @@ void RecordVMMV2FreeDetail(int device_id, const VMMV2FreeDetailStats& detail) {
   }
   std::lock_guard<SpinLock> guard(g_step_stats_locks[device_id]);
   StepStats& stats = g_step_stats[device_id];
+  stats.free_remap_safety_count += detail.remap_safety_count;
+  stats.free_remap_safety_us += detail.remap_safety_us;
   stats.free_mark_free_us += detail.mark_free_us;
   stats.free_try_merge_us += detail.try_merge_us;
   stats.free_merge_prev_count += detail.merge_prev_count;
@@ -325,6 +329,8 @@ std::unordered_map<std::string, uint64_t> SnapshotAndResetVMMV2StepStats(
   result["large_pool_alloc_count"] = snapshot.large_pool_alloc_count;
   result["small_pool_free_count"] = snapshot.small_pool_free_count;
   result["large_pool_free_count"] = snapshot.large_pool_free_count;
+  result["free_remap_safety_count"] = snapshot.free_remap_safety_count;
+  result["free_remap_safety_us"] = snapshot.free_remap_safety_us;
   result["free_mark_free_us"] = snapshot.free_mark_free_us;
   result["free_try_merge_us"] = snapshot.free_try_merge_us;
   result["free_merge_prev_count"] = snapshot.free_merge_prev_count;

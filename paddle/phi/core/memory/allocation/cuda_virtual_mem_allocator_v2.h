@@ -170,10 +170,6 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
                        size_t size,
                        std::vector<BlockPart>* ipc_parts) const;
   bool MarkIpcExported(VMMDevicePtr ptr, size_t size);
-  bool CollectBlockIpcParts(const BlockV2& block,
-                            std::vector<BlockPart>* ipc_parts) const;
-  bool MarkBlockIpcExported(const BlockV2& block);
-  bool HasBlockIpcExported(const BlockV2& block) const;
   bool SetBlockRemapEvent(const BlockV2& block,
                           gpuStream_t stream,
                           std::shared_ptr<CUDAEventGuard> event);

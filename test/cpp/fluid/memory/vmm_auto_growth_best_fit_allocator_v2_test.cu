@@ -926,41 +926,6 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   EXPECT_TRUE(found_third_unmapped);
 }
 
-TEST(VMMAutoGrowthBestFitAllocatorV2, CompactWaitsForBackingMapPendingEvent) {
-  auto underlying = CreateUnderlyingAllocator();
-  VMMAutoGrowthBestFitAllocatorV2 allocator(
-      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
-
-  auto allocation = allocator.Allocate(underlying->HandleSize());
-  ASSERT_NE(allocation, nullptr);
-
-  gpuStream_t stream;
-  ASSERT_EQ(cudaStreamCreate(&stream), cudaSuccess);
-  BusyWaitKernel<<<1, 1, 0, stream>>>(500000000ULL);
-  ASSERT_EQ(cudaGetLastError(), cudaSuccess);
-
-  gpuEvent_t event;
-  ASSERT_EQ(cudaEventCreateWithFlags(&event, cudaEventDisableTiming),
-            cudaSuccess);
-  ASSERT_EQ(cudaEventRecord(event, stream), cudaSuccess);
-  auto guard = std::make_shared<CUDAEventGuard>(event);
-  ASSERT_TRUE(allocator.SetBlockRemapEvent(allocation->ptr(), stream, guard));
-
-  allocation.reset();
-  EXPECT_EQ(allocator.Compact(phi::GPUPlace()), 0UL);
-
-  ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
-  EXPECT_EQ(allocator.Compact(phi::GPUPlace()), underlying->HandleSize());
-
-  ASSERT_EQ(allocator.all_blocks().size(), 2UL);
-  auto it = allocator.all_blocks().begin();
-  ASSERT_EQ(it->type_, BlockType::kUnmappedFree);
-  ++it;
-  ASSERT_EQ(it->type_, BlockType::kFree);
-  EXPECT_EQ(it->size_, underlying->HandleSize());
-  ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
-}
-
 TEST(VMMAutoGrowthBestFitAllocatorV2, CompactWaitsForBlockOwningStream) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(

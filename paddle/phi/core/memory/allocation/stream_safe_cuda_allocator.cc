@@ -194,9 +194,9 @@ bool StreamSafeCUDAAllocation::SetVMMV2RemapEvent() {
   if (vmm_v2_remap_allocation_ == nullptr) {
     return false;
   }
-  // Do not create one CUDA event per free. VMM v2 stores the stream in its
-  // backing map and lazily records/queries the event only if remap actually
-  // considers the page as a move source.
+  // Do not create one CUDA event per free. VMM v2 stores the stream on the
+  // allocation/block and lazily records/queries the event only if remap
+  // actually considers the block as a move source.
   return vmm_v2_remap_allocation_->SetVMMRemapEvent(owning_stream_, nullptr);
 }
 

@@ -542,24 +542,6 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
       common::errors::NotFound("Can not find active block for allocation %p in "
                                "VMMAutoGrowthBestFitAllocatorV2.",
                                allocation->ptr()));
-  auto remap_event = wrapped_allocation->TakeRemapEvent();
-  if (wrapped_allocation->has_remap_state()) {
-    PADDLE_ENFORCE_EQ(
-        underlying_allocator_->SetBlockRemapEvent(
-            *it, wrapped_allocation->remap_stream(), remap_event),
-        true,
-        common::errors::InvalidArgument(
-            "Failed to attach explicit VMM V2 remap event for block %p.",
-            it->ptr_));
-  } else if (FLAGS_vmm_v2_remap_on_oom &&
-             !FLAGS_vmm_v2_skip_remap_safety_hot_path) {
-    auto remap_stream = wrapped_allocation->remap_stream();
-    if (remap_stream == nullptr) {
-      it->ClearRemapSafety();
-    } else {
-      it->SetRemapSafety(remap_stream, nullptr);
-    }
-  }
   VMMV2FreeDetailStats free_detail_stats;
   VMMV2FreeDetailStats* free_detail_stats_ptr =
       VMMV2DetailStatsEnabled() ? &free_detail_stats : nullptr;
@@ -571,6 +553,26 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
     return free_detail_stats_ptr != nullptr ? ElapsedMicros(start, Clock::now())
                                             : 0;
   };
+  auto remap_safety_start = detail_tick();
+  bool remap_safety_touched = false;
+  auto remap_event = wrapped_allocation->TakeRemapEvent();
+  if (wrapped_allocation->has_remap_state()) {
+    remap_safety_touched = true;
+    it->SetRemapSafety(wrapped_allocation->remap_stream(), remap_event);
+  } else if (FLAGS_vmm_v2_remap_on_oom &&
+             !FLAGS_vmm_v2_skip_remap_safety_hot_path) {
+    remap_safety_touched = true;
+    auto remap_stream = wrapped_allocation->remap_stream();
+    if (remap_stream == nullptr) {
+      it->ClearRemapSafety();
+    } else {
+      it->SetRemapSafety(remap_stream, nullptr);
+    }
+  }
+  if (free_detail_stats_ptr != nullptr && remap_safety_touched) {
+    free_detail_stats.remap_safety_count += 1;
+    free_detail_stats.remap_safety_us += detail_elapsed(remap_safety_start);
+  }
   auto mark_start = detail_tick();
   it->MarkFree();
   if (free_detail_stats_ptr != nullptr) {
@@ -687,8 +689,8 @@ bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
     if (!it->IsActive() || it->ptr_ != ptr) {
       continue;
     }
-    return underlying_allocator_->SetBlockRemapEvent(
-        *it, stream, std::move(event));
+    it->SetRemapSafety(stream, std::move(event));
+    return true;
   }
   return false;
 }
@@ -701,8 +703,8 @@ bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
   if (block_it == all_blocks_.end() || !block_it->IsActive()) {
     return false;
   }
-  return underlying_allocator_->SetBlockRemapEvent(
-      *block_it, stream, std::move(event));
+  block_it->SetRemapSafety(stream, std::move(event));
+  return true;
 }
 
 BlockList VMMAutoGrowthBestFitAllocatorV2::SnapshotAllBlocks() const {
@@ -1189,11 +1191,7 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
       const size_t keep = static_cast<size_t>(base - bptr);
       if (!is_unmapped_free) {
         EraseFreeBlock(it);
-        if (it->HasCompleteAllocationParts()) {
-          it->TrimToPrefix(keep);
-        } else {
-          *it = it->MakeMappedFreeSubBlockWithoutParts(0, keep);
-        }
+        *it = it->MakeMappedFreeSubBlockWithoutParts(0, keep);
         InsertFreeBlock(it);
       } else {
         EraseUnmappedFreeBlock(it);
@@ -1210,11 +1208,7 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
       const size_t keep = it->size_ - trim;
       if (!is_unmapped_free) {
         EraseFreeBlock(it);
-        if (it->HasCompleteAllocationParts()) {
-          it->TrimToSuffix(trim, keep);
-        } else {
-          *it = it->MakeMappedFreeSubBlockWithoutParts(trim, keep);
-        }
+        *it = it->MakeMappedFreeSubBlockWithoutParts(trim, keep);
         InsertFreeBlock(it);
       } else {
         EraseUnmappedFreeBlock(it);
@@ -1231,17 +1225,10 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
       const size_t right_size = it->size_ - right_offset;
 
       if (!is_unmapped_free) {
-        const bool complete_parts = it->HasCompleteAllocationParts();
-        BlockV2 right = complete_parts ? it->MakeMappedFreeSubBlock(
-                                             right_offset, right_size)
-                                       : it->MakeMappedFreeSubBlockWithoutParts(
-                                             right_offset, right_size);
+        BlockV2 right =
+            it->MakeMappedFreeSubBlockWithoutParts(right_offset, right_size);
         EraseFreeBlock(it);
-        if (complete_parts) {
-          it->TrimToPrefix(left_size);
-        } else {
-          *it = it->MakeMappedFreeSubBlockWithoutParts(0, left_size);
-        }
+        *it = it->MakeMappedFreeSubBlockWithoutParts(0, left_size);
         InsertFreeBlock(it);
         right.CopyRemapSafetyFrom(*it);
         auto right_it = all_blocks_.insert(std::next(it), std::move(right));

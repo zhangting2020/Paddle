@@ -1037,14 +1037,6 @@ bool CUDAVirtualMemAllocatorV2::IsDriverVaRangeUnmapped(VMMDevicePtr ptr,
   return true;
 }
 
-bool CUDAVirtualMemAllocatorV2::CollectBlockIpcParts(
-    const BlockV2& block, std::vector<BlockPart>* ipc_parts) const {
-  if (!IsReservedVaRange(block.BeginVA(), block.Size())) {
-    return false;
-  }
-  return CollectIpcParts(block.BeginVA(), block.Size(), ipc_parts);
-}
-
 bool CUDAVirtualMemAllocatorV2::CollectIpcParts(
     VMMDevicePtr ptr, size_t size, std::vector<BlockPart>* ipc_parts) const {
   std::vector<IpcBlockPartDescriptor> descriptors;
@@ -1070,24 +1062,9 @@ bool CUDAVirtualMemAllocatorV2::CollectIpcParts(
   return true;
 }
 
-bool CUDAVirtualMemAllocatorV2::MarkBlockIpcExported(const BlockV2& block) {
-  if (!IsReservedVaRange(block.BeginVA(), block.Size())) {
-    return false;
-  }
-  return MarkIpcExported(block.BeginVA(), block.Size());
-}
-
 bool CUDAVirtualMemAllocatorV2::MarkIpcExported(VMMDevicePtr ptr, size_t size) {
   MarkBackingIpcExported(ptr, size);
   return true;
-}
-
-bool CUDAVirtualMemAllocatorV2::HasBlockIpcExported(
-    const BlockV2& block) const {
-  if (!IsReservedVaRange(block.BeginVA(), block.Size())) {
-    return false;
-  }
-  return HasIpcExportedRange(block.BeginVA(), block.Size());
 }
 
 bool CUDAVirtualMemAllocatorV2::SetBlockRemapEvent(

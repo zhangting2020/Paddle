@@ -499,7 +499,8 @@ TEST(CUDAVirtualMemAllocatorV2, StagedRemapDestinationBlocksSource) {
             VMMBackingMap::RemapSourceState::kRemapDestinationOwned);
 
   std::vector<BlockPart> ipc_parts;
-  EXPECT_TRUE(allocator.CollectBlockIpcParts(staged.block, &ipc_parts));
+  EXPECT_TRUE(allocator.CollectIpcParts(
+      staged.block.BeginVA(), staged.block.Size(), &ipc_parts));
   EXPECT_EQ(ipc_parts.size(), 1UL);
   ASSERT_NE(ipc_parts[0].chunk, nullptr);
   EXPECT_EQ(ipc_parts[0].chunk->base, target_va);
@@ -549,7 +550,8 @@ TEST(CUDAVirtualMemAllocatorV2, CollectsAndPinsIpcBlockBacking) {
       ranges, allocation_with_block.allocation->size());
   ASSERT_EQ(pages.size(), 2UL);
   std::vector<BlockPart> ipc_parts;
-  ASSERT_TRUE(allocator.CollectBlockIpcParts(block, &ipc_parts));
+  ASSERT_TRUE(
+      allocator.CollectIpcParts(block.BeginVA(), block.Size(), &ipc_parts));
   ASSERT_EQ(ipc_parts.size(), 2UL);
   EXPECT_EQ(ipc_parts[0].chunk->base, pages[0].va);
   EXPECT_EQ(ipc_parts[0].chunk->size, allocator.HandleSize());
@@ -561,20 +563,20 @@ TEST(CUDAVirtualMemAllocatorV2, CollectsAndPinsIpcBlockBacking) {
   EXPECT_EQ(ipc_parts[1].len, 2048UL);
 
   EXPECT_TRUE(allocator.IsBlockReusableForAllocation(block));
-  ASSERT_TRUE(allocator.MarkBlockIpcExported(block));
-  EXPECT_TRUE(allocator.HasBlockIpcExported(block));
+  ASSERT_TRUE(allocator.MarkIpcExported(block.BeginVA(), block.Size()));
+  EXPECT_TRUE(allocator.HasIpcExportedRange(block.BeginVA(), block.Size()));
   EXPECT_FALSE(allocator.IsBlockReusableForAllocation(block));
 
   ASSERT_NE(pages[0].meta, nullptr);
   pages[0].meta->MarkOwnedByRemapDestination();
-  EXPECT_FALSE(allocator.CollectBlockIpcParts(block, &ipc_parts));
+  EXPECT_FALSE(
+      allocator.CollectIpcParts(block.BeginVA(), block.Size(), &ipc_parts));
   pages[0].meta->RestoreOriginalOwnership();
 
   BlockV2 invalid_block = MakeTestMappedBlock(
       BlockType::kActive, {BlockPartV2{nullptr, 0, allocator.HandleSize()}});
-  EXPECT_FALSE(allocator.CollectBlockIpcParts(invalid_block, &ipc_parts));
-  EXPECT_FALSE(allocator.MarkBlockIpcExported(invalid_block));
-  EXPECT_FALSE(allocator.HasBlockIpcExported(invalid_block));
+  EXPECT_FALSE(allocator.CollectIpcParts(
+      invalid_block.BeginVA(), invalid_block.Size(), &ipc_parts));
 }
 
 TEST(CUDAVirtualMemAllocatorV2, SetsBlockBackingRemapEvent) {

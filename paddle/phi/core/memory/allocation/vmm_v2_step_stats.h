@@ -58,6 +58,8 @@ struct VMMV2MappedFreeDetailStats {
 };
 
 struct VMMV2FreeDetailStats {
+  uint64_t remap_safety_count{0};
+  uint64_t remap_safety_us{0};
   uint64_t mark_free_us{0};
   uint64_t try_merge_us{0};
   uint64_t merge_prev_count{0};
