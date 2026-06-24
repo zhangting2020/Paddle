@@ -156,7 +156,9 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   void InsertUnmappedFreeBlock(BlockListIt it);
   void EraseUnmappedFreeBlock(BlockListIt it);
   void RebuildFreeBlockIndex();
-  BlockListIt TryMerge(BlockListIt it, VMMV2FreeDetailStats* detail = nullptr);
+  BlockListIt TryMerge(BlockListIt it,
+                       VMMV2FreeDetailStats* detail = nullptr,
+                       bool* merged = nullptr);
   void TryMergeUnmappedFree(BlockListIt it);
   uint64_t FreeIdleChunks();
   size_t ComputeTailOffset() const;

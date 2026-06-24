@@ -582,13 +582,18 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
     free_detail_stats.mark_free_us += detail_elapsed(mark_start);
   }
   auto merge_start = detail_tick();
-  it = TryMerge(it, free_detail_stats_ptr);
+  bool merged = false;
+  it = TryMerge(it, free_detail_stats_ptr, &merged);
   if (free_detail_stats_ptr != nullptr) {
     free_detail_stats.try_merge_us += detail_elapsed(merge_start);
   }
   if (has_remap_state) {
     auto remap_safety_start = detail_tick();
-    it->AppendRemapSafety(remap_stream, remap_event);
+    if (merged) {
+      it->AppendRemapSafety(remap_stream, remap_event);
+    } else {
+      it->SetRemapSafety(remap_stream, remap_event);
+    }
     if (free_detail_stats_ptr != nullptr) {
       free_detail_stats.remap_safety_us += detail_elapsed(remap_safety_start);
     }
@@ -1047,7 +1052,7 @@ BlockListIt VMMAutoGrowthBestFitAllocatorV2::TryPopExactFreeBlock(size_t size) {
 }
 
 BlockListIt VMMAutoGrowthBestFitAllocatorV2::TryMerge(
-    BlockListIt it, VMMV2FreeDetailStats* detail) {
+    BlockListIt it, VMMV2FreeDetailStats* detail, bool* merged) {
   auto detail_tick = [&]() {
     return detail != nullptr ? Clock::now() : Clock::time_point{};
   };
@@ -1080,6 +1085,9 @@ BlockListIt VMMAutoGrowthBestFitAllocatorV2::TryMerge(
         detail->erase_block_us += detail_elapsed(erase_block_start);
       }
       it = prev;
+      if (merged != nullptr) {
+        *merged = true;
+      }
     }
   }
 
@@ -1102,6 +1110,9 @@ BlockListIt VMMAutoGrowthBestFitAllocatorV2::TryMerge(
     all_blocks_.erase(next);
     if (detail != nullptr) {
       detail->erase_block_us += detail_elapsed(erase_block_start);
+    }
+    if (merged != nullptr) {
+      *merged = true;
     }
   }
 
