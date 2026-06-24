@@ -22,6 +22,50 @@ namespace paddle {
 namespace memory {
 namespace allocation {
 
+namespace {
+
+class VMMAutoGrowthBestFitMultiPoolAllocationV2
+    : public Allocation,
+      public VMMRemapEventAllocation {
+ public:
+  VMMAutoGrowthBestFitMultiPoolAllocationV2(
+      AllocationPtr underlying_allocation,
+      VMMAutoGrowthBestFitAllocatorV2* allocator,
+      PoolType pool_type)
+      : Allocation(
+            underlying_allocation->ptr(),
+            static_cast<Allocation*>(underlying_allocation.get())->base_ptr(),
+            underlying_allocation->size(),
+            underlying_allocation->place()),
+        underlying_allocation_(std::move(underlying_allocation)),
+        allocator_(allocator),
+        pool_type_(pool_type),
+        remap_allocation_(dynamic_cast<VMMRemapEventAllocation*>(
+            underlying_allocation_.get())) {}
+
+  AllocationPtr TakeUnderlyingAllocation() {
+    return std::move(underlying_allocation_);
+  }
+
+  VMMAutoGrowthBestFitAllocatorV2* allocator() const { return allocator_; }
+  PoolType pool_type() const { return pool_type_; }
+  bool SetVMMRemapEvent(gpuStream_t stream,
+                        std::shared_ptr<CUDAEventGuard> event) override {
+    if (remap_allocation_ == nullptr) {
+      return false;
+    }
+    return remap_allocation_->SetVMMRemapEvent(stream, std::move(event));
+  }
+
+ private:
+  AllocationPtr underlying_allocation_;
+  VMMAutoGrowthBestFitAllocatorV2* allocator_;
+  PoolType pool_type_;
+  VMMRemapEventAllocation* remap_allocation_{nullptr};
+};
+
+}  // namespace
+
 VMMAutoGrowthBestFitMultiPoolAllocatorV2::
     VMMAutoGrowthBestFitMultiPoolAllocatorV2(
         const std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>& small_allocator,
@@ -40,7 +84,9 @@ phi::Allocation* VMMAutoGrowthBestFitMultiPoolAllocatorV2::AllocateImpl(
       route.allocator,
       common::errors::NotFound("No VMM pool allocator found for pool %d.",
                                static_cast<int>(route.pool_type)));
-  return route.allocator->Allocate(size).release();
+  auto allocation = route.allocator->Allocate(size);
+  return new VMMAutoGrowthBestFitMultiPoolAllocationV2(
+      std::move(allocation), route.allocator, route.pool_type);
 }
 
 size_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::CompactImpl(
@@ -56,19 +102,17 @@ size_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::CompactImpl(
 
 void VMMAutoGrowthBestFitMultiPoolAllocatorV2::FreeImpl(
     phi::Allocation* allocation) {
-  auto* block_allocation =
-      dynamic_cast<VMMAutoGrowthBestFitBlockAllocationV2*>(allocation);
-  PADDLE_ENFORCE_NOT_NULL(
-      block_allocation,
-      common::errors::InvalidArgument(
-          "VMM v2 multi-pool allocator can only free allocations returned by "
-          "a VMM v2 pool allocator."));
-  auto* allocator = block_allocation->owner();
+  auto* wrapped_allocation =
+      static_cast<VMMAutoGrowthBestFitMultiPoolAllocationV2*>(allocation);
+  auto* allocator = wrapped_allocation->allocator();
   PADDLE_ENFORCE_NOT_NULL(
       allocator,
-      common::errors::NotFound("No VMM pool allocator owns allocation %p.",
-                               allocation->ptr()));
-  allocator->Free(allocation);
+      common::errors::NotFound(
+          "No VMM pool allocator found for pool %d.",
+          static_cast<int>(wrapped_allocation->pool_type())));
+  auto underlying_allocation = wrapped_allocation->TakeUnderlyingAllocation();
+  allocator->Free(underlying_allocation.release());
+  delete wrapped_allocation;
 }
 
 void VMMAutoGrowthBestFitMultiPoolAllocatorV2::GetFreeBlockStats(
