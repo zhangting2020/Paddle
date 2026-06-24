@@ -34,6 +34,7 @@ PHI_DECLARE_bool(vmm_v2_round_large_pool_alloc_to_handle_size);
 PHI_DECLARE_bool(vmm_v2_skip_remap_safety_hot_path);
 PHI_DECLARE_bool(vmm_v2_consume_whole_free_block);
 PHI_DECLARE_uint64(vmm_v2_consume_whole_free_block_max_waste_mb);
+PHI_DECLARE_bool(vmm_v2_exact_free_block_cache);
 
 namespace paddle {
 namespace memory {
@@ -720,24 +721,27 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   auto detail_elapsed = [&](Clock::time_point start) -> uint64_t {
     return detail_stats != nullptr ? ElapsedMicros(start, Clock::now()) : 0;
   };
-  auto lower_bound_start = detail_tick();
-  auto it = free_blocks_.lower_bound({size, nullptr});
-  if (detail_stats != nullptr) {
-    detail_stats->lower_bound_us += detail_elapsed(lower_bound_start);
-  }
-  while (it != free_blocks_.end() && !CanIndexFreeBlock(*it->second)) {
-    auto stale_erase_start = detail_tick();
-    it = free_blocks_.erase(it);
+  auto block_it = TryPopExactFreeBlock(size);
+  if (block_it == all_blocks_.end()) {
+    auto lower_bound_start = detail_tick();
+    auto it = free_blocks_.lower_bound({size, nullptr});
     if (detail_stats != nullptr) {
-      ++detail_stats->stale_erase_count;
-      detail_stats->stale_erase_us += detail_elapsed(stale_erase_start);
+      detail_stats->lower_bound_us += detail_elapsed(lower_bound_start);
     }
-  }
-  if (it == free_blocks_.end()) {
-    return nullptr;
+    while (it != free_blocks_.end() && !CanIndexFreeBlock(*it->second)) {
+      auto stale_erase_start = detail_tick();
+      it = free_blocks_.erase(it);
+      if (detail_stats != nullptr) {
+        ++detail_stats->stale_erase_count;
+        detail_stats->stale_erase_us += detail_elapsed(stale_erase_start);
+      }
+    }
+    if (it == free_blocks_.end()) {
+      return nullptr;
+    }
+    block_it = it->second;
   }
 
-  auto block_it = it->second;
   const size_t block_size = block_it->size_;
   auto erase_free_start = detail_tick();
   EraseFreeBlock(block_it);
@@ -972,9 +976,14 @@ void VMMAutoGrowthBestFitAllocatorV2::InsertFreeBlock(BlockListIt it) {
   }
   EmplaceOrEnforce(
       &free_blocks_, std::make_pair(it->size_, it->ptr_), it, "free_blocks_");
+  if (FLAGS_vmm_v2_exact_free_block_cache) {
+    exact_free_block_cache_ = it;
+    has_exact_free_block_cache_ = true;
+  }
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::EraseFreeBlock(BlockListIt it) {
+  ClearExactFreeBlockCacheIf(it);
   free_blocks_.erase({it->size_, it->ptr_});
 }
 
@@ -995,6 +1004,7 @@ void VMMAutoGrowthBestFitAllocatorV2::EraseUnmappedFreeBlock(BlockListIt it) {
 void VMMAutoGrowthBestFitAllocatorV2::RebuildFreeBlockIndex() {
   free_blocks_.clear();
   unmapped_free_blocks_.clear();
+  has_exact_free_block_cache_ = false;
   for (auto it = all_blocks_.begin(); it != all_blocks_.end(); ++it) {
     if (CanIndexFreeBlock(*it)) {
       InsertFreeBlock(it);
@@ -1003,6 +1013,26 @@ void VMMAutoGrowthBestFitAllocatorV2::RebuildFreeBlockIndex() {
       InsertUnmappedFreeBlock(it);
     }
   }
+}
+
+void VMMAutoGrowthBestFitAllocatorV2::ClearExactFreeBlockCacheIf(
+    BlockListIt it) {
+  if (has_exact_free_block_cache_ && exact_free_block_cache_ == it) {
+    has_exact_free_block_cache_ = false;
+  }
+}
+
+BlockListIt VMMAutoGrowthBestFitAllocatorV2::TryPopExactFreeBlock(size_t size) {
+  if (!FLAGS_vmm_v2_exact_free_block_cache || !has_exact_free_block_cache_) {
+    return all_blocks_.end();
+  }
+  auto cached = exact_free_block_cache_;
+  if (cached == all_blocks_.end() || !CanIndexFreeBlock(*cached) ||
+      cached->size_ != size) {
+    has_exact_free_block_cache_ = false;
+    return all_blocks_.end();
+  }
+  return cached;
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it,

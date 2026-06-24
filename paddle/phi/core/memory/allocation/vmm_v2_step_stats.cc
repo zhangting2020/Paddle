@@ -71,6 +71,15 @@ PHI_DEFINE_EXPORTED_uint64(
     "FLAGS_vmm_v2_consume_whole_free_block consumes a whole free block. 0 "
     "means unlimited waste while the diagnostic mode is enabled.");
 
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_exact_free_block_cache,
+    false,
+    "Diagnostic-only VMM V2 mapped-free allocation mode: keep a tiny "
+    "exact-size "
+    "free-block cache in front of the best-fit std::map. This is used to "
+    "validate whether repeated same-size mapped-free reuse is bottlenecked by "
+    "free-block index lookup/erase churn.");
+
 namespace paddle::memory::allocation {
 
 namespace {

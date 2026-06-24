@@ -162,6 +162,8 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   size_t ComputeTailOffset() const;
   bool IsRangeEntirelyFree(uint8_t* base, size_t size) const;
   void SplitAndReplaceRangeWithUnmappedFree(uint8_t* base, size_t size);
+  void ClearExactFreeBlockCacheIf(BlockListIt it);
+  BlockListIt TryPopExactFreeBlock(size_t size);
 
   // Best-fit V2 only grows from the fixed-handle CUDA VMM provider. The
   // bottom allocator returns mapped-free BlockV2 views, while best-fit owns
@@ -176,6 +178,8 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   BlockList all_blocks_;
   std::map<std::pair<size_t, void*>, BlockListIt> free_blocks_;
   std::map<std::pair<size_t, void*>, BlockListIt> unmapped_free_blocks_;
+  BlockListIt exact_free_block_cache_;
+  bool has_exact_free_block_cache_{false};
   mutable SpinLock spinlock_;
 };
 
