@@ -93,8 +93,10 @@ StreamSafeCUDAAllocation::StreamSafeCUDAAllocation(
                  underlying_allocation->size(),
                  underlying_allocation->place()),
       underlying_allocation_(std::move(underlying_allocation)),
-      vmm_v2_remap_allocation_(
-          dynamic_cast<VMMRemapEventAllocation*>(underlying_allocation_.get())),
+      vmm_v2_remap_allocation_(allocator->GetVMMV2Allocator() == nullptr
+                                   ? nullptr
+                                   : dynamic_cast<VMMRemapEventAllocation*>(
+                                         underlying_allocation_.get())),
       owning_stream_(owning_stream),
       allocator_(allocator->shared_from_this()) {}
 
@@ -276,71 +278,90 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
   } catch (const BadAlloc& first_bad_alloc) {
     const std::string first_failure = first_bad_alloc.what();
     VLOG(4) << "Allocation failed when allocating " << size << " bytes";
-    // Base OOM path for all configurations (including retry_time == 0):
-    // Step 1 reclaims cross-stream pending frees before retrying.
-    {
-      std::lock_guard<SpinLock> lock_guard(allocator_map_lock_);
-      for (auto* alloc : allocator_map_[place_]) {
-        alloc->ProcessUnfreedAllocations();
-      }
-    }
-    try {
-      underlying_allocation = underlying_allocator_->Allocate(size);
-    } catch (const BadAlloc& second_bad_alloc) {
-      const std::string second_failure = second_bad_alloc.what();
-      // Step 2 handles allocator-internal fragmentation only.
-      // CompactImpl performs all VMM V2 pre-checks internally:
-      //   - total_free / max_free coarse filtering
-      //   - releasable handle scanning
-      //   - actual compact(remap) when worthwhile
-      // StreamSafe should not duplicate those checks here. More expensive
-      // recovery actions such as offload (and post-offload compact) are
-      // coordinated by RetryAllocator when it is enabled.
-      //
-      // During training, NEVER release physical memory in this base OOM path.
-      auto* vmm = GetVMMV2MultiPoolAllocator(underlying_allocator_);
-      if (vmm && FLAGS_vmm_v2_remap_on_oom) {
-        size_t compacted = CompactImpl(place_, size);
-        VLOG(3) << "OOM dispatch: requested=" << size << " compact returned "
-                << compacted << " bytes";
-        if (compacted > 0) {
-          VLOG(3) << "OOM retry: compact returned " << compacted << " bytes";
-          try {
-            underlying_allocation = underlying_allocator_->Allocate(size);
-          } catch (const BadAlloc& final_bad_alloc) {
-            ClearGpuLastError();
-            PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
-                "Allocation of %zu bytes failed after compact "
-                "(remap defrag, %zu bytes compacted).\n"
-                "Initial allocation failure:\n%s\n"
-                "Retry allocation failure before compact:\n%s\n"
-                "Retry allocation failure after compact:\n%s",
-                size,
-                compacted,
-                first_failure.c_str(),
-                second_failure.c_str(),
-                final_bad_alloc.what()));
-          }
-        } else {
-          ClearGpuLastError();
-          PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
-              "Allocation of %zu bytes failed after VMM V2 compact pre-check "
-              "found no useful remap work.\n"
-              "Initial allocation failure:\n%s\n"
-              "Retry allocation failure before compact:\n%s",
-              size,
-              first_failure.c_str(),
-              second_failure.c_str()));
-        }
-      } else {
+    auto* vmm = GetVMMV2MultiPoolAllocator(underlying_allocator_);
+    if (vmm == nullptr) {
+      // Preserve the legacy non-VMM-v2 fallback: release idle chunks from all
+      // stream allocators back to the driver, then retry once.
+      ReleaseImpl(place_);
+      try {
+        underlying_allocation = underlying_allocator_->Allocate(size);
+      } catch (const BadAlloc& second_bad_alloc) {
         ClearGpuLastError();
         PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
-            "Allocation of %zu bytes failed.\n"
+            "Allocation of %zu bytes failed after releasing memory from all "
+            "streams.\n"
             "Initial allocation failure:\n%s\n"
             "Retry allocation failure:\n%s",
             size,
             first_failure.c_str(),
-            second_failure.c_str()));
+            second_bad_alloc.what()));
+      }
+    } else {
+      // VMM v2 base OOM path: reclaim cross-stream pending frees before
+      // retrying, but do not release physical backing to the driver. VMM v2
+      // handles allocator-internal fragmentation through remap compaction
+      // below.
+      {
+        std::lock_guard<SpinLock> lock_guard(allocator_map_lock_);
+        for (auto* alloc : allocator_map_[place_]) {
+          alloc->ProcessUnfreedAllocations();
+        }
+      }
+      try {
+        underlying_allocation = underlying_allocator_->Allocate(size);
+      } catch (const BadAlloc& second_bad_alloc) {
+        const std::string second_failure = second_bad_alloc.what();
+        // Step 2 handles allocator-internal fragmentation only.
+        // CompactImpl performs all VMM V2 pre-checks internally:
+        //   - total_free / max_free coarse filtering
+        //   - releasable handle scanning
+        //   - actual compact(remap) when worthwhile
+        // StreamSafe should not duplicate those checks here. More expensive
+        // recovery actions such as offload (and post-offload compact) are
+        // coordinated by RetryAllocator when it is enabled.
+        if (FLAGS_vmm_v2_remap_on_oom) {
+          size_t compacted = CompactImpl(place_, size);
+          VLOG(3) << "OOM dispatch: requested=" << size << " compact returned "
+                  << compacted << " bytes";
+          if (compacted > 0) {
+            VLOG(3) << "OOM retry: compact returned " << compacted << " bytes";
+            try {
+              underlying_allocation = underlying_allocator_->Allocate(size);
+            } catch (const BadAlloc& final_bad_alloc) {
+              ClearGpuLastError();
+              PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+                  "Allocation of %zu bytes failed after compact "
+                  "(remap defrag, %zu bytes compacted).\n"
+                  "Initial allocation failure:\n%s\n"
+                  "Retry allocation failure before compact:\n%s\n"
+                  "Retry allocation failure after compact:\n%s",
+                  size,
+                  compacted,
+                  first_failure.c_str(),
+                  second_failure.c_str(),
+                  final_bad_alloc.what()));
+            }
+          } else {
+            ClearGpuLastError();
+            PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+                "Allocation of %zu bytes failed after VMM V2 compact "
+                "pre-check found no useful remap work.\n"
+                "Initial allocation failure:\n%s\n"
+                "Retry allocation failure before compact:\n%s",
+                size,
+                first_failure.c_str(),
+                second_failure.c_str()));
+          }
+        } else {
+          ClearGpuLastError();
+          PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+              "Allocation of %zu bytes failed.\n"
+              "Initial allocation failure:\n%s\n"
+              "Retry allocation failure:\n%s",
+              size,
+              first_failure.c_str(),
+              second_failure.c_str()));
+        }
       }
     }
   }

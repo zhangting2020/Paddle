@@ -471,30 +471,6 @@ struct BlockV2 {
     Reset(ptr, size, type, pool_type);
     SetPartsFromRange(parts, parts_offset, parts_len);
   }
-  // Logical allocation-view slices. Ownership/reuse/release/remap safety must
-  // be decided by the backing-state APIs, not by inspecting part layout.
-  size_t AllocationPartCount() const { return parts_.size(); }
-  size_t AllocationPartsByteSize() const {
-    size_t total = 0;
-    for (const auto& part : parts_) {
-      total += part.ByteSize();
-    }
-    return total;
-  }
-  bool HasSingleAllocationPart(size_t handle_rel_off, size_t len) const {
-    return parts_.size() == 1 &&
-           parts_.front().HandleRelOffset() == handle_rel_off &&
-           parts_.front().ByteSize() == len;
-  }
-  const std::shared_ptr<VMMHandleMeta>& FirstAllocationPartHandleMeta() const {
-    return parts_.front().HandleMeta();
-  }
-  size_t AllocationPartHandleRelOffset(size_t index) const {
-    return parts_.at(index).HandleRelOffset();
-  }
-  size_t AllocationPartByteSize(size_t index) const {
-    return parts_.at(index).ByteSize();
-  }
   void TrimToPrefix(size_t keep) { size_ = keep; }
   void TrimToSuffix(size_t trim, size_t keep) {
     ptr_ = reinterpret_cast<uint8_t*>(ptr_) + trim;
