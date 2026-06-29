@@ -90,11 +90,33 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   void SetTailOffset(size_t offset) { virtual_mem_alloced_offset_ = offset; }
 
   void RollbackMappedHandleRange(VMMDevicePtr ptr, size_t handle_count);
+  struct MoveBackingPageStats {
+    uint64_t unmap_us{0};
+    uint64_t map_us{0};
+    uint64_t set_access_us{0};
+    uint64_t metadata_us{0};
+    uint64_t restore_us{0};
+    uint64_t rollback_us{0};
+    uint64_t unmap_calls{0};
+    uint64_t set_access_calls{0};
+  };
+  bool UnmapMappedRangeForRemap(VMMDevicePtr ptr,
+                                size_t handle_count,
+                                MoveBackingPageStats* stats = nullptr);
   bool MoveBackingPage(const VMMBackingMap::MappedPage& source,
-                       const VMMBackingMap::UnmappedPage& target);
+                       const VMMBackingMap::UnmappedPage& target,
+                       MoveBackingPageStats* stats = nullptr,
+                       bool defer_target_access = false,
+                       bool source_already_unmapped = false);
   bool MoveBackingPageForRemap(const VMMBackingMap::MappedPage& source,
                                const VMMBackingMap::UnmappedPage& target,
-                               const std::shared_ptr<VMMHandleMeta>& meta);
+                               const std::shared_ptr<VMMHandleMeta>& meta,
+                               MoveBackingPageStats* stats = nullptr,
+                               bool defer_target_access = false,
+                               bool source_already_unmapped = false);
+  bool SetAccessForMappedRange(VMMDevicePtr ptr,
+                               size_t size,
+                               MoveBackingPageStats* stats = nullptr);
   enum class RestoreRemapSourceResult : uint8_t {
     kSkipped = 0,
     kRestored = 1,
@@ -144,10 +166,10 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   bool IsRangeReleasable(VMMDevicePtr ptr, size_t size) const;
   bool IsRangeReusable(VMMDevicePtr ptr, size_t size) const;
   bool IsDriverVaRangeUnmapped(VMMDevicePtr ptr, size_t size) const;
-  bool CollectBlockIpcParts(const BlockV2& block,
-                            std::vector<BlockPart>* ipc_parts) const;
-  bool MarkBlockIpcExported(const BlockV2& block);
-  bool HasBlockIpcExported(const BlockV2& block) const;
+  bool CollectIpcParts(VMMDevicePtr ptr,
+                       size_t size,
+                       std::vector<BlockPart>* ipc_parts) const;
+  bool MarkIpcExported(VMMDevicePtr ptr, size_t size);
   bool SetBlockRemapEvent(const BlockV2& block,
                           gpuStream_t stream,
                           std::shared_ptr<CUDAEventGuard> event);
@@ -180,10 +202,6 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
  private:
   void InitOnce();
   bool IsReservedVaRange(VMMDevicePtr ptr, size_t size) const;
-  bool CollectIpcParts(VMMDevicePtr ptr,
-                       size_t size,
-                       std::vector<BlockPart>* ipc_parts) const;
-  bool MarkIpcExported(VMMDevicePtr ptr, size_t size);
   bool SetRemapEvent(VMMDevicePtr ptr,
                      size_t size,
                      gpuStream_t stream,
