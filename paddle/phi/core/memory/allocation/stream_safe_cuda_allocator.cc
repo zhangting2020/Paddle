@@ -66,6 +66,14 @@ void MarkVMMV2RemapPendingStream(StreamSafeCUDAAllocator* allocator,
   }
 }
 
+void ClearGpuLastError() {
+#ifdef PADDLE_WITH_CUDA
+  cudaGetLastError();
+#elif defined(PADDLE_WITH_HIP)
+  hipGetLastError();
+#endif
+}
+
 }  // namespace
 
 StreamSafeCUDAAllocation::StreamSafeCUDAAllocation(

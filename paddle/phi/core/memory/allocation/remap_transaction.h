@@ -112,11 +112,26 @@ class RemapTransaction {
     size_t total_capacity{0};
     size_t scatter_handles{0};
   };
+  struct MoveCommitStats {
+    uint64_t unmap_us{0};
+    uint64_t map_us{0};
+    uint64_t set_access_us{0};
+    uint64_t metadata_us{0};
+    uint64_t restore_us{0};
+    uint64_t rollback_us{0};
+    size_t unmap_ranges{0};
+    size_t unmap_calls{0};
+    size_t set_access_ranges{0};
+    size_t set_access_calls{0};
+  };
   struct PlacementResult {
     bool success{false};
     bool used_tail{false};
     uint64_t destination_plan_us{0};
     uint64_t move_commit_us{0};
+    MoveCommitStats move_stats;
+    VMMDevicePtr target_min_va{0};
+    VMMDevicePtr target_max_va{0};
   };
   struct PlannedSourceBlock {
     BlockIterator block_it;
@@ -144,6 +159,11 @@ class RemapTransaction {
     uint64_t source_collect_us{0};
     uint64_t destination_plan_us{0};
     uint64_t move_commit_us{0};
+    MoveCommitStats move_stats;
+    VMMDevicePtr source_min_va{0};
+    VMMDevicePtr source_max_va{0};
+    VMMDevicePtr target_min_va{0};
+    VMMDevicePtr target_max_va{0};
     bool success{false};
     bool used_tail{false};
   };
@@ -221,20 +241,24 @@ class RemapTransaction {
   bool TryCommitTailMovePlacement(BlockList* blocks,
                                   VMMDevicePtr tail_va,
                                   SourceMovePlan* plan,
-                                  PoolType pool_type);
+                                  PoolType pool_type,
+                                  MoveCommitStats* move_stats);
   bool MovePlannedPagesToTargets(
       BlockList* blocks,
       SourceMovePlan* plan,
-      const std::vector<VMMBackingMap::UnmappedPage>& target_pages);
+      const std::vector<VMMBackingMap::UnmappedPage>& target_pages,
+      MoveCommitStats* move_stats);
   bool TryCommitSingleUnmappedFreeMovePlacement(BlockList* blocks,
                                                 BlockIterator unmapped_free_it,
                                                 SourceMovePlan* plan,
-                                                PoolType pool_type);
+                                                PoolType pool_type,
+                                                MoveCommitStats* move_stats);
   bool TryCommitUnmappedFreeMoveScatter(
       BlockList* blocks,
       SourceMovePlan* plan,
       const std::vector<DestinationPlacement>& placements,
-      PoolType pool_type);
+      PoolType pool_type,
+      MoveCommitStats* move_stats);
   PlacementResult ExecuteMovePlacementStrategy(BlockList* blocks,
                                                VMMDevicePtr tail_va,
                                                VMMDevicePtr va_limit,
