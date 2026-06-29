@@ -84,6 +84,9 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
             << " fully_covered_bytes=" << stats.fully_covered_bytes
             << " partial_parts=" << stats.partial_count
             << " partial_bytes=" << stats.partial_bytes
+            << " unknown_safety_blocked=" << stats.unknown_safety_blocked_count
+            << " unknown_safety_blocked_bytes="
+            << stats.unknown_safety_blocked_bytes
             << " remapped_blocked=" << stats.remapped_blocked_count
             << " remapped_blocked_bytes=" << stats.remapped_blocked_bytes
             << " backing_blocked=" << stats.backing_blocked_count
@@ -102,8 +105,33 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
               << " safe_blocks=" << stats.safe_block_count
               << " fully_covered=" << stats.fully_covered_count
               << " event_blocked=" << stats.event_blocked_count
+              << " unknown_safety_blocked="
+              << stats.unknown_safety_blocked_count
               << " remapped_blocked=" << stats.remapped_blocked_count
               << " backing_blocked=" << stats.backing_blocked_count;
+    auto compact_cuda_err = cudaPeekAtLastError();
+    PADDLE_ENFORCE_EQ(
+        compact_cuda_err,
+        cudaSuccess,
+        common::errors::External(
+            "CUDA error detected immediately after VMM V2 compact: %s. "
+            "pool=%d requested=%zu remapped_handles=%zu remapped_bytes=%zu "
+            "move_commit_us=%zu free_blocks=%zu safe_blocks=%zu "
+            "fully_covered=%zu event_blocked=%zu remapped_blocked=%zu "
+            "backing_blocked=%zu unknown_safety_blocked=%zu",
+            cudaGetErrorString(compact_cuda_err),
+            static_cast<int>(pool_type_),
+            requested_size,
+            compact_result.remapped_handle_count,
+            compact_result.remapped_bytes,
+            static_cast<size_t>(compact_result.move_commit_us),
+            stats.free_block_count,
+            stats.safe_block_count,
+            stats.fully_covered_count,
+            stats.event_blocked_count,
+            stats.remapped_blocked_count,
+            stats.backing_blocked_count,
+            stats.unknown_safety_blocked_count));
     if (compact_result.remapped_handle_count == 0) {
       VLOG(3) << "VMM V2 compactor: Phase 1 done, no handles to remap"
               << " (safe_blocks=" << stats.safe_block_count

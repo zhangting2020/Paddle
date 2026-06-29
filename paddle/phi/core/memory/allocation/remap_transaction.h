@@ -54,6 +54,8 @@ class RemapTransaction {
     size_t fully_covered_bytes{0};
     size_t partial_bytes{0};
     size_t event_blocked_bytes{0};
+    size_t unknown_safety_blocked_count{0};
+    size_t unknown_safety_blocked_bytes{0};
     size_t remapped_blocked_count{0};
     size_t remapped_blocked_bytes{0};
     size_t backing_blocked_count{0};
