@@ -297,48 +297,50 @@ enum class BlockRestoreMappedFreeResult : uint8_t {
 };
 
 struct BlockV2 {
-  static BlockV2 MakeMappedBlock(BlockType type,
-                                 void* ptr,
-                                 size_t size,
-                                 const std::vector<BlockPartV2>& parts,
-                                 size_t parts_offset,
-                                 size_t parts_len,
-                                 PoolType pool_type) {
+  static BlockV2 MakeMappedBlockWithParts(BlockType type,
+                                          void* ptr,
+                                          size_t size,
+                                          const std::vector<BlockPartV2>& parts,
+                                          size_t parts_offset,
+                                          size_t parts_len,
+                                          PoolType pool_type) {
     BlockV2 block;
     block.ResetAsMappedBlock(
         type, ptr, size, parts, parts_offset, parts_len, pool_type);
     return block;
   }
 
-  static BlockV2 MakeMappedActiveBlock(void* ptr,
-                                       size_t size,
-                                       const std::vector<BlockPartV2>& parts,
-                                       size_t parts_offset,
-                                       size_t parts_len,
-                                       PoolType pool_type) {
-    return MakeMappedBlock(BlockType::kActive,
-                           ptr,
-                           size,
-                           parts,
-                           parts_offset,
-                           parts_len,
-                           pool_type);
+  static BlockV2 MakeMappedActiveBlockWithParts(
+      void* ptr,
+      size_t size,
+      const std::vector<BlockPartV2>& parts,
+      size_t parts_offset,
+      size_t parts_len,
+      PoolType pool_type) {
+    return MakeMappedBlockWithParts(BlockType::kActive,
+                                    ptr,
+                                    size,
+                                    parts,
+                                    parts_offset,
+                                    parts_len,
+                                    pool_type);
   }
 
-  static BlockV2 MakeMappedFreeBlock(void* ptr,
-                                     size_t size,
-                                     const std::vector<BlockPartV2>& parts,
-                                     size_t parts_offset,
-                                     size_t parts_len,
-                                     PoolType pool_type) {
-    return MakeMappedBlock(
+  static BlockV2 MakeMappedFreeBlockWithParts(
+      void* ptr,
+      size_t size,
+      const std::vector<BlockPartV2>& parts,
+      size_t parts_offset,
+      size_t parts_len,
+      PoolType pool_type) {
+    return MakeMappedBlockWithParts(
         BlockType::kFree, ptr, size, parts, parts_offset, parts_len, pool_type);
   }
 
-  static BlockV2 MakeMappedFreeBlock(void* ptr,
-                                     size_t size,
-                                     std::vector<BlockPartV2>&& parts,
-                                     PoolType pool_type) {
+  static BlockV2 MakeMappedFreeBlockWithParts(void* ptr,
+                                              size_t size,
+                                              std::vector<BlockPartV2>&& parts,
+                                              PoolType pool_type) {
     BlockV2 block;
     block.Reset(ptr, size, BlockType::kFree, pool_type);
     block.SetParts(std::move(parts));
@@ -349,7 +351,7 @@ struct BlockV2 {
                                                size_t size,
                                                const HandleLayout& layout,
                                                PoolType pool_type) {
-    return MakeMappedFreeBlock(
+    return MakeMappedFreeBlockWithParts(
         ptr, size, BuildBlockPartsFromHandleLayout(layout), 0, size, pool_type);
   }
 
@@ -440,7 +442,7 @@ struct BlockV2 {
     return IsUnmappedFree() && next.IsUnmappedFree() && IsAdjacentBefore(next);
   }
   BlockV2 MakeMappedFreeSubBlockWithParts(size_t offset, size_t len) const {
-    auto block = MakeMappedFreeBlock(
+    auto block = MakeMappedFreeBlockWithParts(
         BeginPtr() + offset, len, parts_, offset, len, pool_type_);
 #if defined(PADDLE_WITH_CUDA)
     block.CopyRemapSafetyFrom(*this);
@@ -448,7 +450,7 @@ struct BlockV2 {
     return block;
   }
   BlockV2 MakeMappedActiveSubBlockWithParts(size_t offset, size_t len) const {
-    return MakeMappedActiveBlock(
+    return MakeMappedActiveBlockWithParts(
         BeginPtr() + offset, len, parts_, offset, len, pool_type_);
   }
   BlockV2 MakeMappedSubBlock(BlockType type, size_t offset, size_t len) const {
