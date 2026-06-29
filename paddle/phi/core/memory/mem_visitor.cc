@@ -18,9 +18,13 @@
 #include "paddle/phi/core/memory/allocation/spin_lock.h"
 #include "paddle/phi/core/memory/allocation/stat_allocator.h"
 
+#include "glog/logging.h"
+
 #ifdef PADDLE_WITH_CUDA
 #include "paddle/phi/core/memory/allocation/stream_safe_cuda_allocator.h"
 #include "paddle/phi/core/memory/allocation/virtual_memory_auto_growth_best_fit_allocator.h"
+#include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_allocator_v2.h"
+#include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_multi_pool_allocator_v2.h"
 #endif
 
 namespace paddle {
@@ -58,6 +62,20 @@ void AllocatorVisitor::Visit(
     allocator->GetSmallAllocator()->Accept(this);
   if (allocator->GetLargeAllocator())
     allocator->GetLargeAllocator()->Accept(this);
+}
+
+void AllocatorVisitor::Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) {
+  (void)allocator;
+}
+
+void AllocatorVisitor::Visit(
+    VMMAutoGrowthBestFitMultiPoolAllocatorV2* allocator) {
+  if (allocator->small_allocator()) {
+    allocator->small_allocator()->Accept(this);
+  }
+  if (allocator->large_allocator()) {
+    allocator->large_allocator()->Accept(this);
+  }
 }
 
 void AllocatorComputeStreamVisitor::Visit(StreamSafeCUDAAllocator* allocator) {
@@ -131,13 +149,61 @@ void VmmTensorPartsVisitor::Visit(
   if (found_) {
     return;
   }
+  VLOG(4) << "[VMM-IPC/export] visitor checking VMM v1 allocator target_ptr="
+          << target_ptr_ << " target_size=" << target_size_;
   std::vector<BlockPart> parts;
   if (allocator->CollectTensorParts(target_ptr_, target_size_, &parts)) {
     found_ = true;
     parts_ = std::move(parts);
+    VLOG(4) << "[VMM-IPC/export] visitor matched VMM v1 allocator parts="
+            << parts_.size();
     return;
   }
+  VLOG(4) << "[VMM-IPC/export] visitor missed VMM v1 allocator; descending "
+             "to underlying allocator";
   allocator->GetUnderLyingAllocator()->Accept(this);
+}
+
+void VmmTensorPartsVisitor::Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) {
+  if (found_) {
+    return;
+  }
+  VLOG(4) << "[VMM-IPC/export] visitor checking VMM v2 best-fit allocator "
+          << "target_ptr=" << target_ptr_ << " target_size=" << target_size_;
+  std::vector<BlockPart> parts;
+  if (allocator->CollectTensorParts(
+          target_ptr_, target_size_, &parts, mark_ipc_exported_)) {
+    found_ = true;
+    parts_ = std::move(parts);
+    VLOG(4) << "[VMM-IPC/export] visitor matched VMM v2 best-fit allocator "
+            << "parts=" << parts_.size();
+  } else {
+    VLOG(4) << "[VMM-IPC/export] visitor missed VMM v2 best-fit allocator";
+  }
+}
+
+void VmmTensorPartsVisitor::Visit(
+    VMMAutoGrowthBestFitMultiPoolAllocatorV2* allocator) {
+  if (found_) {
+    return;
+  }
+  VLOG(4) << "[VMM-IPC/export] visitor checking VMM v2 multi-pool allocator "
+          << "target_ptr=" << target_ptr_ << " target_size=" << target_size_;
+  if (allocator->small_allocator()) {
+    VLOG(4) << "[VMM-IPC/export] visitor entering VMM v2 small pool";
+    allocator->small_allocator()->Accept(this);
+  } else {
+    VLOG(4) << "[VMM-IPC/export] VMM v2 small pool is null";
+  }
+  if (found_) {
+    return;
+  }
+  if (allocator->large_allocator()) {
+    VLOG(4) << "[VMM-IPC/export] visitor entering VMM v2 large pool";
+    allocator->large_allocator()->Accept(this);
+  } else {
+    VLOG(4) << "[VMM-IPC/export] VMM v2 large pool is null";
+  }
 }
 #endif
 }  // namespace memory

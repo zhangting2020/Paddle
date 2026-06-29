@@ -18,6 +18,7 @@
 #include "glog/logging.h"
 
 COMMON_DECLARE_int64(offload_retry_times);
+COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
 
 namespace paddle::memory::allocation {
 
@@ -63,24 +64,74 @@ phi::Allocation* RetryAllocator::AllocateImpl(size_t size) {
   auto alloc_func = [&, this]() {
     return underlying_allocator_->Allocate(size).release();
   };
+  auto try_remap = [&, this]() -> bool {
+    if (!FLAGS_vmm_v2_remap_on_oom) {
+      return false;
+    }
+    try {
+      const size_t remapped = underlying_allocator_->Compact(place_, size);
+      VLOG(4) << "RetryAllocator: Compact returned " << remapped << " bytes";
+      return remapped > 0;
+    } catch (const std::exception& e) {
+      VLOG(4) << "Compact on " << place_
+              << " failed with exception: " << e.what();
+      return false;
+    } catch (...) {
+      VLOG(4) << "Compact on " << place_ << " failed with unknown exception.";
+      return false;
+    }
+  };
   // In fact, we can unify the code of allocation success and failure
   // But it would add lock even when allocation success at the first time
   try {
-    if (FLAGS_offload_retry_times <= 0 || g_oom_callback == nullptr) {
+    // StreamSafeCUDAAllocator handles the base OOM path first:
+    // reclaim cross-stream pending frees, retry once, and compact on
+    // fragmentation if applicable. If BadAlloc still propagates here,
+    // RetryAllocator acts as the outer recovery layer:
+    //   1. optional offload callback
+    //   2. retry allocation
+    //   3. if offload happened and allocation still fails, try one more
+    //      compact(remap) against the post-offload allocator state
+    //   4. wait-based retry (cv_wait) if enabled
+    try {
       return alloc_func();
-    } else {
+    } catch (BadAlloc&) {
+    }
+
+    if (FLAGS_offload_retry_times > 0 && g_oom_callback != nullptr) {
       bool has_offloaded = true;
       for (int64_t i = 0; i < FLAGS_offload_retry_times && has_offloaded; ++i) {
         try {
           return alloc_func();
         } catch (BadAlloc&) {
           VLOG(10) << "Allocation " << size << " on " << place_
-                   << " failed, try to run OOM callback " << i;
+                   << " failed, try offload on retry " << i;
           has_offloaded = (g_oom_callback(place_, size) > 0);
+
+          if (!has_offloaded) {
+            continue;
+          }
+
+          // Offload may already have created a large enough free block.
+          // Retry allocation first. Only if it still fails do we attempt one
+          // more compact(remap), whose internal pre-checks verify whether the
+          // post-offload state is fragmented (total_free >= requested &&
+          // max_free < requested).
+          try {
+            return alloc_func();
+          } catch (BadAlloc&) {
+          }
+
+          if (try_remap()) {
+            try {
+              return alloc_func();
+            } catch (BadAlloc&) {
+            }
+          }
         }
       }
-      return alloc_func();
     }
+    return alloc_func();
   } catch (BadAlloc&) {
     {
       WaitedAllocateSizeGuard guard(&waited_allocate_size_, size);

@@ -29,8 +29,8 @@ namespace memory {
 namespace allocation {
 
 // Page-granular backing state for VMM V2. Allocation blocks keep only logical
-// VA layout; ownership, event readiness, release safety and remap source
-// eligibility are decided from this backing map.
+// VA layout; ownership, IPC pinning, event readiness, release safety and remap
+// source eligibility are decided from this backing map.
 class VMMBackingMap {
  public:
   enum class RemapSourceState : uint8_t {
@@ -69,6 +69,7 @@ class VMMBackingMap {
                                   size_t size);
   void MarkUnmapped(VMMDevicePtr va, size_t size);
   void MarkReleased(VMMDevicePtr va, VMMAllocHandle handle, size_t size);
+  void MarkIpcExported(VMMDevicePtr va, size_t size);
   void MarkPendingEvent(VMMDevicePtr va,
                         size_t size,
                         gpuStream_t stream,
@@ -79,10 +80,15 @@ class VMMBackingMap {
                                 std::shared_ptr<CUDAEventGuard> event);
 
   bool ValidateLayout(const HandleLayout& layout, const char* context) const;
+  bool CollectIpcPartDescriptors(
+      VMMDevicePtr va,
+      size_t size,
+      std::vector<IpcBlockPartDescriptor>* descriptors) const;
   bool IsRangeMapped(VMMDevicePtr va, size_t size) const;
   bool IsRangeUnmapped(VMMDevicePtr va, size_t size) const;
   bool IsRangeReleasable(VMMDevicePtr va, size_t size) const;
   bool IsRangeReusableForAllocation(VMMDevicePtr va, size_t size) const;
+  bool HasIpcExportedPages(VMMDevicePtr va, size_t size) const;
   std::vector<std::pair<VMMDevicePtr, size_t>> CollectMappedRanges(
       VMMDevicePtr va, size_t size) const;
   std::vector<std::pair<VMMDevicePtr, size_t>> CollectUnmappedRanges(
@@ -130,6 +136,7 @@ class VMMBackingMap {
     std::shared_ptr<VMMHandleMeta> meta;
     bool mapped{false};
     bool remap_destination_owned{false};
+    bool ipc_exported{false};
     std::vector<PendingEvent> pending_events;
     uint64_t epoch{0};
   };
@@ -144,7 +151,7 @@ class VMMBackingMap {
                             VMMAllocHandle handle,
                             const std::shared_ptr<VMMHandleMeta>& meta,
                             bool remap_destination_owned);
-  void ResetPageToUnmappedLocked(Page* page);
+  void ResetPageToUnmappedLocked(Page* page, bool clear_ipc_exported);
   std::vector<std::pair<VMMDevicePtr, size_t>> CollectRangesLocked(
       VMMDevicePtr va, size_t size, bool mapped, const char* context) const;
   void AppendRangesLocked(
@@ -158,6 +165,10 @@ class VMMBackingMap {
                                const char* context,
                                size_t max_pages,
                                std::vector<MappedPage>* pages) const;
+  bool CollectIpcPartDescriptorsLocked(
+      VMMDevicePtr va,
+      size_t size,
+      std::vector<IpcBlockPartDescriptor>* descriptors) const;
   void AppendMappedPagesFullyCoveredByLocked(
       VMMDevicePtr va,
       size_t size,

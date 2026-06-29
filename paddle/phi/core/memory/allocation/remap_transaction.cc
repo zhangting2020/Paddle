@@ -1,0 +1,1130 @@
+// Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include "paddle/phi/core/memory/allocation/remap_transaction.h"
+
+#include <chrono>
+#include <list>
+#include <unordered_map>
+#include <utility>
+
+#include "glog/logging.h"
+#include "paddle/phi/core/enforce.h"
+
+namespace paddle {
+namespace memory {
+namespace allocation {
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+uint64_t ElapsedMicros(Clock::time_point start, Clock::time_point end) {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+          .count());
+}
+
+std::vector<std::pair<VMMDevicePtr, size_t>> CollectFreeRanges(
+    const std::list<BlockV2>& blocks) {
+  std::vector<std::pair<VMMDevicePtr, size_t>> ranges;
+  for (const auto& block : blocks) {
+    if (!block.CanBeRemapSource()) {
+      continue;
+    }
+    ranges.emplace_back(block.VARange());
+  }
+  return ranges;
+}
+
+std::vector<std::pair<VMMDevicePtr, size_t>> CollectUnmappedFreeRanges(
+    const std::list<BlockV2>& blocks) {
+  std::vector<std::pair<VMMDevicePtr, size_t>> ranges;
+  for (const auto& block : blocks) {
+    if (!block.IsUnmappedFree()) {
+      continue;
+    }
+    ranges.emplace_back(block.VARange());
+  }
+  return ranges;
+}
+
+using RemapSourceState = VMMBackingMap::RemapSourceState;
+
+VMMDevicePtr AlignUp(VMMDevicePtr value, size_t alignment) {
+  if (alignment == 0) {
+    return value;
+  }
+  const auto remainder = value % alignment;
+  return remainder == 0 ? value : value + (alignment - remainder);
+}
+
+bool QueryRemapEvent(VMMBlockRemapState* state) {
+  if (state->event == nullptr) {
+    return true;
+  }
+  auto err = cudaEventQuery(state->event->event);
+  if (err == cudaErrorNotReady) {
+    return false;
+  }
+  PADDLE_ENFORCE_GPU_SUCCESS(err);
+  state->event.reset();
+  state->stream = nullptr;
+  return true;
+}
+
+bool RecordRemapEvent(VMMBlockRemapState* state) {
+  if (state->stream == nullptr || state->event != nullptr) {
+    return true;
+  }
+  gpuEvent_t event = nullptr;
+  PADDLE_ENFORCE_GPU_SUCCESS(
+      cudaEventCreateWithFlags(&event, cudaEventDisableTiming));
+  PADDLE_ENFORCE_GPU_SUCCESS(cudaEventRecord(event, state->stream));
+  state->event = std::make_shared<CUDAEventGuard>(event);
+  return false;
+}
+
+bool RemapStateReady(VMMBlockRemapState* state) {
+  if (!QueryRemapEvent(state)) {
+    return false;
+  }
+  if (state->stream == nullptr) {
+    return true;
+  }
+  auto err = cudaStreamQuery(state->stream);
+  if (err == cudaSuccess) {
+    state->stream = nullptr;
+    state->event.reset();
+    return true;
+  }
+  if (err != cudaErrorNotReady) {
+    PADDLE_ENFORCE_GPU_SUCCESS(err);
+  }
+  return RecordRemapEvent(state) && QueryRemapEvent(state);
+}
+
+bool IsRemapSafe(BlockV2* block) {
+  if (!block->CanBeRemapSource()) {
+    return false;
+  }
+  bool ready = true;
+  VMMBlockRemapState primary{block->owning_stream_, block->remap_safe_event_};
+  if (!RemapStateReady(&primary)) {
+    ready = false;
+  }
+  block->owning_stream_ = primary.stream;
+  block->remap_safe_event_ = std::move(primary.event);
+
+  for (auto it = block->remap_pending_states_.begin();
+       it != block->remap_pending_states_.end();) {
+    if (!RemapStateReady(&*it)) {
+      ready = false;
+      ++it;
+      continue;
+    }
+    if (it->stream == nullptr && it->event == nullptr) {
+      it = block->remap_pending_states_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  return ready;
+}
+
+void AppendMappedFreeSubRange(std::vector<BlockV2>* segments,
+                              const BlockV2& source,
+                              VMMDevicePtr va,
+                              size_t size) {
+  if (size == 0) {
+    return;
+  }
+
+  BlockV2 segment = source.MakeMappedFreeSubBlock(va - source.BeginVA(), size);
+  if (!segments->empty() &&
+      segments->back().CanAbsorbAdjacentFreeBlock(segment)) {
+    segments->back().AbsorbAdjacentBlock(segment);
+    return;
+  }
+  segments->push_back(std::move(segment));
+}
+
+using SourcePageMap =
+    std::unordered_map<VMMDevicePtr, VMMBackingMap::MappedPage>;
+
+SourcePageMap CollectSourcePageCandidates(
+    CUDAVirtualMemAllocatorV2* vmm_allocator,
+    const std::list<BlockV2>& blocks,
+    size_t requested_size) {
+  auto source_ranges = CollectFreeRanges(blocks);
+  auto source_pages =
+      vmm_allocator->CollectRemapSourcePages(source_ranges, requested_size);
+  SourcePageMap candidates;
+  candidates.reserve(source_pages.size());
+  for (const auto& page : source_pages) {
+    candidates.emplace(page.va, page);
+  }
+  return candidates;
+}
+
+bool FindSourcePageCandidate(const SourcePageMap& candidates,
+                             VMMDevicePtr va,
+                             VMMAllocHandle handle,
+                             VMMBackingMap::MappedPage* page) {
+  auto it = candidates.find(va);
+  if (it == candidates.end()) {
+    return false;
+  }
+  if (it->second.handle != handle) {
+    return false;
+  }
+  if (page != nullptr) {
+    *page = it->second;
+  }
+  return true;
+}
+
+void RestoreSourceMappings(
+    std::list<BlockV2>* blocks,
+    const std::vector<VMMAllocHandle>& handles,
+    const std::vector<std::shared_ptr<VMMHandleMeta>>& metas,
+    CUDAVirtualMemAllocatorV2* vmm_allocator,
+    size_t handle_size,
+    const std::function<void(std::list<BlockV2>*)>& merge_adjacent_free_blocks,
+    const std::function<bool(std::list<BlockV2>*,
+                             VMMDevicePtr,
+                             size_t,
+                             const std::shared_ptr<VMMHandleMeta>&)>&
+        restore_unmapped_free_to_mapped_free) {
+  size_t restored = 0, force_released = 0;
+  for (size_t i = 0; i < handles.size(); ++i) {
+    auto restore_result = vmm_allocator->RestoreRemapSourceMapping(
+        handles[i], metas[i], handle_size);
+    if (restore_result ==
+        CUDAVirtualMemAllocatorV2::RestoreRemapSourceResult::kSkipped) {
+      continue;
+    }
+    if (restore_result ==
+        CUDAVirtualMemAllocatorV2::RestoreRemapSourceResult::kForceReleased) {
+      force_released++;
+      continue;
+    }
+
+    VMMDevicePtr original_va = metas[i]->Base();
+    if (restore_unmapped_free_to_mapped_free(
+            blocks, original_va, handle_size, metas[i])) {
+      metas[i]->RestoreOriginalOwnership();
+      restored++;
+    } else {
+      vmm_allocator->ForceReleaseRestoredRemapSourceMapping(
+          handles[i], metas[i], handle_size, "block restore", true);
+      force_released++;
+    }
+  }
+  merge_adjacent_free_blocks(blocks);
+  VLOG(3) << "RestoreSourceMappings: restored=" << restored
+          << " force_released=" << force_released;
+}
+
+}  // namespace
+
+RemapTransaction::~RemapTransaction() {
+  if (!completed_ && HasPendingState()) {
+    VLOG(0) << "VMM V2 remap transaction destroyed before Commit/Rollback; "
+               "rolling back pending state";
+    Rollback();
+  }
+}
+
+void RemapTransaction::PrepareCandidates(const VaRanges& source_ranges,
+                                         const VaRanges& target_ranges,
+                                         size_t target_bytes) {
+  candidates_ = vmm_allocator_->CollectCompactCandidates(
+      source_ranges, target_ranges, target_bytes);
+}
+
+RemapTransaction::PreScanResult RemapTransaction::PreparePhase1Diagnostics(
+    BlockList* blocks,
+    size_t requested_size,
+    const char* source_context,
+    const char* target_context) {
+  PreScanResult result;
+  auto free_ranges = CollectFreeRanges(*blocks);
+  auto unmapped_free_ranges = CollectUnmappedFreeRanges(*blocks);
+  result.free_range_count = free_ranges.size();
+  result.unmapped_free_range_count = unmapped_free_ranges.size();
+  PrepareCandidates(free_ranges, unmapped_free_ranges, requested_size);
+  result.mapped_page_count = candidates_.source_pages.size();
+  result.target_page_count = candidates_.target_pages.size();
+  auto validation = ValidateCandidates(source_context, target_context);
+  result.source_ok = validation.source_ok;
+  result.target_ok = validation.target_ok;
+  return result;
+}
+
+bool RemapTransaction::ValidateSourcePages(const char* context) const {
+  return vmm_allocator_->ValidateMappedPages(candidates_.source_pages, context);
+}
+
+bool RemapTransaction::ValidateTargetPages(const char* context) const {
+  return vmm_allocator_->ValidateUnmappedPages(candidates_.target_pages,
+                                               context);
+}
+
+RemapTransaction::CandidateValidation RemapTransaction::ValidateCandidates(
+    const char* source_context, const char* target_context) const {
+  CandidateValidation validation;
+  validation.source_ok = ValidateSourcePages(source_context);
+  validation.target_ok = ValidateTargetPages(target_context);
+  return validation;
+}
+
+RemapTransaction::MaterializedRange RemapTransaction::MaterializeMappedRange(
+    VMMDevicePtr dst,
+    const std::vector<VMMAllocHandle>& handles,
+    size_t start,
+    size_t count,
+    PoolType pool_type) {
+  CUDAVirtualMemAllocatorV2::StagedAllocationWithBlock staged;
+  try {
+    staged = vmm_allocator_->CreateStagedRemapDestinationAllocationWithBlock(
+        dst, handles, start, count, pool_type);
+  } catch (const std::exception& e) {
+    VLOG(0) << "VMM V2 remap transaction: materialize mapped range failed, "
+               "dst="
+            << reinterpret_cast<void*>(dst) << " start=" << start
+            << " count=" << count << " total_handles=" << handles.size()
+            << " error=" << e.what();
+    throw;
+  } catch (...) {
+    VLOG(0) << "VMM V2 remap transaction: materialize mapped range failed "
+               "with unknown exception, dst="
+            << reinterpret_cast<void*>(dst) << " start=" << start
+            << " count=" << count << " total_handles=" << handles.size();
+    throw;
+  }
+  try {
+    StageSyntheticAllocation(staged.allocation);
+  } catch (const std::exception& e) {
+    VLOG(0) << "VMM V2 remap transaction: failed to stage synthetic "
+               "allocation for rollback, destroying it. dst="
+            << reinterpret_cast<void*>(dst) << " bytes=" << staged.bytes
+            << " error=" << e.what();
+    vmm_allocator_->DestroyStagedSyntheticAllocation(staged.allocation);
+    staged.allocation = nullptr;
+    throw;
+  } catch (...) {
+    VLOG(0) << "VMM V2 remap transaction: unknown failure while staging "
+               "synthetic allocation for rollback, destroying it. dst="
+            << reinterpret_cast<void*>(dst) << " bytes=" << staged.bytes;
+    vmm_allocator_->DestroyStagedSyntheticAllocation(staged.allocation);
+    staged.allocation = nullptr;
+    throw;
+  }
+  MaterializedRange range;
+  range.bytes = staged.bytes;
+  range.free_block = std::move(staged.block);
+  return range;
+}
+
+RemapTransaction::MaterializedRange
+RemapTransaction::MaterializeDestinationPlacement(
+    const DestinationPlacement& placement,
+    const std::vector<VMMAllocHandle>& handles,
+    PoolType pool_type) {
+  return MaterializeMappedRange(placement.dst,
+                                handles,
+                                placement.handle_start_idx,
+                                placement.count,
+                                pool_type);
+}
+
+bool RemapTransaction::CollectTargetPagesForRange(
+    VMMDevicePtr dst,
+    size_t handle_count,
+    const char* context,
+    std::vector<VMMBackingMap::UnmappedPage>* target_pages) const {
+  const size_t bytes = handle_count * handle_size_;
+  std::vector<std::pair<VMMDevicePtr, size_t>> target_ranges = {{dst, bytes}};
+  *target_pages = vmm_allocator_->CollectUnmappedPages(target_ranges, bytes);
+  if (target_pages->size() != handle_count ||
+      !vmm_allocator_->ValidateUnmappedPages(*target_pages, context)) {
+    VLOG(0) << "VMM V2 remap transaction: target validation failed in "
+            << context << ", dst=" << reinterpret_cast<void*>(dst)
+            << " target_pages=" << target_pages->size()
+            << " handles=" << handle_count;
+    return false;
+  }
+  return true;
+}
+
+bool RemapTransaction::PrepareMoveDestinationPlacement(
+    const DestinationPlacement& placement,
+    const char* context,
+    std::vector<VMMBackingMap::UnmappedPage>* target_pages) const {
+  if (!CollectTargetPagesForRange(
+          placement.dst, placement.count, context, target_pages)) {
+    return false;
+  }
+  return PrepareDestinationRange(
+      placement.dst, placement.count * handle_size_, context);
+}
+
+bool RemapTransaction::CanPrepareSyntheticAllocationRange(VMMDevicePtr dst,
+                                                          size_t size) const {
+  if (!can_prepare_synthetic_allocation_) {
+    return true;
+  }
+  return can_prepare_synthetic_allocation_(reinterpret_cast<void*>(dst), size);
+}
+
+bool RemapTransaction::PrepareDestinationRange(VMMDevicePtr dst,
+                                               size_t size,
+                                               const char* context) const {
+  if (PrepareSyntheticAllocationRange(dst, size)) {
+    return true;
+  }
+  VLOG(0) << "VMM V2 remap transaction: synthetic allocation preparation "
+             "failed in "
+          << context << ", dst=" << reinterpret_cast<void*>(dst)
+          << " bytes=" << size;
+  return false;
+}
+
+bool RemapTransaction::PrepareSyntheticAllocationRange(VMMDevicePtr dst,
+                                                       size_t size) const {
+  if (!prepare_synthetic_allocation_) {
+    return true;
+  }
+  return prepare_synthetic_allocation_(reinterpret_cast<void*>(dst), size);
+}
+
+RemapTransaction::SourceMovePlan RemapTransaction::CollectRemapSourcePlan(
+    BlockList* blocks, size_t requested_size, PoolType pool_type) {
+  SourceMovePlan plan;
+  bool logged_first_candidate = false;
+  auto source_candidates =
+      CollectSourcePageCandidates(vmm_allocator_, *blocks, requested_size);
+  for (auto it = blocks->begin(); it != blocks->end();) {
+    auto current = it++;
+    if (current->IsFree()) plan.stats.free_block_count++;
+    if (!current->CanBeRemapSource()) {
+      continue;
+    }
+    if (!IsRemapSafe(&*current)) {
+      plan.stats.event_blocked_count +=
+          (current->Size() + handle_size_ - 1) / handle_size_;
+      plan.stats.event_blocked_bytes += current->Size();
+      continue;
+    }
+    plan.stats.safe_block_count++;
+
+    std::vector<BlockV2> replacement_segments;
+    size_t remapped_count_before = plan.handles.size();
+    VMMDevicePtr cursor = current->BeginVA();
+    const VMMDevicePtr block_end = current->EndVA();
+    for (VMMDevicePtr page_va = AlignUp(current->BeginVA(), handle_size_);
+         page_va + handle_size_ <= block_end;
+         page_va += handle_size_) {
+      auto candidate_it = source_candidates.find(page_va);
+      if (candidate_it == source_candidates.end()) {
+        plan.stats.partial_count++;
+        plan.stats.partial_bytes += handle_size_;
+        continue;
+      }
+
+      const auto& candidate = candidate_it->second;
+      const auto source_state = candidate.remap_source_state;
+      if (cursor < page_va) {
+        AppendMappedFreeSubRange(
+            &replacement_segments, *current, cursor, page_va - cursor);
+      }
+      if (source_state == RemapSourceState::kReady) {
+        plan.stats.fully_covered_count++;
+        plan.stats.fully_covered_bytes += handle_size_;
+        if (!logged_first_candidate) {
+          VLOG(4) << "First move-page candidate pool="
+                  << static_cast<int>(pool_type)
+                  << " block_ptr=" << current->Ptr()
+                  << " block_size=" << current->Size()
+                  << " handle_base=" << reinterpret_cast<void*>(candidate.va)
+                  << " handle_size=" << handle_size_
+                  << " handle=" << reinterpret_cast<void*>(candidate.handle);
+          logged_first_candidate = true;
+        }
+        VMMBackingMap::MappedPage source_page;
+        if (!FindSourcePageCandidate(source_candidates,
+                                     candidate.va,
+                                     candidate.handle,
+                                     &source_page)) {
+          plan.stats.backing_blocked_count++;
+          plan.stats.backing_blocked_bytes += handle_size_;
+          AppendMappedFreeSubRange(
+              &replacement_segments, *current, page_va, handle_size_);
+          cursor = page_va + handle_size_;
+          continue;
+        }
+        plan.source_pages.push_back(source_page);
+        plan.handles.push_back(candidate.handle);
+        plan.metas.push_back(candidate.meta);
+        BlockV2::AppendFreeSegment(&replacement_segments,
+                                   BlockType::kUnmappedFree,
+                                   reinterpret_cast<void*>(page_va),
+                                   handle_size_,
+                                   nullptr,
+                                   pool_type);
+        cursor = page_va + handle_size_;
+        continue;
+      }
+      switch (source_state) {
+        case RemapSourceState::kRemapDestinationOwned:
+          plan.stats.remapped_blocked_count++;
+          plan.stats.remapped_blocked_bytes += handle_size_;
+          break;
+        case RemapSourceState::kPendingEvent:
+          plan.stats.event_blocked_count++;
+          plan.stats.event_blocked_bytes += handle_size_;
+          break;
+        case RemapSourceState::kPartialOrInvalid:
+          plan.stats.partial_count++;
+          plan.stats.partial_bytes += handle_size_;
+          break;
+        case RemapSourceState::kReady:
+          break;
+      }
+      AppendMappedFreeSubRange(
+          &replacement_segments, *current, page_va, handle_size_);
+      cursor = page_va + handle_size_;
+    }
+    if (cursor < block_end) {
+      AppendMappedFreeSubRange(
+          &replacement_segments, *current, cursor, block_end - cursor);
+    }
+
+    if (plan.handles.size() == remapped_count_before) {
+      continue;
+    }
+    plan.source_blocks.push_back({current, std::move(replacement_segments)});
+
+    if (requested_size > 0 &&
+        plan.handles.size() * handle_size_ >= requested_size) {
+      VLOG(3) << "VMM V2 remap transaction: bounded move-page"
+              << " exit, collected " << plan.handles.size() << " handles ("
+              << plan.handles.size() * handle_size_
+              << " bytes) >= requested=" << requested_size;
+      break;
+    }
+  }
+  return plan;
+}
+
+void RemapTransaction::ApplyPlannedSourceBlocks(
+    BlockList* blocks, std::vector<PlannedSourceBlock>* source_blocks) const {
+  for (auto& source_block : *source_blocks) {
+    auto insert_pos = source_block.block_it;
+    for (auto& segment : source_block.replacement_segments) {
+      blocks->insert(insert_pos, std::move(segment));
+    }
+    blocks->erase(source_block.block_it);
+  }
+  source_blocks->clear();
+}
+
+bool RemapTransaction::TailIsUsable(VMMDevicePtr tail_va,
+                                    size_t total_bytes,
+                                    VMMDevicePtr va_limit) const {
+  if (tail_va + total_bytes > va_limit) {
+    return false;
+  }
+  return vmm_allocator_->IsDriverVaRangeUnmapped(tail_va, total_bytes);
+}
+
+size_t RemapTransaction::CountLeadingUnmappedBackingPages(VMMDevicePtr va,
+                                                          size_t size) const {
+  const size_t aligned_size = (size / handle_size_) * handle_size_;
+  if (aligned_size == 0) {
+    return 0;
+  }
+  std::vector<std::pair<VMMDevicePtr, size_t>> ranges = {{va, aligned_size}};
+  auto pages = vmm_allocator_->CollectUnmappedPages(ranges, aligned_size);
+  size_t leading = 0;
+  for (const auto& page : pages) {
+    if (page.va != va + leading * handle_size_) {
+      break;
+    }
+    ++leading;
+  }
+  return leading;
+}
+
+RemapTransaction::UnmappedFreeDestinationPlan
+RemapTransaction::PlanUnmappedFreeDestinations(BlockList* blocks,
+                                               size_t handle_count) const {
+  UnmappedFreeDestinationPlan plan;
+  plan.single_it = blocks->end();
+  const size_t required_bytes = handle_count * handle_size_;
+  const size_t unknown_capacity = static_cast<size_t>(-1);
+  std::vector<std::pair<BlockIterator, size_t>> candidates;
+  for (auto it = blocks->begin(); it != blocks->end(); ++it) {
+    if (!it->IsUnmappedFree()) continue;
+    size_t unmapped_free_cap = unknown_capacity;
+    if (it->Size() >= required_bytes) {
+      unmapped_free_cap =
+          CountLeadingUnmappedBackingPages(it->BeginVA(), it->Size());
+      const size_t capacity_bytes = unmapped_free_cap * handle_size_;
+      if (capacity_bytes >= required_bytes &&
+          CanPrepareSyntheticAllocationRange(it->BeginVA(), required_bytes)) {
+        plan.single_it = it;
+        return plan;
+      }
+    }
+    candidates.push_back({it, unmapped_free_cap});
+  }
+
+  size_t handle_idx = 0;
+  for (const auto& candidate : candidates) {
+    auto it = candidate.first;
+    size_t unmapped_free_cap = candidate.second;
+    if (unmapped_free_cap == unknown_capacity) {
+      unmapped_free_cap =
+          CountLeadingUnmappedBackingPages(it->BeginVA(), it->Size());
+    }
+    if (unmapped_free_cap == 0) continue;
+
+    auto dst = it->BeginVA();
+    const size_t capacity_bytes = unmapped_free_cap * handle_size_;
+    if (CanPrepareSyntheticAllocationRange(dst, capacity_bytes)) {
+      plan.total_capacity += capacity_bytes;
+    }
+
+    if (handle_idx >= handle_count) continue;
+    size_t to_fill = std::min(unmapped_free_cap, handle_count - handle_idx);
+    if (!CanPrepareSyntheticAllocationRange(dst, to_fill * handle_size_)) {
+      continue;
+    }
+    plan.scatter_placements.push_back(
+        DestinationPlacement::UnmappedFree(it, dst, handle_idx, to_fill));
+    handle_idx += to_fill;
+  }
+  plan.scatter_handles = handle_idx;
+  return plan;
+}
+
+RemapTransaction::DestinationPlan RemapTransaction::SelectDestinationPlan(
+    BlockList* blocks,
+    VMMDevicePtr tail_va,
+    VMMDevicePtr va_limit,
+    size_t handle_count,
+    const char* log_prefix) const {
+  DestinationPlan plan;
+  const size_t total_remapped = handle_count * handle_size_;
+
+  const bool tail_driver_va_usable =
+      TailIsUsable(tail_va, total_remapped, va_limit);
+  if (tail_driver_va_usable &&
+      CanPrepareSyntheticAllocationRange(tail_va, total_remapped)) {
+    VLOG(10) << "VMM remap compact using " << log_prefix
+             << " tail path, dst_va=" << reinterpret_cast<void*>(tail_va)
+             << " bytes=" << total_remapped;
+    plan.kind = DestinationPlanKind::kTail;
+    plan.placements.push_back(
+        DestinationPlacement::Tail(tail_va, handle_count));
+    return plan;
+  }
+  if (tail_driver_va_usable) {
+    VLOG(3) << "VMM V2 remap transaction: " << log_prefix
+            << " tail driver VA is usable but synthetic preparation rejected, "
+            << "trying unmapped-free destination";
+  }
+
+  auto unmapped_free_plan = PlanUnmappedFreeDestinations(blocks, handle_count);
+  if (unmapped_free_plan.single_it != blocks->end()) {
+    BlockIterator unmapped_free_it = unmapped_free_plan.single_it;
+    const VMMDevicePtr unmapped_free_va = unmapped_free_it->BeginVA();
+    VLOG(10) << "VMM remap compact using " << log_prefix
+             << " unmapped-free path, dst_va="
+             << reinterpret_cast<void*>(unmapped_free_va)
+             << " unmapped_free_size=" << unmapped_free_it->Size()
+             << " bytes=" << total_remapped;
+    plan.kind = DestinationPlanKind::kSingleUnmappedFree;
+    plan.placements.push_back(DestinationPlacement::UnmappedFree(
+        unmapped_free_it, unmapped_free_va, 0, handle_count));
+    return plan;
+  }
+
+  VLOG(3) << "VMM V2 remap transaction: " << log_prefix
+          << " tail unavailable and no single unmapped-free block >= "
+          << total_remapped << " bytes, trying scatter";
+  plan.kind = DestinationPlanKind::kScatterUnmappedFree;
+  plan.placements = std::move(unmapped_free_plan.scatter_placements);
+  if (unmapped_free_plan.scatter_handles == handle_count) {
+    return plan;
+  }
+  if (unmapped_free_plan.total_capacity < total_remapped) {
+    VLOG(0) << "VMM V2 remap transaction: " << log_prefix
+            << " unmapped-free capacity " << unmapped_free_plan.total_capacity
+            << " < total_remapped " << total_remapped;
+    plan.kind = DestinationPlanKind::kNone;
+    plan.failure = DestinationPlanFailure::kInsufficientUnmappedFreeCapacity;
+    return plan;
+  }
+
+  size_t planned_handles = 0;
+  for (const auto& p : plan.placements) {
+    planned_handles += p.count;
+  }
+  VLOG(0) << "VMM V2 remap transaction " << log_prefix << " scatter: placed "
+          << planned_handles << " of " << handle_count
+          << " handles despite precheck";
+  plan.kind = DestinationPlanKind::kNone;
+  plan.failure = DestinationPlanFailure::kScatterPlanFailed;
+  return plan;
+}
+
+bool RemapTransaction::TryCommitTailMovePlacement(BlockList* blocks,
+                                                  VMMDevicePtr tail_va,
+                                                  SourceMovePlan* plan,
+                                                  PoolType pool_type) {
+  const size_t handle_count = plan->handles.size();
+  auto placement = DestinationPlacement::Tail(tail_va, handle_count);
+  std::vector<VMMBackingMap::UnmappedPage> target_pages;
+  if (!PrepareMoveDestinationPlacement(
+          placement,
+          "RemapTransaction::TryCommitTailMovePlacement",
+          &target_pages)) {
+    return false;
+  }
+
+  if (!MovePlannedPagesToTargets(blocks, plan, target_pages)) {
+    return false;
+  }
+  ApplyPlannedSourceBlocks(blocks, &plan->source_blocks);
+  NormalizeBlocks(blocks);
+  auto mapped =
+      MaterializeDestinationPlacement(placement, plan->handles, pool_type);
+  InstallMappedDestinationRange(
+      blocks, placement, std::move(mapped.free_block), pool_type);
+  NormalizeBlocks(blocks);
+  Commit();
+  return true;
+}
+
+bool RemapTransaction::MovePlannedPagesToTargets(
+    BlockList* blocks,
+    SourceMovePlan* plan,
+    const std::vector<VMMBackingMap::UnmappedPage>& target_pages) {
+  const size_t handle_count = plan->handles.size();
+  if (target_pages.size() != handle_count) {
+    VLOG(0) << "VMM V2 remap transaction: MovePage target count mismatch, "
+            << "targets=" << target_pages.size() << " handles=" << handle_count;
+    return false;
+  }
+  rollback_source_mappings_ =
+      [this, blocks, handles = plan->handles, metas = plan->metas]() {
+        RestoreRemappedSourcesToFreeBlocks(blocks, handles, metas);
+      };
+
+  for (size_t i = 0; i < handle_count; ++i) {
+    if (!vmm_allocator_->MoveBackingPageForRemap(
+            plan->source_pages[i], target_pages[i], plan->metas[i])) {
+      VLOG(0) << "VMM V2 remap transaction: MoveBackingPage failed at " << i
+              << "/" << handle_count;
+      Rollback();
+      return false;
+    }
+    RecordMappedDestinationRange(target_pages[i].va, 1);
+  }
+  return true;
+}
+
+bool RemapTransaction::TryCommitSingleUnmappedFreeMovePlacement(
+    BlockList* blocks,
+    BlockIterator unmapped_free_it,
+    SourceMovePlan* plan,
+    PoolType pool_type) {
+  const size_t handle_count = plan->handles.size();
+  const VMMDevicePtr unmapped_free_va = unmapped_free_it->BeginVA();
+  auto placement = DestinationPlacement::UnmappedFree(
+      unmapped_free_it, unmapped_free_va, 0, handle_count);
+  std::vector<VMMBackingMap::UnmappedPage> target_pages;
+  if (!PrepareMoveDestinationPlacement(
+          placement,
+          "RemapTransaction::TryCommitSingleUnmappedFreeMovePlacement",
+          &target_pages)) {
+    return false;
+  }
+
+  if (!MovePlannedPagesToTargets(blocks, plan, target_pages)) {
+    return false;
+  }
+  ApplyPlannedSourceBlocks(blocks, &plan->source_blocks);
+  auto mapped =
+      MaterializeDestinationPlacement(placement, plan->handles, pool_type);
+  InstallMappedDestinationRange(
+      blocks, placement, std::move(mapped.free_block), pool_type);
+  NormalizeBlocks(blocks);
+  Commit();
+  return true;
+}
+
+bool RemapTransaction::TryCommitUnmappedFreeMoveScatter(
+    BlockList* blocks,
+    SourceMovePlan* plan,
+    const std::vector<DestinationPlacement>& placements,
+    PoolType pool_type) {
+  std::vector<VMMBackingMap::UnmappedPage> target_pages;
+  target_pages.reserve(plan->handles.size());
+  for (const auto& p : placements) {
+    std::vector<VMMBackingMap::UnmappedPage> pages;
+    if (!PrepareMoveDestinationPlacement(
+            p, "RemapTransaction::TryCommitUnmappedFreeMoveScatter", &pages)) {
+      return false;
+    }
+    target_pages.insert(target_pages.end(), pages.begin(), pages.end());
+  }
+
+  if (!MovePlannedPagesToTargets(blocks, plan, target_pages)) {
+    return false;
+  }
+  ApplyPlannedSourceBlocks(blocks, &plan->source_blocks);
+  for (const auto& p : placements) {
+    auto mapped = MaterializeDestinationPlacement(p, plan->handles, pool_type);
+    InstallMappedDestinationRange(
+        blocks, p, std::move(mapped.free_block), pool_type);
+  }
+  NormalizeBlocks(blocks);
+  Commit();
+  return true;
+}
+
+RemapTransaction::PlacementResult
+RemapTransaction::ExecuteMovePlacementStrategy(BlockList* blocks,
+                                               VMMDevicePtr tail_va,
+                                               VMMDevicePtr va_limit,
+                                               SourceMovePlan* plan,
+                                               PoolType pool_type) {
+  PlacementResult result;
+  auto plan_start = Clock::now();
+  auto destination = SelectDestinationPlan(
+      blocks, tail_va, va_limit, plan->handles.size(), "MovePage");
+  result.destination_plan_us = ElapsedMicros(plan_start, Clock::now());
+  if (!destination.HasPlacement()) {
+    return result;
+  }
+
+  auto commit_start = Clock::now();
+  switch (destination.kind) {
+    case DestinationPlanKind::kTail:
+      result.success = TryCommitTailMovePlacement(
+          blocks, destination.placements.front().dst, plan, pool_type);
+      result.used_tail = result.success;
+      result.move_commit_us = ElapsedMicros(commit_start, Clock::now());
+      return result;
+    case DestinationPlanKind::kSingleUnmappedFree:
+      result.success = TryCommitSingleUnmappedFreeMovePlacement(
+          blocks,
+          destination.placements.front().unmapped_free_it,
+          plan,
+          pool_type);
+      result.move_commit_us = ElapsedMicros(commit_start, Clock::now());
+      return result;
+    case DestinationPlanKind::kScatterUnmappedFree:
+      result.success = TryCommitUnmappedFreeMoveScatter(
+          blocks, plan, destination.placements, pool_type);
+      result.move_commit_us = ElapsedMicros(commit_start, Clock::now());
+      return result;
+    case DestinationPlanKind::kNone:
+      return result;
+  }
+  return result;
+}
+
+RemapTransaction::CompactResult RemapTransaction::CompactFreeBlocks(
+    BlockList* blocks, size_t requested_size, PoolType pool_type) {
+  CompactResult result;
+  rollback_source_mappings_ = {};
+
+  VMMDevicePtr tail_va = vmm_allocator_->VirtualMemBase();
+  if (!blocks->empty()) {
+    const auto& last = blocks->back();
+    tail_va = last.EndVA();
+  }
+  const VMMDevicePtr va_limit =
+      vmm_allocator_->VirtualMemBase() + vmm_allocator_->VirtualMemSize();
+
+  auto source_start = Clock::now();
+  auto move_plan = CollectRemapSourcePlan(blocks, requested_size, pool_type);
+  result.source_collect_us = ElapsedMicros(source_start, Clock::now());
+  result.source_stats = move_plan.stats;
+  result.remapped_handle_count = move_plan.handles.size();
+  result.remapped_bytes = move_plan.handles.size() * handle_size_;
+  if (move_plan.handles.empty()) {
+    return result;
+  }
+  auto move_placement = ExecuteMovePlacementStrategy(
+      blocks, tail_va, va_limit, &move_plan, pool_type);
+  result.success = move_placement.success;
+  result.used_tail = move_placement.used_tail;
+  result.destination_plan_us = move_placement.destination_plan_us;
+  result.move_commit_us = move_placement.move_commit_us;
+  if (result.success) {
+    if (result.used_tail) {
+      vmm_allocator_->AdvanceTailOffset(result.remapped_bytes);
+    }
+  }
+  return result;
+}
+
+void RemapTransaction::InstallTailFreeBlock(BlockList* blocks,
+                                            BlockV2 free_block) const {
+  if (!blocks->empty()) {
+    auto last = std::prev(blocks->end());
+    if (last->CanAbsorbAdjacentFreeBlock(free_block)) {
+      last->AbsorbAdjacentBlock(free_block);
+      return;
+    }
+  }
+  blocks->push_back(std::move(free_block));
+}
+
+RemapTransaction::BlockIterator
+RemapTransaction::InstallMappedUnmappedFreeRange(BlockList* blocks,
+                                                 BlockIterator unmapped_free_it,
+                                                 BlockV2 free_block,
+                                                 PoolType pool_type) const {
+  VMMDevicePtr unmapped_free_va = unmapped_free_it->BeginVA();
+  size_t unmapped_free_size = unmapped_free_it->Size();
+  size_t filled_bytes = free_block.Size();
+
+  if (unmapped_free_size == filled_bytes) {
+    *unmapped_free_it = std::move(free_block);
+  } else {
+    BlockV2 remaining_unmapped_free = MakeUnmappedFreeBlock(
+        reinterpret_cast<void*>(unmapped_free_va + filled_bytes),
+        unmapped_free_size - filled_bytes,
+        pool_type);
+    *unmapped_free_it = std::move(free_block);
+    blocks->insert(std::next(unmapped_free_it),
+                   std::move(remaining_unmapped_free));
+  }
+
+  auto result = unmapped_free_it;
+  if (result != blocks->begin()) {
+    auto prev = std::prev(result);
+    if (prev->CanAbsorbAdjacentFreeBlock(*result)) {
+      prev->AbsorbAdjacentBlock(*result);
+      blocks->erase(result);
+      result = prev;
+    }
+  }
+
+  auto next = std::next(result);
+  if (next != blocks->end() && result->CanAbsorbAdjacentFreeBlock(*next)) {
+    result->AbsorbAdjacentBlock(*next);
+    blocks->erase(next);
+  }
+  return result;
+}
+
+void RemapTransaction::InstallMappedDestinationRange(
+    BlockList* blocks,
+    const DestinationPlacement& placement,
+    BlockV2 free_block,
+    PoolType pool_type) const {
+  if (placement.is_tail) {
+    InstallTailFreeBlock(blocks, std::move(free_block));
+    return;
+  }
+  InstallMappedUnmappedFreeRange(
+      blocks, placement.unmapped_free_it, std::move(free_block), pool_type);
+}
+
+BlockV2 RemapTransaction::MakeUnmappedFreeBlock(void* ptr,
+                                                size_t size,
+                                                PoolType pool_type) const {
+  return BlockV2::MakeUnmappedFreeBlock(ptr, size, pool_type);
+}
+
+void RemapTransaction::MergeAdjacentFreeBlocks(BlockList* blocks) const {
+  for (auto it = blocks->begin(); it != blocks->end();) {
+    if (!it->IsFree()) {
+      ++it;
+      continue;
+    }
+    auto next = std::next(it);
+    if (next != blocks->end() && it->CanAbsorbAdjacentFreeBlock(*next)) {
+      it->AbsorbAdjacentBlock(*next);
+      blocks->erase(next);
+      continue;
+    }
+    ++it;
+  }
+}
+
+void RemapTransaction::MergeAdjacentUnmappedFreeBlocks(
+    BlockList* blocks) const {
+  for (auto it = blocks->begin(); it != blocks->end();) {
+    auto next = std::next(it);
+    if (next != blocks->end() &&
+        it->CanAbsorbAdjacentUnmappedFreeBlock(*next)) {
+      it->AbsorbAdjacentUnmappedFreeBlock(*next);
+      blocks->erase(next);
+      continue;
+    }
+    ++it;
+  }
+}
+
+void RemapTransaction::NormalizeBlocks(BlockList* blocks) const {
+  MergeAdjacentFreeBlocks(blocks);
+  MergeAdjacentUnmappedFreeBlocks(blocks);
+}
+
+bool RemapTransaction::RestoreUnmappedFreeRangeToMappedFreeBlock(
+    BlockList* blocks,
+    VMMDevicePtr va,
+    size_t size,
+    const std::shared_ptr<VMMHandleMeta>& meta) {
+  for (auto& block : *blocks) {
+    if (!block.IsFree()) {
+      continue;
+    }
+    if (block.ContainsVARange(va, size)) {
+      return true;
+    }
+  }
+  for (auto it = blocks->begin(); it != blocks->end(); ++it) {
+    std::vector<BlockV2> replacement_segments;
+    auto restore_result = it->BuildRestoreMappedFreeSegments(
+        va, size, meta, &replacement_segments);
+    if (restore_result == BlockRestoreMappedFreeResult::kOutside) {
+      continue;
+    }
+    if (restore_result == BlockRestoreMappedFreeResult::kRangeExceedsBlock) {
+      VLOG(0) << "RestoreUnmappedFreeRangeToMappedFreeBlock: range exceeds "
+                 "unmapped-free block, va="
+              << reinterpret_cast<void*>(va) << " size=" << size
+              << " block_start=" << reinterpret_cast<void*>(it->BeginVA())
+              << " unmapped_free_size=" << it->Size();
+      return false;
+    }
+
+    auto insert_pos = it;
+    for (auto& segment : replacement_segments) {
+      blocks->insert(insert_pos, std::move(segment));
+    }
+    blocks->erase(it);
+    return true;
+  }
+  VLOG(0) << "RestoreUnmappedFreeRangeToMappedFreeBlock: unmapped-free block "
+             "not found for VA "
+          << reinterpret_cast<void*>(va) << "; force-release will follow";
+  return false;
+}
+
+bool RemapTransaction::RestoreRemappedSourcesToFreeBlocks(
+    BlockList* blocks,
+    const std::vector<VMMAllocHandle>& handles,
+    const std::vector<std::shared_ptr<VMMHandleMeta>>& metas) {
+  if (handles.empty()) {
+    return false;
+  }
+  RestoreSourceMappings(
+      blocks,
+      handles,
+      metas,
+      vmm_allocator_,
+      handle_size_,
+      [this](BlockList* restore_blocks) {
+        MergeAdjacentFreeBlocks(restore_blocks);
+      },
+      [this](BlockList* restore_blocks,
+             VMMDevicePtr va,
+             size_t size,
+             const std::shared_ptr<VMMHandleMeta>& meta) {
+        return RestoreUnmappedFreeRangeToMappedFreeBlock(
+            restore_blocks, va, size, meta);
+      });
+  return true;
+}
+
+void RemapTransaction::RecordMappedDestinationRange(VMMDevicePtr dst,
+                                                    size_t handle_count) {
+  rollback_mapped_destinations_.push_back([this, dst, handle_count]() {
+    VLOG(0) << "VMM V2 remap transaction: unmapping mapped destination "
+            << reinterpret_cast<void*>(dst) << " handles=" << handle_count;
+    vmm_allocator_->RollbackMappedHandleRange(dst, handle_count);
+  });
+}
+
+void RemapTransaction::Commit() {
+  PADDLE_ENFORCE_EQ(
+      pending_synthetic_allocations_.empty() ||
+          static_cast<bool>(commit_synthetic_allocation_),
+      true,
+      common::errors::InvalidArgument(
+          "RemapTransaction committed %d staged synthetic allocations without "
+          "an ownership sink.",
+          pending_synthetic_allocations_.size()));
+  if (commit_synthetic_allocation_) {
+    for (auto* allocation : pending_synthetic_allocations_) {
+      commit_synthetic_allocation_(
+          vmm_allocator_->AdoptCommittedSyntheticAllocation(allocation));
+    }
+  }
+  pending_synthetic_allocations_.clear();
+  rollback_mapped_destinations_.clear();
+  rollback_source_mappings_ = {};
+  completed_ = true;
+}
+
+void RemapTransaction::Rollback() {
+  if (completed_) {
+    return;
+  }
+  while (!pending_synthetic_allocations_.empty()) {
+    auto* allocation = pending_synthetic_allocations_.back();
+    pending_synthetic_allocations_.pop_back();
+    vmm_allocator_->DestroyStagedSyntheticAllocation(allocation);
+  }
+  RollbackMappedDestinations();
+  if (rollback_source_mappings_) {
+    rollback_source_mappings_();
+  }
+  rollback_source_mappings_ = {};
+  completed_ = true;
+}
+
+void RemapTransaction::RollbackMappedDestinations() {
+  for (auto it = rollback_mapped_destinations_.rbegin();
+       it != rollback_mapped_destinations_.rend();
+       ++it) {
+    (*it)();
+  }
+  rollback_mapped_destinations_.clear();
+}
+
+void RemapTransaction::StageSyntheticAllocation(Allocation* allocation) {
+  pending_synthetic_allocations_.emplace_back(allocation);
+}
+
+bool RemapTransaction::HasPendingState() const {
+  return !pending_synthetic_allocations_.empty() ||
+         !rollback_mapped_destinations_.empty() ||
+         static_cast<bool>(rollback_source_mappings_);
+}
+
+}  // namespace allocation
+}  // namespace memory
+}  // namespace paddle

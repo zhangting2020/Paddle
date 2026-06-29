@@ -25,6 +25,7 @@
 #include "paddle/phi/core/memory/allocation/spin_lock.h"
 #include "paddle/phi/core/memory/allocation/vmm_allocator_v2_types.h"
 #include "paddle/phi/core/memory/allocation/vmm_backing_map.h"
+#include "paddle/phi/core/memory/allocation/vmm_ipc_allocation.h"
 
 namespace paddle {
 namespace memory {
@@ -138,9 +139,15 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   void MarkBackingReleased(VMMDevicePtr ptr,
                            VMMAllocHandle handle,
                            size_t size);
+  void MarkBackingIpcExported(VMMDevicePtr ptr, size_t size);
+  bool HasIpcExportedRange(VMMDevicePtr ptr, size_t size) const;
   bool IsRangeReleasable(VMMDevicePtr ptr, size_t size) const;
   bool IsRangeReusable(VMMDevicePtr ptr, size_t size) const;
   bool IsDriverVaRangeUnmapped(VMMDevicePtr ptr, size_t size) const;
+  bool CollectBlockIpcParts(const BlockV2& block,
+                            std::vector<BlockPart>* ipc_parts) const;
+  bool MarkBlockIpcExported(const BlockV2& block);
+  bool HasBlockIpcExported(const BlockV2& block) const;
   bool SetBlockRemapEvent(const BlockV2& block,
                           gpuStream_t stream,
                           std::shared_ptr<CUDAEventGuard> event);
@@ -173,6 +180,10 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
  private:
   void InitOnce();
   bool IsReservedVaRange(VMMDevicePtr ptr, size_t size) const;
+  bool CollectIpcParts(VMMDevicePtr ptr,
+                       size_t size,
+                       std::vector<BlockPart>* ipc_parts) const;
+  bool MarkIpcExported(VMMDevicePtr ptr, size_t size);
   bool SetRemapEvent(VMMDevicePtr ptr,
                      size_t size,
                      gpuStream_t stream,

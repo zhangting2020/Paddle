@@ -146,7 +146,8 @@ void VMMBackingMap::MarkPageMappedLocked(
   page->epoch++;
 }
 
-void VMMBackingMap::ResetPageToUnmappedLocked(Page* page) {
+void VMMBackingMap::ResetPageToUnmappedLocked(Page* page,
+                                              bool clear_ipc_exported) {
   if (page->mapped && mapped_page_count_ > 0) {
     mapped_page_count_--;
   }
@@ -154,6 +155,9 @@ void VMMBackingMap::ResetPageToUnmappedLocked(Page* page) {
   page->meta.reset();
   page->mapped = false;
   page->remap_destination_owned = false;
+  if (clear_ipc_exported) {
+    page->ipc_exported = false;
+  }
   page->pending_events.clear();
   page->epoch++;
 }
@@ -224,7 +228,7 @@ void VMMBackingMap::MarkUnmapped(VMMDevicePtr va, size_t size) {
       VLOG(5) << "VMM V2 BackingMap unmapping already-unmapped page at "
               << reinterpret_cast<void*>(va + i * page_size_);
     }
-    ResetPageToUnmappedLocked(&page);
+    ResetPageToUnmappedLocked(&page, false);
   }
 }
 
@@ -245,7 +249,32 @@ void VMMBackingMap::MarkReleased(VMMDevicePtr va,
               << " tracked=" << reinterpret_cast<void*>(page.handle)
               << " released=" << reinterpret_cast<void*>(handle);
     }
-    ResetPageToUnmappedLocked(&page);
+    ResetPageToUnmappedLocked(&page, true);
+  }
+}
+
+void VMMBackingMap::MarkIpcExported(VMMDevicePtr va, size_t size) {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  size_t start = 0;
+  size_t count = 0;
+  if (!ComputeOverlappedPages(base_,
+                              size_,
+                              page_size_,
+                              va,
+                              size,
+                              "MarkIpcExported",
+                              &start,
+                              &count)) {
+    return;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    auto& page = pages_[start + i];
+    if (!page.mapped) {
+      VLOG(4) << "VMM V2 BackingMap marks unmapped page as IPC-exported at "
+              << reinterpret_cast<void*>(va + i * page_size_);
+    }
+    page.ipc_exported = true;
+    page.epoch++;
   }
 }
 
@@ -355,6 +384,14 @@ bool VMMBackingMap::ValidateLayout(const HandleLayout& layout,
   return ok;
 }
 
+bool VMMBackingMap::CollectIpcPartDescriptors(
+    VMMDevicePtr va,
+    size_t size,
+    std::vector<IpcBlockPartDescriptor>* descriptors) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  return CollectIpcPartDescriptorsLocked(va, size, descriptors);
+}
+
 bool VMMBackingMap::IsRangeMapped(VMMDevicePtr va, size_t size) const {
   std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
@@ -400,7 +437,8 @@ bool VMMBackingMap::IsRangeReleasable(VMMDevicePtr va, size_t size) const {
     return false;
   }
   for (size_t i = 0; i < count; ++i) {
-    if (!PageCanUseBackingLocked(&pages_[start + i], "IsRangeReleasable")) {
+    if (pages_[start + i].ipc_exported ||
+        !PageCanUseBackingLocked(&pages_[start + i], "IsRangeReleasable")) {
       return false;
     }
   }
@@ -424,11 +462,33 @@ bool VMMBackingMap::IsRangeReusableForAllocation(VMMDevicePtr va,
   }
   for (size_t i = 0; i < count; ++i) {
     auto* page = &pages_[start + i];
-    if (!page->mapped) {
+    if (!page->mapped || page->ipc_exported) {
       return false;
     }
   }
   return true;
+}
+
+bool VMMBackingMap::HasIpcExportedPages(VMMDevicePtr va, size_t size) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  size_t start = 0;
+  size_t count = 0;
+  if (!ComputeOverlappedPages(base_,
+                              size_,
+                              page_size_,
+                              va,
+                              size,
+                              "HasIpcExportedPages",
+                              &start,
+                              &count)) {
+    return true;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (pages_[start + i].ipc_exported) {
+      return true;
+    }
+  }
+  return false;
 }
 
 std::vector<std::pair<VMMDevicePtr, size_t>> VMMBackingMap::CollectMappedRanges(
@@ -839,7 +899,8 @@ void VMMBackingMap::AppendMappedPagesLocked(
       break;
     }
     const auto& page = pages_[start + i];
-    if (!page.mapped || !PageCanUseBackingLocked(&pages_[start + i], context)) {
+    if (!page.mapped || page.ipc_exported ||
+        !PageCanUseBackingLocked(&pages_[start + i], context)) {
       continue;
     }
     mapped_pages->push_back(
@@ -884,7 +945,7 @@ void VMMBackingMap::AppendMappedPagesFullyCoveredByLocked(
       break;
     }
     const auto& page = pages_[page_idx];
-    if (!page.mapped) {
+    if (!page.mapped || page.ipc_exported) {
       continue;
     }
     auto remap_source_state = RemapSourceState::kReady;
@@ -901,6 +962,49 @@ void VMMBackingMap::AppendMappedPagesFullyCoveredByLocked(
                                        page.epoch,
                                        remap_source_state});
   }
+}
+
+bool VMMBackingMap::CollectIpcPartDescriptorsLocked(
+    VMMDevicePtr va,
+    size_t size,
+    std::vector<IpcBlockPartDescriptor>* descriptors) const {
+  size_t start = 0;
+  size_t count = 0;
+  if (!ComputeOverlappedPages(base_,
+                              size_,
+                              page_size_,
+                              va,
+                              size,
+                              "CollectIpcPartDescriptors",
+                              &start,
+                              &count)) {
+    return false;
+  }
+  if (descriptors != nullptr) {
+    descriptors->clear();
+    descriptors->reserve(count);
+  }
+  for (size_t i = 0; i < count; ++i) {
+    const auto& page = pages_[start + i];
+    if (!page.mapped || page.meta == nullptr ||
+        page.meta->IsOwnedByRemapDestination()) {
+      return false;
+    }
+    if (descriptors != nullptr) {
+      const VMMDevicePtr page_va = base_ + (start + i) * page_size_;
+      const VMMDevicePtr slice_begin = std::max(va, page_va);
+      const VMMDevicePtr slice_end = std::min(va + size, page_va + page_size_);
+      descriptors->push_back(IpcBlockPartDescriptor{
+          page.meta->Base(),
+          page.meta->Size(),
+          page.meta->AllocationHandle(),
+          page.meta->Device(),
+          static_cast<size_t>(slice_begin - page_va),
+          static_cast<size_t>(slice_end - slice_begin),
+      });
+    }
+  }
+  return true;
 }
 
 void VMMBackingMap::AppendUnmappedPagesFullyCoveredByLocked(

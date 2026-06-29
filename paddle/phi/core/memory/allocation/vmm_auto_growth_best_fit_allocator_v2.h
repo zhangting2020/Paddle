@@ -23,6 +23,7 @@
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator_v2.h"
 #include "paddle/phi/core/memory/allocation/spin_lock.h"
 #include "paddle/phi/core/memory/allocation/vmm_allocator_v2_types.h"
+#include "paddle/phi/core/memory/allocation/vmm_ipc_allocation.h"
 #include "paddle/phi/core/memory/mem_visitor.h"
 
 #if defined(PADDLE_WITH_CUDA)
@@ -80,6 +81,11 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   // Query aggregate free-block statistics for OOM dispatch decisions.
   // total_free = sum of all FREE block sizes, max_free = largest FREE block.
   void GetFreeBlockStats(size_t* total_free, size_t* max_free);
+
+  bool CollectTensorParts(void* ptr,
+                          size_t size,
+                          std::vector<BlockPart>* parts,
+                          bool mark_ipc_exported = true);
 
   bool SetBlockRemapEvent(void* ptr,
                           gpuStream_t stream,

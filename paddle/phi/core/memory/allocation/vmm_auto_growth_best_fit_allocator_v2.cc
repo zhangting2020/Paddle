@@ -17,9 +17,13 @@
 #if defined(PADDLE_WITH_CUDA)
 
 #include <exception>
+#include <limits>
 
 #include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
+#include "paddle/phi/core/memory/allocation/free_block_remap_compactor.h"
+
+COMMON_DECLARE_bool(vmm_v2_compact_all);
 
 namespace paddle {
 namespace memory {
@@ -276,14 +280,146 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
 
 size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
                                                     size_t requested_size) {
+  // Defensive place validation: the call chain
+  // (RetryAllocator -> StreamSafe -> MultiPool -> SinglePool) guarantees
+  // place consistency.  Log a warning on mismatch but do not throw,
+  // since CompactImpl is called inside a try-catch that would silently
+  // swallow the exception and skip compaction.
   if (UNLIKELY(place != Place(place_))) {
     LOG(WARNING) << "CompactImpl place mismatch: got " << place.DebugString()
                  << " but allocator serves " << Place(place_).DebugString();
   }
-  VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
-          << " compact skip: remap compaction is not enabled in this stage"
-          << " requested=" << requested_size;
-  return 0;
+  std::lock_guard<SpinLock> guard(spinlock_);
+
+  size_t total_free = 0;
+  size_t max_free = 0;
+  size_t tail_free = 0;
+  std::vector<std::pair<VMMDevicePtr, size_t>> compact_source_ranges;
+  for (const auto& blk : all_blocks_) {
+    if (blk.IsMappedFree()) {
+      total_free += blk.size_;
+      compact_source_ranges.emplace_back(blk.VARange());
+    }
+    if (CanIndexFreeBlock(blk)) {
+      max_free = std::max(max_free, blk.size_);
+    }
+  }
+  if (!all_blocks_.empty() && CanIndexFreeBlock(all_blocks_.back())) {
+    tail_free = all_blocks_.back().size_;
+  }
+
+  size_t compact_target = requested_size;
+  if (requested_size > 0) {
+    if (max_free >= requested_size) {
+      VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+              << " compact skip: max_free=" << max_free
+              << " >= requested=" << requested_size;
+      return 0;
+    }
+
+    if (total_free < requested_size) {
+      if (total_free <= tail_free) {
+        VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+                << " compact skip: total_free=" << total_free
+                << " < requested=" << requested_size
+                << " and no non-tail free bytes are available"
+                << " (tail_free=" << tail_free << ")";
+        return 0;
+      }
+      // Partial compact: under tight training pressure, mapped-free bytes may
+      // be insufficient to cover the whole request but still reduce the next
+      // grow attempt. Move the non-tail free backing to tail/gaps and let the
+      // following allocation retry grow only the remaining deficit.
+      compact_target = total_free;
+      VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+              << " compact partial: total_free=" << total_free
+              << " < requested=" << requested_size << " tail_free=" << tail_free
+              << " compact_target=" << compact_target;
+    }
+  }
+
+  // Count potentially movable source pages through the BackingMap mirror.
+  // Runtime event readiness remains in RemapTransaction; this precheck only
+  // verifies that free VA ranges fully cover mapped, reusable backing pages.
+  // The source ranges include all mapped-free blocks. BackingMap page state
+  // decides which individual handles are movable.
+  const size_t required_releasable_bytes =
+      compact_target > tail_free ? compact_target - tail_free : 0;
+  const size_t releasable_target_bytes =
+      requested_size > 0 && !FLAGS_vmm_v2_compact_all
+          ? required_releasable_bytes
+          : compact_target;
+
+  auto source_pages = underlying_allocator_->CollectRemapSourcePages(
+      compact_source_ranges, releasable_target_bytes);
+  size_t releasable_handles = 0;
+  for (const auto& page : source_pages) {
+    if (page.remap_source_state == VMMBackingMap::RemapSourceState::kReady) {
+      ++releasable_handles;
+    }
+  }
+  const size_t releasable_bytes =
+      releasable_handles * underlying_allocator_->HandleSize();
+
+  if (requested_size > 0 && !FLAGS_vmm_v2_compact_all &&
+      releasable_bytes < required_releasable_bytes) {
+    VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+            << " compact skip: releasable_bytes=" << releasable_bytes
+            << " < required=" << required_releasable_bytes
+            << " requested=" << requested_size << " total_free=" << total_free
+            << " max_free=" << max_free << " tail_free=" << tail_free
+            << " compact_target=" << compact_target
+            << " source_ranges=" << compact_source_ranges.size();
+    return 0;
+  }
+
+  if (releasable_handles == 0) {
+    VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+            << " compact skip: no releasable handles"
+            << " (total_free=" << total_free << " max_free=" << max_free
+            << " tail_free=" << tail_free << " requested=" << requested_size
+            << " compact_target=" << compact_target
+            << " releasable_handles=" << releasable_handles
+            << " releasable_bytes=" << releasable_bytes
+            << " source_ranges=" << compact_source_ranges.size() << ")";
+    return 0;
+  }
+
+  VLOG(3) << "VMM V2 pool " << static_cast<int>(pool_type_)
+          << " compact: total_free=" << total_free << " max_free=" << max_free
+          << " tail_free=" << tail_free << " requested=" << requested_size
+          << " compact_target=" << compact_target
+          << " partial=" << (compact_target < requested_size)
+          << " required_releasable_bytes=" << required_releasable_bytes
+          << " releasable_handles=" << releasable_handles
+          << " releasable_bytes=" << releasable_bytes
+          << " source_ranges=" << compact_source_ranges.size()
+          << ", proceeding with compaction";
+
+  auto commit_synthetic_allocation = [this](DecoratedAllocationPtr allocation) {
+    TrackUnderlyingAllocation(std::move(allocation));
+  };
+  auto can_prepare_synthetic_allocation = [this](void* ptr, size_t size) {
+    return CanReleaseRemapDestinationUnderlyingAllocations(ptr, size);
+  };
+  auto prepare_synthetic_allocation = [this](void* ptr, size_t size) {
+    return ReleaseRemapDestinationUnderlyingAllocations(ptr, size);
+  };
+  FreeBlockRemapCompactor compactor(underlying_allocator_,
+                                    pool_type_,
+                                    commit_synthetic_allocation,
+                                    can_prepare_synthetic_allocation,
+                                    prepare_synthetic_allocation);
+  const bool compact_all = FLAGS_vmm_v2_compact_all;
+  const size_t bounded_compact_target = compact_all ? 0 : compact_target;
+  const size_t remapped =
+      compactor.Compact(&all_blocks_, bounded_compact_target);
+  // Always rebuild: Phase 1 may have replaced FREE blocks with
+  // UNMAPPED-FREE/FREE
+  // segments before Phase 2 fails.  Without rebuild, free_blocks_ holds
+  // stale iterators to erased list nodes, causing use-after-free on next alloc.
+  RebuildFreeBlockIndex();
+  return remapped;
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
@@ -327,6 +463,65 @@ void VMMAutoGrowthBestFitAllocatorV2::GetFreeBlockStats(size_t* total_free,
   }
   *total_free = total;
   *max_free = max_sz;
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
+    void* ptr,
+    size_t size,
+    std::vector<BlockPart>* parts,
+    bool mark_ipc_exported) {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  auto target_va = reinterpret_cast<VMMDevicePtr>(ptr);
+  PADDLE_ENFORCE_LE(
+      size,
+      std::numeric_limits<VMMDevicePtr>::max() - target_va,
+      common::errors::InvalidArgument(
+          "Invalid VMM V2 tensor range: ptr %p plus size %zu overflows.",
+          ptr,
+          size));
+  BlockListIt block_it = all_blocks_.end();
+  for (auto it = all_blocks_.begin(); it != all_blocks_.end(); ++it) {
+    if (!it->IsActive()) {
+      continue;
+    }
+    if (it->ContainsVARange(target_va, size)) {
+      block_it = it;
+      break;
+    }
+  }
+  if (block_it == all_blocks_.end()) {
+    VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit no active block for "
+            << "target_ptr=" << ptr << " target_size=" << size
+            << " pool=" << static_cast<int>(pool_type_)
+            << " block_count=" << all_blocks_.size();
+    return false;
+  }
+
+  std::vector<BlockPart> collected;
+  if (!underlying_allocator_->CollectIpcParts(
+          target_va, size, parts != nullptr ? &collected : nullptr)) {
+    VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit failed to collect backing "
+            << "parts for active block ptr=" << block_it->ptr_
+            << " block_size=" << block_it->size_ << " target_ptr=" << ptr
+            << " target_size=" << size
+            << " pool=" << static_cast<int>(pool_type_);
+    return false;
+  }
+  if (mark_ipc_exported) {
+    if (!underlying_allocator_->MarkIpcExported(target_va, size)) {
+      VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit failed to mark IPC exported "
+              << "for active block ptr=" << block_it->ptr_
+              << " block_size=" << block_it->size_ << " target_ptr=" << ptr
+              << " target_size=" << size
+              << " pool=" << static_cast<int>(pool_type_);
+      return false;
+    }
+    block_it->ipc_exported_ = true;
+  }
+  if (parts != nullptr) {
+    *parts = std::move(collected);
+  }
+  return true;
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::SetBlockRemapEvent(
@@ -562,7 +757,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::TryReleaseIdleUnderlyingAllocation(
 
 bool VMMAutoGrowthBestFitAllocatorV2::CanIndexFreeBlock(
     const BlockV2& block) const {
-  return block.IsMappedFree();
+  return block.IsMappedFree() && !block.ipc_exported_;
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::InsertFreeBlock(BlockListIt it) {

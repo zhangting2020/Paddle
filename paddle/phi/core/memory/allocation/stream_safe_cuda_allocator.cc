@@ -16,8 +16,15 @@
 #include <thread>
 #include "glog/logging.h"
 
+#include "paddle/common/flags.h"
 #include "paddle/phi/api/profiler/event_tracing.h"
 #include "paddle/phi/backends/gpu/gpu_info.h"
+#include "paddle/phi/core/memory/allocation/retry_allocator.h"
+#include "paddle/phi/core/memory/allocation/stat_allocator.h"
+#include "paddle/phi/core/memory/allocation/vmm_allocator_v2_types.h"
+#include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_multi_pool_allocator_v2.h"
+
+COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
 
 #if defined(PADDLE_WITH_CUDA)
 #include "paddle/phi/backends/gpu/cuda/cuda_graph.h"
@@ -26,6 +33,40 @@
 #endif
 
 namespace paddle::memory::allocation {
+
+namespace {
+
+VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVMMV2MultiPoolAllocator(
+    const std::shared_ptr<Allocator>& allocator) {
+  if (allocator == nullptr) {
+    return nullptr;
+  }
+  if (auto* vmm = dynamic_cast<VMMAutoGrowthBestFitMultiPoolAllocatorV2*>(
+          allocator.get())) {
+    return vmm;
+  }
+  if (auto* retry = dynamic_cast<RetryAllocator*>(allocator.get())) {
+    return GetVMMV2MultiPoolAllocator(retry->GetUnderLyingAllocator());
+  }
+  if (auto* stat = dynamic_cast<StatAllocator*>(allocator.get())) {
+    return GetVMMV2MultiPoolAllocator(stat->GetUnderLyingAllocator());
+  }
+  return nullptr;
+}
+
+void MarkVMMV2RemapPendingStream(StreamSafeCUDAAllocator* allocator,
+                                 StreamSafeCUDAAllocation* allocation) {
+  if (allocator->GetVMMV2Allocator() == nullptr) {
+    return;
+  }
+  if (!allocation->SetVMMV2RemapEvent()) {
+    VLOG(0) << "VMM V2 failed to mark remap pending stream for allocation "
+            << allocation->ptr()
+            << "; compact/remap safety may be incomplete for this block";
+  }
+}
+
+}  // namespace
 
 StreamSafeCUDAAllocation::StreamSafeCUDAAllocation(
     DecoratedAllocationPtr underlying_allocation,
@@ -36,6 +77,8 @@ StreamSafeCUDAAllocation::StreamSafeCUDAAllocation(
                  underlying_allocation->size(),
                  underlying_allocation->place()),
       underlying_allocation_(std::move(underlying_allocation)),
+      vmm_v2_remap_allocation_(
+          dynamic_cast<VMMRemapEventAllocation*>(underlying_allocation_.get())),
       owning_stream_(owning_stream),
       allocator_(allocator->shared_from_this()) {}
 
@@ -131,6 +174,13 @@ void StreamSafeCUDAAllocation::RecordGraphCapturingStreams() {
   graph_capturing_stream_set_.clear();
 }
 
+bool StreamSafeCUDAAllocation::SetVMMV2RemapEvent() {
+  if (vmm_v2_remap_allocation_ == nullptr) {
+    return false;
+  }
+  return vmm_v2_remap_allocation_->SetVMMRemapEvent(owning_stream_, nullptr);
+}
+
 void StreamSafeCUDAAllocation::RecordStreamWithNoGraphCapturing(
     gpuStream_t stream) {
   gpuEvent_t record_event;
@@ -166,6 +216,7 @@ StreamSafeCUDAAllocator::StreamSafeCUDAAllocator(
     gpuStream_t default_stream,
     bool in_cuda_graph_capturing)
     : underlying_allocator_(std::move(underlying_allocator)),
+      vmm_v2_allocator_(GetVMMV2MultiPoolAllocator(underlying_allocator_)),
       place_(place),
       default_stream_(default_stream),
       in_cuda_graph_capturing_(in_cuda_graph_capturing) {
@@ -203,18 +254,73 @@ phi::Allocation* StreamSafeCUDAAllocator::AllocateImpl(size_t size) {
   AllocationPtr underlying_allocation;
   try {
     underlying_allocation = underlying_allocator_->Allocate(size);
-  } catch (BadAlloc&) {
+  } catch (const BadAlloc& first_bad_alloc) {
+    const std::string first_failure = first_bad_alloc.what();
     VLOG(4) << "Allocation failed when allocating " << size << " bytes";
-    ReleaseImpl(place_);
+    // Base OOM path for all configurations (including retry_time == 0):
+    // Step 1 reclaims cross-stream pending frees before retrying.
+    {
+      std::lock_guard<SpinLock> lock_guard(allocator_map_lock_);
+      for (auto* alloc : allocator_map_[place_]) {
+        alloc->ProcessUnfreedAllocations();
+      }
+    }
     try {
       underlying_allocation = underlying_allocator_->Allocate(size);
-    } catch (...) {
-      VLOG(3)
-          << "Still allocation failed after release memory from all streams";
-      throw;
+    } catch (const BadAlloc& second_bad_alloc) {
+      const std::string second_failure = second_bad_alloc.what();
+      // Step 2 handles allocator-internal fragmentation only.
+      // CompactImpl performs all VMM V2 pre-checks internally:
+      //   - total_free / max_free coarse filtering
+      //   - releasable handle scanning
+      //   - actual compact(remap) when worthwhile
+      // StreamSafe should not duplicate those checks here. More expensive
+      // recovery actions such as offload (and post-offload compact) are
+      // coordinated by RetryAllocator when it is enabled.
+      //
+      // During training, NEVER release physical memory in this base OOM path.
+      auto* vmm = GetVMMV2MultiPoolAllocator(underlying_allocator_);
+      if (vmm && FLAGS_vmm_v2_remap_on_oom) {
+        size_t compacted = CompactImpl(place_, size);
+        VLOG(3) << "OOM dispatch: requested=" << size << " compact returned "
+                << compacted << " bytes";
+        if (compacted > 0) {
+          VLOG(3) << "OOM retry: compact returned " << compacted << " bytes";
+          try {
+            underlying_allocation = underlying_allocator_->Allocate(size);
+          } catch (const BadAlloc& final_bad_alloc) {
+            PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+                "Allocation of %zu bytes failed after compact "
+                "(remap defrag, %zu bytes compacted).\n"
+                "Initial allocation failure:\n%s\n"
+                "Retry allocation failure before compact:\n%s\n"
+                "Retry allocation failure after compact:\n%s",
+                size,
+                compacted,
+                first_failure.c_str(),
+                second_failure.c_str(),
+                final_bad_alloc.what()));
+          }
+        } else {
+          PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+              "Allocation of %zu bytes failed after VMM V2 compact pre-check "
+              "found no useful remap work.\n"
+              "Initial allocation failure:\n%s\n"
+              "Retry allocation failure before compact:\n%s",
+              size,
+              first_failure.c_str(),
+              second_failure.c_str()));
+        }
+      } else {
+        PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
+            "Allocation of %zu bytes failed.\n"
+            "Initial allocation failure:\n%s\n"
+            "Retry allocation failure:\n%s",
+            size,
+            first_failure.c_str(),
+            second_failure.c_str()));
+      }
     }
-  } catch (...) {
-    throw;
   }
   StreamSafeCUDAAllocation* allocation = new StreamSafeCUDAAllocation(
       static_unique_ptr_cast<Allocation>(std::move(underlying_allocation)),
@@ -236,6 +342,7 @@ void StreamSafeCUDAAllocator::FreeImpl(phi::Allocation* allocation) {
   VLOG(8) << "Try free allocation " << stream_safe_cuda_allocation->ptr();
   if (stream_safe_cuda_allocation->CanBeFreed()) {
     VLOG(9) << "Directly delete allocation";
+    MarkVMMV2RemapPendingStream(this, stream_safe_cuda_allocation);
     delete stream_safe_cuda_allocation;
   } else {
     VLOG(9) << "Put into unfreed_allocation list";
@@ -263,8 +370,15 @@ uint64_t StreamSafeCUDAAllocator::ReleaseImpl(const Place& place) {
 size_t StreamSafeCUDAAllocator::CompactImpl(const Place& place,
                                             size_t requested_size) {
   std::lock_guard<SpinLock> lock_guard(allocator_map_lock_);
-  VLOG(4) << "enter StreamSafeCUDAAllocator compact!!";
   std::vector<StreamSafeCUDAAllocator*>& allocators = allocator_map_[place];
+
+  // Execution layer for compact(remap): first reclaim cross-stream pending
+  // frees so that more blocks become FREE and eligible for remap, then
+  // forward the bounded compact request to each underlying allocator.
+  for (StreamSafeCUDAAllocator* allocator : allocators) {
+    allocator->ProcessUnfreedAllocations();
+  }
+
   size_t compact_free_size = 0;
   for (StreamSafeCUDAAllocator* allocator : allocators) {
     compact_free_size +=
@@ -284,6 +398,7 @@ void StreamSafeCUDAAllocator::ProcessUnfreedAllocations() {
   for (auto it = unfreed_allocations_.begin();
        it != unfreed_allocations_.end();) {
     if ((*it)->CanBeFreed()) {
+      MarkVMMV2RemapPendingStream(this, *it);
       delete *it;
       it = unfreed_allocations_.erase(it);
     } else {

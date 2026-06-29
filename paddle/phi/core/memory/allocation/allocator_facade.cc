@@ -46,7 +46,10 @@
 #include "paddle/phi/backends/gpu/cuda/cuda_graph.h"
 #include "paddle/phi/core/memory/allocation/cuda_malloc_async_allocator.h"
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator.h"
+#include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator_v2.h"
 #include "paddle/phi/core/memory/allocation/virtual_memory_auto_growth_best_fit_allocator.h"
+#include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_allocator_v2.h"
+#include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_multi_pool_allocator_v2.h"
 #elif defined(PADDLE_WITH_HIP)
 #include "paddle/phi/backends/gpu/rocm/hip_graph.h"
 #include "paddle/phi/core/memory/allocation/cuda_malloc_async_allocator.h"  // NOLINT
@@ -89,6 +92,26 @@ PHI_DEFINE_EXPORTED_bool(
 PHI_DEFINE_EXPORTED_bool(use_virtual_memory_auto_growth,
                          false,
                          "Use VirtualMemoryAutoGrowthBestFitAllocator.");
+PHI_DEFINE_EXPORTED_bool(use_vmm_auto_growth_best_fit_allocator_v2,
+                         false,
+                         "Use VMMAutoGrowthBestFitAllocatorV2.");
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_remap_on_oom,
+    true,
+    "Whether VMM V2 compact/remap recovery is enabled on OOM. When true, "
+    "StreamSafeCUDAAllocator may run the base fragmentation compact path, "
+    "and RetryAllocator may run one additional post-offload compact.");
+PHI_DEFINE_EXPORTED_bool(
+    vmm_v2_compact_all,
+    false,
+    "When true, VMM V2 compact remaps ALL releasable handles instead of "
+    "stopping once requested_size is satisfied (bounded compact).");
+PHI_DEFINE_EXPORTED_uint64(vmm_v2_small_pool_handle_size_in_mb,
+                           2,
+                           "VMM V2 small-pool physical handle size in MiB.");
+PHI_DEFINE_EXPORTED_uint64(vmm_v2_large_pool_handle_size_in_mb,
+                           2,
+                           "VMM V2 large-pool physical handle size in MiB.");
 
 // NOTE(Ruibiao): This FLAGS is just to be compatible with
 // the old single-stream CUDA allocator. It will be removed
@@ -113,12 +136,20 @@ COMMON_DECLARE_string(allocator_strategy);
 COMMON_DECLARE_uint64(auto_growth_chunk_size_in_mb);
 COMMON_DECLARE_uint64(alignment_size);
 COMMON_DECLARE_uint64(vmm_small_pool_size_in_mb);
+COMMON_DECLARE_uint64(vmm_v2_small_pool_handle_size_in_mb);
+COMMON_DECLARE_uint64(vmm_v2_large_pool_handle_size_in_mb);
 COMMON_DECLARE_uint64(small_pool_size_in_mb);
 COMMON_DECLARE_bool(use_auto_growth_pinned_allocator);
 COMMON_DECLARE_bool(use_cuda_malloc_async_allocator);
 COMMON_DECLARE_bool(auto_free_cudagraph_allocations_on_launch);
 
 namespace paddle::memory::allocation {
+namespace {
+
+constexpr size_t kVMMV2DefaultHandleSize = 2UL << 20;
+
+}  // namespace
+
 static bool IsCUDAGraphCapturing() {
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP) || \
     defined(PADDLE_WITH_CUSTOM_DEVICE)
@@ -956,9 +987,12 @@ class AllocatorFacadePrivate {
     if (FLAGS_small_pool_size_in_mb <= 0) {
       return;
     }
-    if (FLAGS_use_auto_growth_v2 || FLAGS_use_cuda_malloc_async_allocator) {
+    if (FLAGS_use_auto_growth_v2 || FLAGS_use_cuda_malloc_async_allocator ||
+        FLAGS_use_vmm_auto_growth_best_fit_allocator_v2) {
       VLOG(6) << "PreAlloc is not implemented for "
-                 "AutoGrowthBestFitAllocatorV2 or CUDAMallocAsyncAllocator.";
+                 "AutoGrowthBestFitAllocatorV2, "
+                 "VMMAutoGrowthBestFitAllocatorV2 or "
+                 "CUDAMallocAsyncAllocator.";
       return;
     }
     const auto current_device_id = phi::backends::gpu::GetCurrentDeviceId();
@@ -983,6 +1017,52 @@ class AllocatorFacadePrivate {
     PADDLE_THROW(
         common::errors::Unavailable("CUDAMallocAsyncAllocator is not enabled"));
 #endif
+  }
+
+  std::shared_ptr<VMMAutoGrowthBestFitAllocatorV2>
+  CreateVMMAutoGrowthBestFitPoolAllocatorV2(GPUPlace p,
+                                            size_t handle_size,
+                                            PoolType pool_type) {
+#ifdef PADDLE_WITH_CUDA
+    auto cuda_allocator =
+        std::make_shared<CUDAVirtualMemAllocatorV2>(p, handle_size, pool_type);
+    return std::make_shared<VMMAutoGrowthBestFitAllocatorV2>(
+        cuda_allocator, platform::GpuMinChunkSize(), p, pool_type);
+#else
+    PADDLE_THROW(common::errors::Unavailable(
+        "VMMAutoGrowthBestFitAllocatorV2 is only supported with CUDA."));
+#endif
+  }
+
+  std::shared_ptr<Allocator> CreateVMMAutoGrowthBestFitAllocatorV2(GPUPlace p) {
+    PADDLE_ENFORCE_GT(
+        FLAGS_vmm_v2_small_pool_handle_size_in_mb,
+        0,
+        common::errors::InvalidArgument(
+            "FLAGS_vmm_v2_small_pool_handle_size_in_mb must be greater than "
+            "0."));
+    PADDLE_ENFORCE_GT(
+        FLAGS_vmm_v2_large_pool_handle_size_in_mb,
+        0,
+        common::errors::InvalidArgument(
+            "FLAGS_vmm_v2_large_pool_handle_size_in_mb must be greater than "
+            "0."));
+    const size_t small_handle_size = FLAGS_vmm_v2_small_pool_handle_size_in_mb
+                                     << 20;
+    const size_t large_handle_size = FLAGS_vmm_v2_large_pool_handle_size_in_mb
+                                     << 20;
+    const size_t small_threshold = FLAGS_vmm_small_pool_size_in_mb
+                                       ? (FLAGS_vmm_small_pool_size_in_mb << 20)
+                                       : kVMMV2DefaultHandleSize;
+    auto transient_small_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(
+        p, small_handle_size, PoolType::kSmall);
+    auto transient_large_allocator = CreateVMMAutoGrowthBestFitPoolAllocatorV2(
+        p, large_handle_size, PoolType::kLarge);
+    return std::make_shared<VMMAutoGrowthBestFitMultiPoolAllocatorV2>(
+        transient_small_allocator,
+        transient_large_allocator,
+        small_threshold,
+        p);
   }
 
   void InitAutoGrowthCUDAAllocator(GPUPlace p, gpuStream_t stream) {
@@ -1025,7 +1105,18 @@ class AllocatorFacadePrivate {
       val = 0;
     }
 
-    if (val > 0 && FLAGS_use_virtual_memory_auto_growth) {
+    PADDLE_ENFORCE_EQ(
+        FLAGS_use_virtual_memory_auto_growth &&
+            FLAGS_use_vmm_auto_growth_best_fit_allocator_v2,
+        false,
+        common::errors::InvalidArgument(
+            "FLAGS_use_virtual_memory_auto_growth and "
+            "FLAGS_use_vmm_auto_growth_best_fit_allocator_v2 cannot both be "
+            "true."));
+
+    if (val > 0 && FLAGS_use_vmm_auto_growth_best_fit_allocator_v2) {
+      cuda_allocators_[p][stream] = CreateVMMAutoGrowthBestFitAllocatorV2(p);
+    } else if (val > 0 && FLAGS_use_virtual_memory_auto_growth) {
       auto cuda_allocator_small =
           FLAGS_vmm_small_pool_size_in_mb
               ? std::make_shared<CUDAVirtualMemAllocator>(p)
@@ -1107,7 +1198,18 @@ class AllocatorFacadePrivate {
       val = 0;
     }
 
-    if (val > 0 && FLAGS_use_virtual_memory_auto_growth) {
+    PADDLE_ENFORCE_EQ(
+        FLAGS_use_virtual_memory_auto_growth &&
+            FLAGS_use_vmm_auto_growth_best_fit_allocator_v2,
+        false,
+        common::errors::InvalidArgument(
+            "FLAGS_use_virtual_memory_auto_growth and "
+            "FLAGS_use_vmm_auto_growth_best_fit_allocator_v2 cannot both be "
+            "true."));
+
+    if (val > 0 && FLAGS_use_vmm_auto_growth_best_fit_allocator_v2) {
+      allocators_[p] = CreateVMMAutoGrowthBestFitAllocatorV2(p);
+    } else if (val > 0 && FLAGS_use_virtual_memory_auto_growth) {
       auto cuda_allocator_small =
           FLAGS_vmm_small_pool_size_in_mb
               ? std::make_shared<CUDAVirtualMemAllocator>(p)

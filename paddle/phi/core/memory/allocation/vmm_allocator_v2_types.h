@@ -86,7 +86,8 @@ enum class PoolType : uint8_t {
 };
 
 // Fixed-size handle metadata returned by the bottom VMM provider. Upper layers
-// may later reference these handles from block-level views or remap metadata.
+// may later reference these handles from block-level views, remap metadata, or
+// IPC export state.
 struct VMMHandleMeta {
   VMMHandleMeta() = default;
 
@@ -117,12 +118,24 @@ struct VMMHandleMeta {
 };
 
 // HandleLayout is a lightweight allocation-level handle list returned by the
-// bottom VMM provider. It is used to bootstrap upper-layer block state.
+// bottom VMM provider. It is only used to bootstrap upper-layer block state or
+// answer allocation-level IPC/export queries.
 using HandleLayout = std::vector<std::shared_ptr<VMMHandleMeta>>;
+
+struct IpcBlockPartDescriptor {
+  VMMDevicePtr handle_base;
+  size_t handle_size;
+  VMMAllocHandle handle;
+  int device;
+  size_t handle_rel_off;
+  size_t len;
+};
 
 // A logical slice of one fixed-size VMM handle. This is the block-level view
 // owned by VMMAutoGrowthBestFitAllocatorV2 and is updated by split / merge /
-// remap after the initial HandleLayout has been consumed.
+// remap after the initial HandleLayout has been consumed. Future IPC export
+// still exports whole handles at the driver layer; BlockPartV2 carries the
+// slice metadata needed to rebuild the logical tensor view on import.
 struct BlockPartV2 {
   BlockPartV2() = default;
 
@@ -444,17 +457,21 @@ struct BlockV2 {
   BlockV2 MakeMappedFreeSubBlockWithParts(size_t offset, size_t len) const {
     auto block = MakeMappedFreeBlockWithParts(
         BeginPtr() + offset, len, parts_, offset, len, pool_type_);
+    block.ipc_exported_ = ipc_exported_;
 #if defined(PADDLE_WITH_CUDA)
     block.CopyRemapSafetyFrom(*this);
 #endif
     return block;
   }
   BlockV2 MakeMappedActiveSubBlockWithParts(size_t offset, size_t len) const {
-    return MakeMappedActiveBlockWithParts(
+    auto block = MakeMappedActiveBlockWithParts(
         BeginPtr() + offset, len, parts_, offset, len, pool_type_);
+    block.ipc_exported_ = ipc_exported_;
+    return block;
   }
   BlockV2 MakeMappedSubBlock(BlockType type, size_t offset, size_t len) const {
     auto block = MakeMappedBlock(type, BeginPtr() + offset, len, pool_type_);
+    block.ipc_exported_ = ipc_exported_;
 #if defined(PADDLE_WITH_CUDA)
     block.CopyRemapSafetyFrom(*this);
 #endif
@@ -513,6 +530,7 @@ struct BlockV2 {
     size_ = size;
     type_ = type;
     pool_type_ = pool_type;
+    ipc_exported_ = false;
     parts_.clear();
 #if defined(PADDLE_WITH_CUDA)
     ClearRemapSafety();
@@ -569,6 +587,7 @@ struct BlockV2 {
   }
   void AbsorbAdjacentBlockWithParts(BlockV2* src) {
     size_ += src->size_;
+    ipc_exported_ = ipc_exported_ || src->ipc_exported_;
     AppendPartsFrom(src);
 #if defined(PADDLE_WITH_CUDA)
     AppendRemapSafetyFrom(*src);
@@ -576,6 +595,7 @@ struct BlockV2 {
   }
   void AbsorbAdjacentBlock(const BlockV2& src) {
     size_ += src.size_;
+    ipc_exported_ = ipc_exported_ || src.ipc_exported_;
     parts_.clear();
 #if defined(PADDLE_WITH_CUDA)
     AppendRemapSafetyFrom(src);
@@ -601,6 +621,7 @@ struct BlockV2 {
   void* ptr_{nullptr};
   size_t size_{0};
   BlockType type_{BlockType::kUnmappedFree};
+  bool ipc_exported_{false};
 
  private:
   void SetParts(const std::vector<BlockPartV2>& parts) { parts_ = parts; }
