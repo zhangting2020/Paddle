@@ -31,6 +31,10 @@ std::shared_ptr<CUDAVirtualMemAllocatorV2> CreateUnderlyingAllocator() {
       phi::GPUPlace(), 2UL << 20, PoolType::kTransient);
 }
 
+void ExpectBlockView(const BlockV2& block) {
+  EXPECT_TRUE(block.parts_.empty());
+}
+
 }  // namespace
 
 TEST(VMMAutoGrowthBestFitAllocatorV2, SplitFreeBlockOnReuse) {
@@ -56,7 +60,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, SplitFreeBlockOnReuse) {
     } else if (block.type_ == BlockType::kFree) {
       ++free_count;
       free_bytes += block.size_;
-      EXPECT_EQ(block.parts_.size(), 1UL);
+      ExpectBlockView(block);
     }
   }
   EXPECT_EQ(active_count, 1UL);
@@ -117,17 +121,13 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, SplitGrowBlockOnFirstAllocation) {
   auto it = allocator.all_blocks_.begin();
   ASSERT_EQ(it->type_, BlockType::kActive);
   EXPECT_EQ(it->size_, 256UL);
-  ASSERT_EQ(it->parts_.size(), 1UL);
-  EXPECT_EQ(it->parts_[0].handle_rel_off, 0UL);
-  EXPECT_EQ(it->parts_[0].len, 256UL);
+  ExpectBlockView(*it);
 
   ++it;
   ASSERT_EQ(it, std::prev(allocator.all_blocks_.end()));
   ASSERT_EQ(it->type_, BlockType::kFree);
   EXPECT_EQ(it->size_, underlying->handle_size() - 256UL);
-  ASSERT_EQ(it->parts_.size(), 1UL);
-  EXPECT_EQ(it->parts_[0].handle_rel_off, 256UL);
-  EXPECT_EQ(it->parts_[0].len, underlying->handle_size() - 256UL);
+  ExpectBlockView(*it);
   EXPECT_EQ(allocator.free_blocks_.size(), 1UL);
 }
 
@@ -157,19 +157,13 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, SplitGrowBlockAcrossTwoHandles) {
   auto it = allocator.all_blocks_.begin();
   ASSERT_EQ(it->type_, BlockType::kActive);
   EXPECT_EQ(it->size_, requested_size);
-  ASSERT_EQ(it->parts_.size(), 2UL);
-  EXPECT_EQ(it->parts_[0].handle_rel_off, 0UL);
-  EXPECT_EQ(it->parts_[0].len, underlying->handle_size());
-  EXPECT_EQ(it->parts_[1].handle_rel_off, 0UL);
-  EXPECT_EQ(it->parts_[1].len, 256UL);
+  ExpectBlockView(*it);
 
   ++it;
   ASSERT_EQ(it, std::prev(allocator.all_blocks_.end()));
   ASSERT_EQ(it->type_, BlockType::kFree);
   EXPECT_EQ(it->size_, underlying->handle_size() - 256UL);
-  ASSERT_EQ(it->parts_.size(), 1UL);
-  EXPECT_EQ(it->parts_[0].handle_rel_off, 256UL);
-  EXPECT_EQ(it->parts_[0].len, underlying->handle_size() - 256UL);
+  ExpectBlockView(*it);
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2, SplitGrowBlockStartsWithEmptyRemapState) {
@@ -194,8 +188,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, SplitGrowBlockStartsWithEmptyRemapState) {
   EXPECT_EQ(free_count, 1UL);
 }
 
-TEST(VMMAutoGrowthBestFitAllocatorV2,
-     MergeSplitFreeSlicesIntoSingleHandlePart) {
+TEST(VMMAutoGrowthBestFitAllocatorV2, MergeSplitFreeSlicesAsBlockView) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
       underlying, 256, phi::GPUPlace(), PoolType::kTransient);
@@ -208,9 +201,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   const auto& merged = allocator.all_blocks_.front();
   EXPECT_EQ(merged.type_, BlockType::kFree);
   EXPECT_EQ(merged.size_, underlying->handle_size());
-  ASSERT_EQ(merged.parts_.size(), 1UL);
-  EXPECT_EQ(merged.parts_[0].handle_rel_off, 0UL);
-  EXPECT_EQ(merged.parts_[0].len, underlying->handle_size());
+  ExpectBlockView(merged);
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2, MergeAdjacentFreeBlocks) {
@@ -234,7 +225,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, MergeAdjacentFreeBlocks) {
   const auto& merged = allocator.all_blocks_.front();
   EXPECT_EQ(merged.type_, BlockType::kFree);
   EXPECT_EQ(merged.size_, underlying->handle_size() * 2);
-  EXPECT_EQ(merged.parts_.size(), 2UL);
+  ExpectBlockView(merged);
   EXPECT_EQ(allocator.free_blocks_.size(), 1UL);
 }
 
@@ -260,7 +251,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, NonAdjacentFreeBlocksDoNotMerge) {
     if (block.type_ == BlockType::kFree) {
       ++free_count;
       EXPECT_EQ(block.size_, underlying->handle_size());
-      EXPECT_EQ(block.parts_.size(), 1UL);
+      ExpectBlockView(block);
     } else if (block.type_ == BlockType::kActive) {
       ++active_count;
       EXPECT_EQ(block.ptr_, middle->ptr());
@@ -501,7 +492,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, ThreeWayMerge) {
   const auto& merged = allocator.all_blocks_.front();
   EXPECT_EQ(merged.type_, BlockType::kFree);
   EXPECT_EQ(merged.size_, underlying->handle_size() * 3);
-  EXPECT_EQ(merged.parts_.size(), 3UL);
+  ExpectBlockView(merged);
 }
 
 }  // namespace allocation

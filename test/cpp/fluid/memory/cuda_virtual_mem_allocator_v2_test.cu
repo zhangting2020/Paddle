@@ -508,7 +508,8 @@ TEST(CUDAVirtualMemAllocatorV2, SetsBlockBackingRemapEvent) {
   ASSERT_NE(allocation_with_block.allocation, nullptr);
   ASSERT_EQ(allocation_with_block.block.AllocationPartCount(), 1UL);
 
-  BlockV2 block = allocation_with_block.block.MakeMappedActiveSubBlock(0, 2048);
+  BlockV2 block =
+      allocation_with_block.block.MakeMappedActiveSubBlockWithParts(0, 2048);
   cudaEvent_t raw_event = nullptr;
   ASSERT_EQ(cudaEventCreateWithFlags(&raw_event, cudaEventDisableTiming),
             cudaSuccess);

@@ -251,7 +251,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
     BlockV2 grow_block = AdoptBackingBlock(&grow_alloc);
     total_new_size += grow_block.size_;
     if (has_tail_reuse) {
-      combined_free_block.AbsorbAdjacentBlock(&grow_block);
+      combined_free_block.AbsorbAdjacentBlock(grow_block);
     } else {
       combined_free_block = std::move(grow_block);
     }
@@ -613,7 +613,7 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it) {
     auto prev = std::prev(it);
     if (prev->CanAbsorbAdjacentFreeBlock(*it)) {
       EraseFreeBlock(prev);
-      prev->AbsorbAdjacentBlock(&*it);
+      prev->AbsorbAdjacentBlock(*it);
       all_blocks_.erase(it);
       it = prev;
     }
@@ -622,7 +622,7 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it) {
   auto next = std::next(it);
   if (next != all_blocks_.end() && it->CanAbsorbAdjacentFreeBlock(*next)) {
     EraseFreeBlock(next);
-    it->AbsorbAdjacentBlock(&*next);
+    it->AbsorbAdjacentBlock(*next);
     all_blocks_.erase(next);
   }
 

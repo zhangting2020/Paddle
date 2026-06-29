@@ -353,6 +353,15 @@ struct BlockV2 {
         ptr, size, BuildBlockPartsFromHandleLayout(layout), 0, size, pool_type);
   }
 
+  static BlockV2 MakeMappedBlock(BlockType type,
+                                 void* ptr,
+                                 size_t size,
+                                 PoolType pool_type) {
+    BlockV2 block;
+    block.Reset(ptr, size, type, pool_type);
+    return block;
+  }
+
   static BlockV2 MakeUnmappedFreeBlock(void* ptr,
                                        size_t size,
                                        PoolType pool_type) {
@@ -430,7 +439,7 @@ struct BlockV2 {
   bool CanAbsorbAdjacentUnmappedFreeBlock(const BlockV2& next) const {
     return IsUnmappedFree() && next.IsUnmappedFree() && IsAdjacentBefore(next);
   }
-  BlockV2 MakeMappedFreeSubBlock(size_t offset, size_t len) const {
+  BlockV2 MakeMappedFreeSubBlockWithParts(size_t offset, size_t len) const {
     auto block = MakeMappedFreeBlock(
         BeginPtr() + offset, len, parts_, offset, len, pool_type_);
 #if defined(PADDLE_WITH_CUDA)
@@ -438,9 +447,26 @@ struct BlockV2 {
 #endif
     return block;
   }
-  BlockV2 MakeMappedActiveSubBlock(size_t offset, size_t len) const {
+  BlockV2 MakeMappedActiveSubBlockWithParts(size_t offset, size_t len) const {
     return MakeMappedActiveBlock(
         BeginPtr() + offset, len, parts_, offset, len, pool_type_);
+  }
+  BlockV2 MakeMappedSubBlock(BlockType type, size_t offset, size_t len) const {
+    auto block = MakeMappedBlock(type, BeginPtr() + offset, len, pool_type_);
+#if defined(PADDLE_WITH_CUDA)
+    block.CopyRemapSafetyFrom(*this);
+#endif
+    return block;
+  }
+  BlockV2 MakeMappedFreeSubBlock(size_t offset, size_t len) const {
+    return MakeMappedSubBlock(BlockType::kFree, offset, len);
+  }
+  BlockV2 MakeMappedActiveSubBlock(size_t offset, size_t len) const {
+    auto block = MakeMappedSubBlock(BlockType::kActive, offset, len);
+#if defined(PADDLE_WITH_CUDA)
+    block.ClearRemapSafety();
+#endif
+    return block;
   }
   BlockV2 MakeUnmappedFreeSubBlock(size_t offset, size_t len) const {
     return MakeUnmappedFreeBlock(BeginPtr() + offset, len, pool_type_);
@@ -463,8 +489,9 @@ struct BlockV2 {
     if (prefix > 0) {
       segments->push_back(MakeUnmappedFreeSubBlock(0, prefix));
     }
-    segments->push_back(MakeSinglePartMappedFreeBlock(
-        reinterpret_cast<void*>(va), size, meta, pool_type_));
+    (void)meta;
+    segments->push_back(MakeMappedBlock(
+        BlockType::kFree, reinterpret_cast<void*>(va), size, pool_type_));
     if (suffix > 0) {
       segments->push_back(MakeUnmappedFreeSubBlock(prefix + size, suffix));
     }
@@ -538,11 +565,18 @@ struct BlockV2 {
       offset += part.ByteSize();
     }
   }
-  void AbsorbAdjacentBlock(BlockV2* src) {
+  void AbsorbAdjacentBlockWithParts(BlockV2* src) {
     size_ += src->size_;
     AppendPartsFrom(src);
 #if defined(PADDLE_WITH_CUDA)
     AppendRemapSafetyFrom(*src);
+#endif
+  }
+  void AbsorbAdjacentBlock(const BlockV2& src) {
+    size_ += src.size_;
+    parts_.clear();
+#if defined(PADDLE_WITH_CUDA)
+    AppendRemapSafetyFrom(src);
 #endif
   }
   void AbsorbAdjacentUnmappedFreeBlock(const BlockV2& src) {
