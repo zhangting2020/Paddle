@@ -54,6 +54,30 @@ uint64_t ElapsedMicros(Clock::time_point start, Clock::time_point end) {
 
 void ClearGpuLastError() { (void)platform::GpuGetLastError(); }
 
+size_t CountFullyCoveredHandlePages(
+    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
+    size_t handle_size) {
+  if (handle_size == 0) {
+    return 0;
+  }
+  size_t count = 0;
+  for (const auto& range : ranges) {
+    const VMMDevicePtr begin = range.first;
+    const VMMDevicePtr end = begin + range.second;
+    if (end <= begin) {
+      continue;
+    }
+    const VMMDevicePtr first_page =
+        ((begin + handle_size - 1) / handle_size) * handle_size;
+    const VMMDevicePtr end_page = (end / handle_size) * handle_size;
+    if (first_page >= end_page) {
+      continue;
+    }
+    count += (end_page - first_page) / handle_size;
+  }
+  return count;
+}
+
 template <typename Map, typename Key, typename Value>
 void EmplaceOrEnforce(Map* map,
                       Key&& key,
@@ -452,11 +476,32 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   auto source_pages = underlying_allocator_->CollectRemapSourcePages(
       compact_source_ranges, releasable_target_bytes);
   size_t releasable_handles = 0;
+  size_t pending_event_handles = 0;
+  size_t partial_or_invalid_handles = 0;
+  size_t remap_destination_owned_handles = 0;
   for (const auto& page : source_pages) {
-    if (page.remap_source_state == VMMBackingMap::RemapSourceState::kReady) {
-      ++releasable_handles;
+    switch (page.remap_source_state) {
+      case VMMBackingMap::RemapSourceState::kReady:
+        ++releasable_handles;
+        break;
+      case VMMBackingMap::RemapSourceState::kPendingEvent:
+        ++pending_event_handles;
+        break;
+      case VMMBackingMap::RemapSourceState::kPartialOrInvalid:
+        ++partial_or_invalid_handles;
+        break;
+      case VMMBackingMap::RemapSourceState::kRemapDestinationOwned:
+        ++remap_destination_owned_handles;
+        break;
     }
   }
+  const size_t source_full_pages = CountFullyCoveredHandlePages(
+      compact_source_ranges, underlying_allocator_->HandleSize());
+  const size_t source_returned_pages = source_pages.size();
+  const size_t source_unreturned_pages =
+      source_full_pages > source_returned_pages
+          ? source_full_pages - source_returned_pages
+          : 0;
   const size_t releasable_bytes =
       releasable_handles * underlying_allocator_->HandleSize();
 
@@ -468,7 +513,15 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
             << " requested=" << requested_size << " total_free=" << total_free
             << " max_free=" << max_free << " tail_free=" << tail_free
             << " compact_target=" << compact_target
-            << " source_ranges=" << compact_source_ranges.size();
+            << " source_ranges=" << compact_source_ranges.size()
+            << " source_full_pages=" << source_full_pages
+            << " source_returned_pages=" << source_returned_pages
+            << " source_unreturned_pages=" << source_unreturned_pages
+            << " ready_pages=" << releasable_handles
+            << " pending_event_pages=" << pending_event_handles
+            << " partial_or_invalid_pages=" << partial_or_invalid_handles
+            << " remap_destination_owned_pages="
+            << remap_destination_owned_handles;
     return 0;
   }
 
@@ -480,7 +533,15 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
             << " compact_target=" << compact_target
             << " releasable_handles=" << releasable_handles
             << " releasable_bytes=" << releasable_bytes
-            << " source_ranges=" << compact_source_ranges.size() << ")";
+            << " source_ranges=" << compact_source_ranges.size()
+            << " source_full_pages=" << source_full_pages
+            << " source_returned_pages=" << source_returned_pages
+            << " source_unreturned_pages=" << source_unreturned_pages
+            << " ready_pages=" << releasable_handles
+            << " pending_event_pages=" << pending_event_handles
+            << " partial_or_invalid_pages=" << partial_or_invalid_handles
+            << " remap_destination_owned_pages="
+            << remap_destination_owned_handles << ")";
     return 0;
   }
 
@@ -493,7 +554,14 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
           << " releasable_handles=" << releasable_handles
           << " releasable_bytes=" << releasable_bytes
           << " source_ranges=" << compact_source_ranges.size()
-          << ", proceeding with compaction";
+          << " source_full_pages=" << source_full_pages
+          << " source_returned_pages=" << source_returned_pages
+          << " source_unreturned_pages=" << source_unreturned_pages
+          << " ready_pages=" << releasable_handles
+          << " pending_event_pages=" << pending_event_handles
+          << " partial_or_invalid_pages=" << partial_or_invalid_handles
+          << " remap_destination_owned_pages="
+          << remap_destination_owned_handles << ", proceeding with compaction";
 
   auto commit_synthetic_allocation = [this](DecoratedAllocationPtr allocation) {
     TrackUnderlyingAllocation(std::move(allocation));
