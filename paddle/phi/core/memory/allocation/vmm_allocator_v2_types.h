@@ -112,10 +112,10 @@ struct BlockV2 {
   bool IsAdjacentBefore(const BlockV2& next) const {
     return end_ptr() == next.begin_ptr();
   }
-  bool CanAbsorbAdjacentFreeBlock(const BlockV2& next) const {
+  bool CanMergeAdjacentFreeBlock(const BlockV2& next) const {
     return IsFree() && next.IsFree() && IsAdjacentBefore(next);
   }
-  bool CanAbsorbAdjacentUnmappedFreeBlock(const BlockV2& next) const {
+  bool CanMergeAdjacentUnmappedFreeBlock(const BlockV2& next) const {
     return IsUnmappedFree() && next.IsUnmappedFree() && IsAdjacentBefore(next);
   }
   BlockV2 MakeMappedFreeSubBlock(size_t offset, size_t len) const {
@@ -143,8 +143,8 @@ struct BlockV2 {
     ptr_ = reinterpret_cast<uint8_t*>(ptr_) + trim;
     size_ = keep;
   }
-  void AbsorbAdjacentBlock(const BlockV2& src) { size_ += src.size_; }
-  void AbsorbAdjacentUnmappedFreeBlock(const BlockV2& src) {
+  void MergeAdjacentBlock(const BlockV2& src) { size_ += src.size_; }
+  void MergeAdjacentUnmappedFreeBlock(const BlockV2& src) {
     size_ += src.size_;
   }
 
