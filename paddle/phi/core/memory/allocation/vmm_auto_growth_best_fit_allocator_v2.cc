@@ -247,7 +247,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
     BlockV2 grow_block = AdoptBackingBlock(&grow_alloc);
     total_new_size += grow_block.size_;
     if (has_tail_reuse) {
-      combined_free_block.AbsorbAdjacentBlock(grow_block);
+      combined_free_block.MergeAdjacentBlock(grow_block);
     } else {
       combined_free_block = std::move(grow_block);
     }
@@ -798,18 +798,18 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMerge(BlockListIt it) {
   // against neighboring entries in that list.
   if (it != all_blocks_.begin()) {
     auto prev = std::prev(it);
-    if (prev->CanAbsorbAdjacentFreeBlock(*it)) {
+    if (prev->CanMergeAdjacentFreeBlock(*it)) {
       EraseFreeBlock(prev);
-      prev->AbsorbAdjacentBlock(*it);
+      prev->MergeAdjacentBlock(*it);
       all_blocks_.erase(it);
       it = prev;
     }
   }
 
   auto next = std::next(it);
-  if (next != all_blocks_.end() && it->CanAbsorbAdjacentFreeBlock(*next)) {
+  if (next != all_blocks_.end() && it->CanMergeAdjacentFreeBlock(*next)) {
     EraseFreeBlock(next);
-    it->AbsorbAdjacentBlock(*next);
+    it->MergeAdjacentBlock(*next);
     all_blocks_.erase(next);
   }
 
@@ -825,10 +825,10 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMergeUnmappedFree(BlockListIt it) {
 
   if (it != all_blocks_.begin()) {
     auto prev = std::prev(it);
-    if (prev->CanAbsorbAdjacentUnmappedFreeBlock(*it)) {
+    if (prev->CanMergeAdjacentUnmappedFreeBlock(*it)) {
       EraseUnmappedFreeBlock(prev);
       EraseUnmappedFreeBlock(it);
-      prev->AbsorbAdjacentUnmappedFreeBlock(*it);
+      prev->MergeAdjacentUnmappedFreeBlock(*it);
       all_blocks_.erase(it);
       it = prev;
       InsertUnmappedFreeBlock(it);
@@ -837,10 +837,10 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMergeUnmappedFree(BlockListIt it) {
 
   auto next = std::next(it);
   if (next != all_blocks_.end() &&
-      it->CanAbsorbAdjacentUnmappedFreeBlock(*next)) {
+      it->CanMergeAdjacentUnmappedFreeBlock(*next)) {
     EraseUnmappedFreeBlock(it);
     EraseUnmappedFreeBlock(next);
-    it->AbsorbAdjacentUnmappedFreeBlock(*next);
+    it->MergeAdjacentUnmappedFreeBlock(*next);
     all_blocks_.erase(next);
     InsertUnmappedFreeBlock(it);
   }

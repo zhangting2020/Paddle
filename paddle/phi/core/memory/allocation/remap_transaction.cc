@@ -168,8 +168,8 @@ void AppendMappedFreeSubRange(std::vector<BlockV2>* segments,
 
   BlockV2 segment = source.MakeMappedFreeSubBlock(va - source.begin_va(), size);
   if (!segments->empty() &&
-      segments->back().CanAbsorbAdjacentFreeBlock(segment)) {
-    segments->back().AbsorbAdjacentBlock(segment);
+      segments->back().CanMergeAdjacentFreeBlock(segment)) {
+    segments->back().MergeAdjacentBlock(segment);
     return;
   }
   segments->push_back(std::move(segment));
@@ -1085,8 +1085,8 @@ void RemapTransaction::InstallTailFreeBlock(BlockList* blocks,
                                             BlockV2 free_block) const {
   if (!blocks->empty()) {
     auto last = std::prev(blocks->end());
-    if (last->CanAbsorbAdjacentFreeBlock(free_block)) {
-      last->AbsorbAdjacentBlock(free_block);
+    if (last->CanMergeAdjacentFreeBlock(free_block)) {
+      last->MergeAdjacentBlock(free_block);
       return;
     }
   }
@@ -1117,16 +1117,16 @@ RemapTransaction::InstallMappedUnmappedFreeRange(BlockList* blocks,
   auto result = unmapped_free_it;
   if (result != blocks->begin()) {
     auto prev = std::prev(result);
-    if (prev->CanAbsorbAdjacentFreeBlock(*result)) {
-      prev->AbsorbAdjacentBlock(*result);
+    if (prev->CanMergeAdjacentFreeBlock(*result)) {
+      prev->MergeAdjacentBlock(*result);
       blocks->erase(result);
       result = prev;
     }
   }
 
   auto next = std::next(result);
-  if (next != blocks->end() && result->CanAbsorbAdjacentFreeBlock(*next)) {
-    result->AbsorbAdjacentBlock(*next);
+  if (next != blocks->end() && result->CanMergeAdjacentFreeBlock(*next)) {
+    result->MergeAdjacentBlock(*next);
     blocks->erase(next);
   }
   return result;
@@ -1158,8 +1158,8 @@ void RemapTransaction::MergeAdjacentFreeBlocks(BlockList* blocks) const {
       continue;
     }
     auto next = std::next(it);
-    if (next != blocks->end() && it->CanAbsorbAdjacentFreeBlock(*next)) {
-      it->AbsorbAdjacentBlock(*next);
+    if (next != blocks->end() && it->CanMergeAdjacentFreeBlock(*next)) {
+      it->MergeAdjacentBlock(*next);
       blocks->erase(next);
       continue;
     }
@@ -1171,9 +1171,8 @@ void RemapTransaction::MergeAdjacentUnmappedFreeBlocks(
     BlockList* blocks) const {
   for (auto it = blocks->begin(); it != blocks->end();) {
     auto next = std::next(it);
-    if (next != blocks->end() &&
-        it->CanAbsorbAdjacentUnmappedFreeBlock(*next)) {
-      it->AbsorbAdjacentUnmappedFreeBlock(*next);
+    if (next != blocks->end() && it->CanMergeAdjacentUnmappedFreeBlock(*next)) {
+      it->MergeAdjacentUnmappedFreeBlock(*next);
       blocks->erase(next);
       continue;
     }
