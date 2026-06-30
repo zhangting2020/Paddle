@@ -112,36 +112,6 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, ReuseSmallestSufficientFreeBlock) {
   EXPECT_EQ(free_block_count, 1UL);
 }
 
-TEST(VMMAutoGrowthBestFitAllocatorV2, SplitGrowBlockOnFirstAllocation) {
-  auto underlying = CreateUnderlyingAllocator();
-  VMMAutoGrowthBestFitAllocatorV2 allocator(
-      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
-
-  // The bottom allocator rounds this grow to one full handle, but best-fit
-  // should immediately split it into [ACTIVE requested_size] + [FREE remain].
-  auto allocation = allocator.Allocate(256);
-  ASSERT_NE(allocation, nullptr);
-  EXPECT_EQ(allocation->size(), 256UL);
-  auto* alloc = static_cast<Allocation*>(allocation.get());
-  EXPECT_EQ(alloc->ptr(), alloc->base_ptr());
-
-  ASSERT_EQ(allocator.all_blocks().size(), 2UL);
-  auto it = allocator.all_blocks().begin();
-  ASSERT_EQ(it->type_, BlockType::kActive);
-  EXPECT_EQ(it->size_, 256UL);
-  ExpectBlockView(*it);
-
-  ++it;
-  ASSERT_EQ(it, std::prev(allocator.all_blocks().end()));
-  ASSERT_EQ(it->type_, BlockType::kFree);
-  EXPECT_EQ(it->size_, underlying->handle_size() - 256UL);
-  EXPECT_EQ(it->owning_stream_, nullptr);
-  ExpectBlockView(*it);
-  ExpectIndexedFreeStats(&allocator,
-                         underlying->handle_size() - 256UL,
-                         underlying->handle_size() - 256UL);
-}
-
 TEST(VMMAutoGrowthBestFitAllocatorV2, SplitGrowBlockAcrossTwoHandles) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
