@@ -739,7 +739,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::TryReleaseIdleUnderlying(
     return false;
   }
 
-  MarkRangeUnmappedFree(base, alloc_size);
+  ReplaceRangeWithUnmappedFree(base, alloc_size);
   *released += alloc_size;
   VLOG(5) << "VMM V2 pool " << static_cast<int>(pool_type_)
           << " released idle chunk: " << alloc_size << " bytes";
@@ -907,8 +907,8 @@ bool VMMAutoGrowthBestFitAllocatorV2::IsRangeEntirelyFree(uint8_t* base,
   return true;
 }
 
-void VMMAutoGrowthBestFitAllocatorV2::MarkRangeUnmappedFree(uint8_t* base,
-                                                            size_t size) {
+void VMMAutoGrowthBestFitAllocatorV2::ReplaceRangeWithUnmappedFree(
+    uint8_t* base, size_t size) {
   auto* end = base + size;
 
   for (auto it = all_blocks_.begin(); it != all_blocks_.end();) {

@@ -91,13 +91,13 @@ class VMMBackingMap {
   std::vector<MappedPage> CollectMappedPages(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
       size_t target_bytes = 0) const;
-  std::vector<MappedPage> CollectMappedPagesFullyCoveredBy(
+  std::vector<MappedPage> CollectMappedPagesFullyInRange(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
       size_t target_bytes = 0) const;
-  std::vector<MappedPage> CollectRemapSourcePagesFullyCoveredBy(
+  std::vector<MappedPage> CollectRemapSourcePagesFullyInRange(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
       size_t target_bytes) const;
-  std::vector<UnmappedPage> CollectUnmappedPagesFullyCoveredBy(
+  std::vector<UnmappedPage> CollectUnmappedPagesFullyInRange(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
       size_t target_bytes = 0) const;
   CompactCandidates CollectCompactCandidates(
@@ -146,7 +146,7 @@ class VMMBackingMap {
       VMMDevicePtr va,
       size_t size,
       std::vector<IpcBlockPartDescriptor>* descriptors) const;
-  void AppendMappedPagesFullyCoveredByLocked(
+  void AppendMappedPagesFullyInRangeLocked(
       VMMDevicePtr va,
       size_t size,
       const char* context,
@@ -154,7 +154,7 @@ class VMMBackingMap {
       bool require_events_ready,
       bool annotate_remap_source_state,
       std::vector<MappedPage>* pages) const;
-  void AppendUnmappedPagesFullyCoveredByLocked(
+  void AppendUnmappedPagesFullyInRangeLocked(
       VMMDevicePtr va,
       size_t size,
       const char* context,

@@ -1020,17 +1020,16 @@ CUDAVirtualMemAllocatorV2::CollectMappedPages(
     const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {
   if (target_bytes == 0) {
-    return backing_map_.CollectMappedPagesFullyCoveredBy(ranges);
+    return backing_map_.CollectMappedPagesFullyInRange(ranges);
   }
-  return backing_map_.CollectMappedPagesFullyCoveredBy(ranges, target_bytes);
+  return backing_map_.CollectMappedPagesFullyInRange(ranges, target_bytes);
 }
 
 std::vector<VMMBackingMap::MappedPage>
 CUDAVirtualMemAllocatorV2::CollectRemapSourcePages(
     const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {
-  return backing_map_.CollectRemapSourcePagesFullyCoveredBy(ranges,
-                                                            target_bytes);
+  return backing_map_.CollectRemapSourcePagesFullyInRange(ranges, target_bytes);
 }
 
 std::vector<VMMBackingMap::UnmappedPage>
@@ -1038,9 +1037,9 @@ CUDAVirtualMemAllocatorV2::CollectUnmappedPages(
     const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {
   if (target_bytes == 0) {
-    return backing_map_.CollectUnmappedPagesFullyCoveredBy(ranges);
+    return backing_map_.CollectUnmappedPagesFullyInRange(ranges);
   }
-  return backing_map_.CollectUnmappedPagesFullyCoveredBy(ranges, target_bytes);
+  return backing_map_.CollectUnmappedPagesFullyInRange(ranges, target_bytes);
 }
 
 VMMBackingMap::CompactCandidates

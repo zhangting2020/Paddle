@@ -491,7 +491,7 @@ std::vector<VMMBackingMap::MappedPage> VMMBackingMap::CollectMappedPages(
 }
 
 std::vector<VMMBackingMap::MappedPage>
-VMMBackingMap::CollectMappedPagesFullyCoveredBy(
+VMMBackingMap::CollectMappedPagesFullyInRange(
     const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {
   std::lock_guard<SpinLock> guard(spinlock_);
@@ -503,13 +503,13 @@ VMMBackingMap::CollectMappedPagesFullyCoveredBy(
   const size_t target_pages =
       target_bytes == 0 ? 0 : (target_bytes + page_size_ - 1) / page_size_;
   for (const auto& range : ranges) {
-    AppendMappedPagesFullyCoveredByLocked(range.first,
-                                          range.second,
-                                          "CollectMappedPagesFullyCoveredBy",
-                                          target_pages,
-                                          false,
-                                          false,
-                                          &mapped_pages);
+    AppendMappedPagesFullyInRangeLocked(range.first,
+                                        range.second,
+                                        "CollectMappedPagesFullyInRange",
+                                        target_pages,
+                                        false,
+                                        false,
+                                        &mapped_pages);
     if (target_pages != 0 && mapped_pages.size() >= target_pages) {
       break;
     }
@@ -518,7 +518,7 @@ VMMBackingMap::CollectMappedPagesFullyCoveredBy(
 }
 
 std::vector<VMMBackingMap::MappedPage>
-VMMBackingMap::CollectRemapSourcePagesFullyCoveredBy(
+VMMBackingMap::CollectRemapSourcePagesFullyInRange(
     const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {
   std::lock_guard<SpinLock> guard(spinlock_);
@@ -528,14 +528,13 @@ VMMBackingMap::CollectRemapSourcePagesFullyCoveredBy(
           ? 0
           : (target_bytes + page_size_ - 1) / page_size_;
   for (const auto& range : ranges) {
-    AppendMappedPagesFullyCoveredByLocked(range.first,
-                                          range.second,
-                                          "CollectRemapSourcePages"
-                                          "FullyCoveredBy",
-                                          0,
-                                          false,
-                                          true,
-                                          &mapped_pages);
+    AppendMappedPagesFullyInRangeLocked(range.first,
+                                        range.second,
+                                        "CollectRemapSourcePagesFullyInRange",
+                                        0,
+                                        false,
+                                        true,
+                                        &mapped_pages);
     if (target_pages != 0) {
       size_t ready_pages = 0;
       for (const auto& page : mapped_pages) {
@@ -568,7 +567,7 @@ VMMBackingMap::CollectRemapSourcePagesFullyCoveredBy(
 }
 
 std::vector<VMMBackingMap::UnmappedPage>
-VMMBackingMap::CollectUnmappedPagesFullyCoveredBy(
+VMMBackingMap::CollectUnmappedPagesFullyInRange(
     const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {
   std::lock_guard<SpinLock> guard(spinlock_);
@@ -580,12 +579,11 @@ VMMBackingMap::CollectUnmappedPagesFullyCoveredBy(
   const size_t target_pages =
       target_bytes == 0 ? 0 : (target_bytes + page_size_ - 1) / page_size_;
   for (const auto& range : ranges) {
-    AppendUnmappedPagesFullyCoveredByLocked(
-        range.first,
-        range.second,
-        "CollectUnmappedPagesFullyCoveredBy",
-        target_pages,
-        &unmapped_pages);
+    AppendUnmappedPagesFullyInRangeLocked(range.first,
+                                          range.second,
+                                          "CollectUnmappedPagesFullyInRange",
+                                          target_pages,
+                                          &unmapped_pages);
     if (target_pages != 0 && unmapped_pages.size() >= target_pages) {
       break;
     }
@@ -604,23 +602,23 @@ VMMBackingMap::CompactCandidates VMMBackingMap::CollectCompactCandidates(
                                : (target_bytes + page_size_ - 1) / page_size_;
 
   for (const auto& range : source_ranges) {
-    AppendMappedPagesFullyCoveredByLocked(range.first,
-                                          range.second,
-                                          "CollectCompactCandidates.source",
-                                          max_pages,
-                                          true,
-                                          false,
-                                          &candidates.source_pages);
+    AppendMappedPagesFullyInRangeLocked(range.first,
+                                        range.second,
+                                        "CollectCompactCandidates.source",
+                                        max_pages,
+                                        true,
+                                        false,
+                                        &candidates.source_pages);
     if (max_pages != 0 && candidates.source_pages.size() >= max_pages) {
       break;
     }
   }
   for (const auto& range : target_ranges) {
-    AppendUnmappedPagesFullyCoveredByLocked(range.first,
-                                            range.second,
-                                            "CollectCompactCandidates.target",
-                                            max_pages,
-                                            &candidates.target_pages);
+    AppendUnmappedPagesFullyInRangeLocked(range.first,
+                                          range.second,
+                                          "CollectCompactCandidates.target",
+                                          max_pages,
+                                          &candidates.target_pages);
     if (max_pages != 0 && candidates.target_pages.size() >= max_pages) {
       break;
     }
@@ -749,7 +747,7 @@ void VMMBackingMap::AppendMappedPagesLocked(
   }
 }
 
-void VMMBackingMap::AppendMappedPagesFullyCoveredByLocked(
+void VMMBackingMap::AppendMappedPagesFullyInRangeLocked(
     VMMDevicePtr va,
     size_t size,
     const char* context,
@@ -848,7 +846,7 @@ bool VMMBackingMap::CollectIpcPartDescriptorsLocked(
   return true;
 }
 
-void VMMBackingMap::AppendUnmappedPagesFullyCoveredByLocked(
+void VMMBackingMap::AppendUnmappedPagesFullyInRangeLocked(
     VMMDevicePtr va,
     size_t size,
     const char* context,

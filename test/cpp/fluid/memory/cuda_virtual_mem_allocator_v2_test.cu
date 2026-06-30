@@ -86,7 +86,7 @@ TEST(VMMBackingMap, TracksMappedAndUnmappedRanges) {
   std::vector<std::pair<VMMDevicePtr, size_t>> unmapped_base_range = {
       {base, page_size}};
   auto unmapped_base_pages =
-      map.CollectUnmappedPagesFullyCoveredBy(unmapped_base_range);
+      map.CollectUnmappedPagesFullyInRange(unmapped_base_range);
   ASSERT_EQ(unmapped_base_pages.size(), 1UL);
   EXPECT_TRUE(map.ValidateUnmappedPages(unmapped_base_pages,
                                         "unit_test_unmapped_clears_handle"));
@@ -99,21 +99,21 @@ TEST(VMMBackingMap, TracksMappedAndUnmappedRanges) {
   EXPECT_EQ(mapped_pages[0].va, base + page_size);
   std::vector<std::pair<VMMDevicePtr, size_t>> unaligned_free_ranges = {
       {base + page_size / 2, page_size * 3}};
-  mapped_pages = map.CollectMappedPagesFullyCoveredBy(unaligned_free_ranges);
+  mapped_pages = map.CollectMappedPagesFullyInRange(unaligned_free_ranges);
   ASSERT_EQ(mapped_pages.size(), 1UL);
   EXPECT_EQ(mapped_pages[0].va, base + page_size);
   EXPECT_EQ(mapped_pages[0].handle, second_handle);
   mapped_pages =
-      map.CollectMappedPagesFullyCoveredBy(unaligned_free_ranges, page_size);
+      map.CollectMappedPagesFullyInRange(unaligned_free_ranges, page_size);
   ASSERT_EQ(mapped_pages.size(), 1UL);
   EXPECT_EQ(mapped_pages[0].va, base + page_size);
   auto unmapped_pages =
-      map.CollectUnmappedPagesFullyCoveredBy(unaligned_free_ranges);
+      map.CollectUnmappedPagesFullyInRange(unaligned_free_ranges);
   ASSERT_EQ(unmapped_pages.size(), 1UL);
   EXPECT_EQ(unmapped_pages[0].va, base + page_size * 2);
   EXPECT_TRUE(map.ValidateUnmappedPages(unmapped_pages, "unit_test_unmapped"));
   unmapped_pages =
-      map.CollectUnmappedPagesFullyCoveredBy(unaligned_free_ranges, page_size);
+      map.CollectUnmappedPagesFullyInRange(unaligned_free_ranges, page_size);
   ASSERT_EQ(unmapped_pages.size(), 1UL);
   EXPECT_EQ(unmapped_pages[0].va, base + page_size * 2);
   auto candidates = map.CollectCompactCandidates(
@@ -128,7 +128,7 @@ TEST(VMMBackingMap, TracksMappedAndUnmappedRanges) {
   EXPECT_TRUE(map.HasIpcExportedPages(base + page_size, page_size));
   EXPECT_TRUE(map.HasIpcExportedPages(base, page_size * 2));
   EXPECT_FALSE(map.IsRangeReleasable(base, page_size * 2));
-  mapped_pages = map.CollectMappedPagesFullyCoveredBy(unaligned_free_ranges);
+  mapped_pages = map.CollectMappedPagesFullyInRange(unaligned_free_ranges);
   EXPECT_TRUE(mapped_pages.empty());
   candidates = map.CollectCompactCandidates(
       unaligned_free_ranges, unaligned_free_ranges, page_size);
@@ -149,7 +149,7 @@ TEST(VMMBackingMap, TracksMappedAndUnmappedRanges) {
   std::vector<std::pair<VMMDevicePtr, size_t>> all_ranges = {
       {base, page_size * 4}};
   auto all_unmapped_pages =
-      map.CollectUnmappedPagesFullyCoveredBy(all_ranges, page_size * 2);
+      map.CollectUnmappedPagesFullyInRange(all_ranges, page_size * 2);
   ASSERT_EQ(all_unmapped_pages.size(), 2UL);
   EXPECT_TRUE(
       map.ValidateUnmappedPages(all_unmapped_pages, "unit_test_all_unmapped"));
@@ -218,7 +218,7 @@ TEST(VMMBackingMap, ReplacesPendingEventForSameStream) {
   std::vector<std::pair<VMMDevicePtr, size_t>> ranges = {{base, page_size}};
   auto mapped_snapshot = map.CollectMappedPages(ranges);
   ASSERT_EQ(mapped_snapshot.size(), 1UL);
-  auto pages = map.CollectRemapSourcePagesFullyCoveredBy(ranges, page_size);
+  auto pages = map.CollectRemapSourcePagesFullyInRange(ranges, page_size);
   ASSERT_EQ(pages.size(), 1UL);
   EXPECT_EQ(pages[0].remap_source_state,
             VMMBackingMap::RemapSourceState::kReady);
@@ -258,7 +258,7 @@ TEST(VMMBackingMap, MarksPendingEventForUnalignedRangeOnce) {
       std::make_shared<CUDAEventGuard>(pending_event)));
 
   std::vector<std::pair<VMMDevicePtr, size_t>> ranges = {{base, page_size * 2}};
-  auto pages = map.CollectRemapSourcePagesFullyCoveredBy(ranges, page_size * 2);
+  auto pages = map.CollectRemapSourcePagesFullyInRange(ranges, page_size * 2);
   ASSERT_EQ(pages.size(), 2UL);
   EXPECT_EQ(pages[0].remap_source_state,
             VMMBackingMap::RemapSourceState::kPendingEvent);
@@ -266,7 +266,7 @@ TEST(VMMBackingMap, MarksPendingEventForUnalignedRangeOnce) {
             VMMBackingMap::RemapSourceState::kPendingEvent);
 
   ASSERT_EQ(cudaStreamSynchronize(busy_stream), cudaSuccess);
-  pages = map.CollectRemapSourcePagesFullyCoveredBy(ranges, page_size * 2);
+  pages = map.CollectRemapSourcePagesFullyInRange(ranges, page_size * 2);
   ASSERT_EQ(pages.size(), 2UL);
   EXPECT_EQ(pages[0].remap_source_state,
             VMMBackingMap::RemapSourceState::kReady);

@@ -157,7 +157,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   uint64_t FreeIdleChunks();
   size_t ComputeTailOffset() const;
   bool IsRangeEntirelyFree(uint8_t* base, size_t size) const;
-  void MarkRangeUnmappedFree(uint8_t* base, size_t size);
+  void ReplaceRangeWithUnmappedFree(uint8_t* base, size_t size);
 
   // Best-fit V2 only grows from the fixed-handle CUDA VMM provider. The
   // bottom allocator returns mapped-free BlockV2 views, while best-fit owns
