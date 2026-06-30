@@ -309,68 +309,6 @@ bool VMMBackingMap::IsRangeReleasable(VMMDevicePtr va, size_t size) const {
   return true;
 }
 
-bool VMMBackingMap::IsRangeReusableForAllocation(VMMDevicePtr va,
-                                                 size_t size) const {
-  std::lock_guard<SpinLock> guard(spinlock_);
-  size_t start = 0;
-  size_t count = 0;
-  if (!ComputeOverlappedPages(base_,
-                              size_,
-                              page_size_,
-                              va,
-                              size,
-                              "IsRangeReusableForAllocation",
-                              &start,
-                              &count)) {
-    return false;
-  }
-  for (size_t i = 0; i < count; ++i) {
-    auto* page = &pages_[start + i];
-    if (!page->mapped) {
-      return false;
-    }
-  }
-  return true;
-}
-
-std::vector<std::pair<VMMDevicePtr, size_t>> VMMBackingMap::CollectMappedRanges(
-    VMMDevicePtr va, size_t size) const {
-  std::lock_guard<SpinLock> guard(spinlock_);
-  return CollectRangesLocked(va, size, true, "CollectMappedRanges");
-}
-
-std::vector<std::pair<VMMDevicePtr, size_t>>
-VMMBackingMap::CollectUnmappedRanges(VMMDevicePtr va, size_t size) const {
-  std::lock_guard<SpinLock> guard(spinlock_);
-  return CollectRangesLocked(va, size, false, "CollectUnmappedRanges");
-}
-
-std::vector<std::pair<VMMDevicePtr, size_t>> VMMBackingMap::CollectMappedRanges(
-    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const {
-  std::lock_guard<SpinLock> guard(spinlock_);
-  std::vector<std::pair<VMMDevicePtr, size_t>> mapped_ranges;
-  for (const auto& range : ranges) {
-    AppendRangesLocked(
-        range.first, range.second, true, "CollectMappedRanges", &mapped_ranges);
-  }
-  return mapped_ranges;
-}
-
-std::vector<std::pair<VMMDevicePtr, size_t>>
-VMMBackingMap::CollectUnmappedRanges(
-    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const {
-  std::lock_guard<SpinLock> guard(spinlock_);
-  std::vector<std::pair<VMMDevicePtr, size_t>> unmapped_ranges;
-  for (const auto& range : ranges) {
-    AppendRangesLocked(range.first,
-                       range.second,
-                       false,
-                       "CollectUnmappedRanges",
-                       &unmapped_ranges);
-  }
-  return unmapped_ranges;
-}
-
 std::vector<VMMBackingMap::MappedPage> VMMBackingMap::CollectMappedPages(
     const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {
@@ -539,61 +477,6 @@ bool VMMBackingMap::ValidateUnmappedPages(
     }
   }
   return ok;
-}
-
-std::vector<std::pair<VMMDevicePtr, size_t>> VMMBackingMap::CollectRangesLocked(
-    VMMDevicePtr va, size_t size, bool mapped, const char* context) const {
-  std::vector<std::pair<VMMDevicePtr, size_t>> ranges;
-  AppendRangesLocked(va, size, mapped, context, &ranges);
-  return ranges;
-}
-
-void VMMBackingMap::AppendRangesLocked(
-    VMMDevicePtr va,
-    size_t size,
-    bool mapped,
-    const char* context,
-    std::vector<std::pair<VMMDevicePtr, size_t>>* ranges) const {
-  size_t start = 0;
-  size_t count = 0;
-  if (!CheckRangeLocked(va, size, context, &start, &count)) {
-    return;
-  }
-
-  bool in_range = false;
-  VMMDevicePtr range_begin = 0;
-  size_t range_size = 0;
-  for (size_t i = 0; i < count; ++i) {
-    const bool selected = pages_[start + i].mapped == mapped;
-    const VMMDevicePtr page_va = va + i * page_size_;
-    if (selected) {
-      if (!in_range) {
-        in_range = true;
-        range_begin = page_va;
-        range_size = 0;
-      }
-      range_size += page_size_;
-      continue;
-    }
-
-    if (in_range) {
-      if (!ranges->empty() &&
-          ranges->back().first + ranges->back().second == range_begin) {
-        ranges->back().second += range_size;
-      } else {
-        ranges->emplace_back(range_begin, range_size);
-      }
-      in_range = false;
-    }
-  }
-  if (in_range) {
-    if (!ranges->empty() &&
-        ranges->back().first + ranges->back().second == range_begin) {
-      ranges->back().second += range_size;
-    } else {
-      ranges->emplace_back(range_begin, range_size);
-    }
-  }
 }
 
 void VMMBackingMap::AppendMappedPagesLocked(

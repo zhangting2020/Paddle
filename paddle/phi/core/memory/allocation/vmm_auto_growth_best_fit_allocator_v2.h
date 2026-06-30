@@ -113,9 +113,9 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   BlockV2 AdoptBackingBlock(
       CUDAVirtualMemAllocatorV2::AllocationWithBlock* allocation_with_block);
   void TrackUnderlyingAllocation(DecoratedAllocationPtr allocation);
-  bool RangeOverlapsUnderlyingAllocation(void* ptr, size_t size) const;
-  bool CanReleaseIdleUnderlyingAllocation(uint8_t* base, size_t size) const;
-  bool TryReleaseIdleUnderlyingAllocation(
+  bool RangeOverlapsUnderlying(void* ptr, size_t size) const;
+  bool CanReleaseIdleUnderlying(uint8_t* base, size_t size) const;
+  bool TryReleaseIdleUnderlying(
       UnderlyingAllocationRegistry::iterator* alloc_it, uint64_t* released);
   bool CanIndexFreeBlock(const BlockV2& block) const;
   void InsertFreeBlock(BlockListIt it);
@@ -128,7 +128,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   uint64_t FreeIdleChunks();
   size_t ComputeTailOffset() const;
   bool IsRangeEntirelyFree(uint8_t* base, size_t size) const;
-  void SplitAndReplaceRangeWithUnmappedFree(uint8_t* base, size_t size);
+  void MarkRangeUnmappedFree(uint8_t* base, size_t size);
 
   // Best-fit V2 only grows from the fixed-handle CUDA VMM provider. The
   // bottom allocator returns mapped-free BlockV2 views, while best-fit owns

@@ -494,11 +494,6 @@ bool CUDAVirtualMemAllocatorV2::IsRangeReleasable(VMMDevicePtr ptr,
   return backing_map_.IsRangeReleasable(ptr, size);
 }
 
-bool CUDAVirtualMemAllocatorV2::IsRangeReusable(VMMDevicePtr ptr,
-                                                size_t size) const {
-  return backing_map_.IsRangeReusableForAllocation(ptr, size);
-}
-
 }  // namespace allocation
 }  // namespace memory
 }  // namespace paddle

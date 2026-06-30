@@ -90,7 +90,6 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   // This is used by upper layers to reuse unmapped-free VA space in place.
   AllocationWithBlock PlaceAtVAWithBlock(VMMDevicePtr ptr, size_t size);
   bool IsRangeReleasable(VMMDevicePtr ptr, size_t size) const;
-  bool IsRangeReusable(VMMDevicePtr ptr, size_t size) const;
 
  protected:
   phi::Allocation* AllocateImpl(size_t size) override;
