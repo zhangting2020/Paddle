@@ -332,7 +332,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
     size_t size) {
   const size_t backing_size =
-      AlignedSize(size, underlying_allocator_->HandleSize());
+      AlignedSize(size, underlying_allocator_->handle_size());
   BlockListIt best = all_blocks_.end();
   for (auto iter = unmapped_free_blocks_.lower_bound({backing_size, nullptr});
        iter != unmapped_free_blocks_.end();) {
@@ -356,12 +356,12 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
     return nullptr;
   }
 
-  const auto unmapped_free_ptr = best->BeginVA();
+  const auto unmapped_free_ptr = best->begin_va();
   VLOG(6) << "VMM V2 AllocFromUnmappedFreeBlocks ptr="
           << reinterpret_cast<void*>(unmapped_free_ptr) << " requested=" << size
           << " backing_size=" << backing_size
           << " original_unmapped_free_size=" << best->size_
-          << " tail_offset=" << underlying_allocator_->TailOffset();
+          << " tail_offset=" << underlying_allocator_->tail_offset();
   CUDAVirtualMemAllocatorV2::AllocationWithBlock unmapped_free_alloc;
   try {
     unmapped_free_alloc = underlying_allocator_->PlaceAtVAWithBlock(
@@ -592,16 +592,16 @@ size_t VMMAutoGrowthBestFitAllocatorV2::ComputeTailOffset() const {
   if (all_blocks_.empty()) {
     return 0;
   }
-  return static_cast<size_t>(all_blocks_.back().EndVA() -
-                             underlying_allocator_->VirtualMemBase());
+  return static_cast<size_t>(all_blocks_.back().end_va() -
+                             underlying_allocator_->virtual_mem_base());
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::IsRangeEntirelyFree(uint8_t* base,
                                                           size_t size) const {
   auto* end = base + size;
   for (const auto& block : all_blocks_) {
-    auto* bptr = block.BeginPtr();
-    auto* bend = block.EndPtr();
+    auto* bptr = block.begin_ptr();
+    auto* bend = block.end_ptr();
     if (bend <= base) continue;
     if (bptr >= end) break;
     if (block.IsActive()) {
@@ -618,8 +618,8 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
   auto* end = base + size;
 
   for (auto it = all_blocks_.begin(); it != all_blocks_.end();) {
-    auto* bptr = it->BeginPtr();
-    auto* bend = it->EndPtr();
+    auto* bptr = it->begin_ptr();
+    auto* bend = it->end_ptr();
 
     if (bend <= base) {
       ++it;
@@ -699,7 +699,7 @@ void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
   }
 
   auto insert_pos = all_blocks_.begin();
-  while (insert_pos != all_blocks_.end() && insert_pos->BeginPtr() < base) {
+  while (insert_pos != all_blocks_.end() && insert_pos->begin_ptr() < base) {
     ++insert_pos;
   }
   auto unmapped_it = all_blocks_.insert(

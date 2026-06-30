@@ -57,10 +57,10 @@ struct VMMHandleMeta {
                 int device)
       : base_(base), size_(size), handle_(handle), device_(device) {}
 
-  VMMDevicePtr Base() const { return base_; }
-  size_t Size() const { return size_; }
-  VMMAllocHandle AllocationHandle() const { return handle_; }
-  int Device() const { return device_; }
+  VMMDevicePtr base() const { return base_; }
+  size_t size() const { return size_; }
+  VMMAllocHandle handle() const { return handle_; }
+  int device() const { return device_; }
 
  private:
   VMMDevicePtr base_{0};
@@ -101,16 +101,16 @@ struct BlockV2 {
   bool IsFree() const { return type_ == BlockType::kFree; }
   bool IsMappedFree() const { return IsFree(); }
   bool IsUnmappedFree() const { return type_ == BlockType::kUnmappedFree; }
-  void* Ptr() const { return ptr_; }
-  size_t Size() const { return size_; }
-  uint8_t* BeginPtr() const { return reinterpret_cast<uint8_t*>(ptr_); }
-  uint8_t* EndPtr() const { return BeginPtr() + size_; }
-  VMMDevicePtr BeginVA() const {
-    return reinterpret_cast<VMMDevicePtr>(BeginPtr());
+  void* ptr() const { return ptr_; }
+  size_t size() const { return size_; }
+  uint8_t* begin_ptr() const { return reinterpret_cast<uint8_t*>(ptr_); }
+  uint8_t* end_ptr() const { return begin_ptr() + size_; }
+  VMMDevicePtr begin_va() const {
+    return reinterpret_cast<VMMDevicePtr>(begin_ptr());
   }
-  VMMDevicePtr EndVA() const { return BeginVA() + size_; }
+  VMMDevicePtr end_va() const { return begin_va() + size_; }
   bool IsAdjacentBefore(const BlockV2& next) const {
-    return EndPtr() == next.BeginPtr();
+    return end_ptr() == next.begin_ptr();
   }
   bool CanAbsorbAdjacentFreeBlock(const BlockV2& next) const {
     return IsFree() && next.IsFree() && IsAdjacentBefore(next);
@@ -120,14 +120,14 @@ struct BlockV2 {
   }
   BlockV2 MakeMappedFreeSubBlock(size_t offset, size_t len) const {
     return MakeMappedBlock(
-        BlockType::kFree, BeginPtr() + offset, len, pool_type_);
+        BlockType::kFree, begin_ptr() + offset, len, pool_type_);
   }
   BlockV2 MakeMappedActiveSubBlock(size_t offset, size_t len) const {
     return MakeMappedBlock(
-        BlockType::kActive, BeginPtr() + offset, len, pool_type_);
+        BlockType::kActive, begin_ptr() + offset, len, pool_type_);
   }
   BlockV2 MakeUnmappedFreeSubBlock(size_t offset, size_t len) const {
-    return MakeUnmappedFreeBlock(BeginPtr() + offset, len, pool_type_);
+    return MakeUnmappedFreeBlock(begin_ptr() + offset, len, pool_type_);
   }
   void MarkActive() { type_ = BlockType::kActive; }
   void MarkFree() { type_ = BlockType::kFree; }

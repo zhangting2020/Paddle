@@ -34,14 +34,14 @@ TEST(VMMBackingMap, TracksMappedAndUnmappedRanges) {
 
   EXPECT_TRUE(map.IsRangeUnmapped(base, page_size * 4));
   EXPECT_FALSE(map.IsRangeMapped(base, page_size));
-  EXPECT_EQ(map.TotalMappedBytes(), 0UL);
+  EXPECT_EQ(map.total_mapped_bytes(), 0UL);
 
   const VMMAllocHandle first_handle = static_cast<VMMAllocHandle>(0x101);
   const VMMAllocHandle second_handle = static_cast<VMMAllocHandle>(0x102);
   map.MarkMapped(base, first_handle, page_size);
   map.MarkMapped(base + page_size, second_handle, page_size);
   map.MarkMapped(base, first_handle, page_size);
-  EXPECT_EQ(map.TotalMappedBytes(), page_size * 2);
+  EXPECT_EQ(map.total_mapped_bytes(), page_size * 2);
   EXPECT_TRUE(map.IsRangeReleasable(base, page_size * 4));
   EXPECT_FALSE(map.IsRangeReleasable(base - page_size, page_size));
 
@@ -84,7 +84,7 @@ TEST(VMMBackingMap, TracksMappedAndUnmappedRanges) {
   EXPECT_FALSE(map.IsRangeMapped(base, page_size * 3));
   EXPECT_FALSE(map.IsRangeUnmapped(base, page_size));
   EXPECT_TRUE(map.IsRangeUnmapped(base + page_size * 2, page_size * 2));
-  EXPECT_EQ(map.TotalMappedBytes(), page_size * 2);
+  EXPECT_EQ(map.total_mapped_bytes(), page_size * 2);
 
   map.MarkUnmapped(base, page_size);
   map.MarkUnmapped(base, page_size);
@@ -142,13 +142,13 @@ TEST(VMMBackingMap, TracksMappedAndUnmappedRanges) {
   EXPECT_FALSE(map.IsRangeMapped(base, page_size * 2));
   EXPECT_TRUE(map.IsRangeUnmapped(base, page_size));
   EXPECT_TRUE(map.IsRangeMapped(base + page_size, page_size));
-  EXPECT_EQ(map.TotalMappedBytes(), page_size);
+  EXPECT_EQ(map.total_mapped_bytes(), page_size);
 
   map.MarkReleased(base + page_size, second_handle, page_size);
   map.MarkReleased(base + page_size, second_handle, page_size);
   EXPECT_TRUE(map.IsRangeUnmapped(base, page_size * 4));
   EXPECT_TRUE(map.IsRangeReleasable(base, page_size * 4));
-  EXPECT_EQ(map.TotalMappedBytes(), 0UL);
+  EXPECT_EQ(map.total_mapped_bytes(), 0UL);
   std::vector<std::pair<VMMDevicePtr, size_t>> all_ranges = {
       {base, page_size * 4}};
   auto all_unmapped_pages =
@@ -188,7 +188,7 @@ TEST(CUDAVirtualMemAllocatorV2, AppendWithBlockReturnsMappedFreeBlock) {
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
   auto allocation_with_block =
-      allocator.AppendWithBlock(allocator.HandleSize() * 2);
+      allocator.AppendWithBlock(allocator.handle_size() * 2);
   ASSERT_NE(allocation_with_block.allocation, nullptr);
 
   const auto& block = allocation_with_block.block;
@@ -202,14 +202,14 @@ TEST(CUDAVirtualMemAllocatorV2, FreeRemovesHandleRegistration) {
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
   auto allocation_with_block =
-      allocator.AppendWithBlock(allocator.HandleSize());
+      allocator.AppendWithBlock(allocator.handle_size());
   ASSERT_NE(allocation_with_block.allocation, nullptr);
   void* ptr = allocation_with_block.allocation->ptr();
 
   allocation_with_block.allocation.reset();
 
   auto reused = allocator.PlaceAtVAWithBlock(
-      reinterpret_cast<VMMDevicePtr>(ptr), allocator.HandleSize());
+      reinterpret_cast<VMMDevicePtr>(ptr), allocator.handle_size());
   ASSERT_NE(reused.allocation, nullptr);
   EXPECT_EQ(reused.allocation->ptr(), ptr);
 }

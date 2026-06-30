@@ -68,11 +68,11 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
 
   bool IsAllocThreadSafe() const override;
 
-  size_t HandleSize() const { return handle_size_; }
-  PoolType GetPoolType() const { return pool_type_; }
-  VMMDevicePtr VirtualMemBase() const { return virtual_mem_base_; }
-  size_t VirtualMemSize() const { return virtual_mem_size_; }
-  size_t TailOffset() const { return virtual_mem_alloced_offset_; }
+  size_t handle_size() const { return handle_size_; }
+  PoolType pool_type() const { return pool_type_; }
+  VMMDevicePtr virtual_mem_base() const { return virtual_mem_base_; }
+  size_t virtual_mem_size() const { return virtual_mem_size_; }
+  size_t tail_offset() const { return virtual_mem_alloced_offset_; }
   // Best-fit layers may consume VA from the reserved range incrementally. V2
   // keeps this as an explicit cursor instead of reusing V1's
   // virtual_2_physical_map_ bookkeeping.

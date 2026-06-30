@@ -79,7 +79,7 @@ class VMMBackingMap {
                            const char* context) const;
   bool ValidateUnmappedPages(const std::vector<UnmappedPage>& pages,
                              const char* context) const;
-  size_t TotalMappedBytes() const;
+  size_t total_mapped_bytes() const;
 
  private:
   struct Page {

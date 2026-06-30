@@ -123,15 +123,15 @@ void CUDAVirtualMemAllocatorV2::RollbackCreatedHandles(
     if (meta == nullptr) {
       continue;
     }
-    phi::dynload::cuMemUnmap(meta->Base(), meta->Size());
+    phi::dynload::cuMemUnmap(meta->base(), meta->size());
     platform::RecordedGpuMemRelease(
-        meta->AllocationHandle(), meta->Size(), place_.device);
+        meta->handle(), meta->size(), place_.device);
   }
 }
 
 void CUDAVirtualMemAllocatorV2::MarkLayoutMapped(const HandleLayout& layout) {
   for (const auto& meta : layout) {
-    backing_map_.MarkMapped(meta->Base(), meta, meta->Size());
+    backing_map_.MarkMapped(meta->base(), meta, meta->size());
   }
 }
 
@@ -353,12 +353,11 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   platform::CUDADeviceGuard guard(place_.device);
   for (const auto& handle : layout) {
     PADDLE_ENFORCE_GPU_SUCCESS(
-        phi::dynload::cuMemUnmap(handle->Base(), handle->Size()));
-    backing_map_.MarkUnmapped(handle->Base(), handle->Size());
+        phi::dynload::cuMemUnmap(handle->base(), handle->size()));
+    backing_map_.MarkUnmapped(handle->base(), handle->size());
     PADDLE_ENFORCE_GPU_SUCCESS(platform::RecordedGpuMemRelease(
-        handle->AllocationHandle(), handle->Size(), place_.device));
-    backing_map_.MarkReleased(
-        handle->Base(), handle->AllocationHandle(), handle->Size());
+        handle->handle(), handle->size(), place_.device));
+    backing_map_.MarkReleased(handle->base(), handle->handle(), handle->size());
   }
 
   UnregisterHandleLayout(ptr);
