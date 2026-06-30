@@ -588,7 +588,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
       iter = unmapped_free_blocks_.erase(iter);
       continue;
     }
-    if (RangeOverlapsUnderlyingAllocation(it->ptr_, backing_size)) {
+    if (RangeOverlapsUnderlying(it->ptr_, backing_size)) {
       VLOG(6) << "VMM V2 AllocFromUnmappedFreeBlocks skip ownership-overlapped "
                  "unmapped-free ptr="
               << it->ptr_ << " backing_size=" << backing_size
@@ -716,12 +716,12 @@ BlockV2 VMMAutoGrowthBestFitAllocatorV2::AdoptBackingBlock(
   return block;
 }
 
-bool VMMAutoGrowthBestFitAllocatorV2::RangeOverlapsUnderlyingAllocation(
+bool VMMAutoGrowthBestFitAllocatorV2::RangeOverlapsUnderlying(
     void* ptr, size_t size) const {
   return underlying_allocations_.Overlaps(ptr, size);
 }
 
-bool VMMAutoGrowthBestFitAllocatorV2::CanReleaseIdleUnderlyingAllocation(
+bool VMMAutoGrowthBestFitAllocatorV2::CanReleaseIdleUnderlying(
     uint8_t* base, size_t size) const {
   if (!IsRangeEntirelyFree(base, size)) {
     return false;
@@ -730,16 +730,16 @@ bool VMMAutoGrowthBestFitAllocatorV2::CanReleaseIdleUnderlyingAllocation(
       reinterpret_cast<VMMDevicePtr>(base), size);
 }
 
-bool VMMAutoGrowthBestFitAllocatorV2::TryReleaseIdleUnderlyingAllocation(
+bool VMMAutoGrowthBestFitAllocatorV2::TryReleaseIdleUnderlying(
     UnderlyingAllocationRegistry::iterator* alloc_it, uint64_t* released) {
   auto& allocation = **alloc_it;
   auto* base = reinterpret_cast<uint8_t*>(allocation->ptr());
   const size_t alloc_size = allocation->size();
-  if (!CanReleaseIdleUnderlyingAllocation(base, alloc_size)) {
+  if (!CanReleaseIdleUnderlying(base, alloc_size)) {
     return false;
   }
 
-  SplitAndReplaceRangeWithUnmappedFree(base, alloc_size);
+  MarkRangeUnmappedFree(base, alloc_size);
   *released += alloc_size;
   VLOG(5) << "VMM V2 pool " << static_cast<int>(pool_type_)
           << " released idle chunk: " << alloc_size << " bytes";
@@ -867,7 +867,7 @@ uint64_t VMMAutoGrowthBestFitAllocatorV2::FreeIdleChunks() {
 
   for (auto alloc_it = underlying_allocations_.begin();
        alloc_it != underlying_allocations_.end();) {
-    if (!TryReleaseIdleUnderlyingAllocation(&alloc_it, &released)) {
+    if (!TryReleaseIdleUnderlying(&alloc_it, &released)) {
       ++alloc_it;
     }
   }
@@ -907,8 +907,8 @@ bool VMMAutoGrowthBestFitAllocatorV2::IsRangeEntirelyFree(uint8_t* base,
   return true;
 }
 
-void VMMAutoGrowthBestFitAllocatorV2::SplitAndReplaceRangeWithUnmappedFree(
-    uint8_t* base, size_t size) {
+void VMMAutoGrowthBestFitAllocatorV2::MarkRangeUnmappedFree(uint8_t* base,
+                                                            size_t size) {
   auto* end = base + size;
 
   for (auto it = all_blocks_.begin(); it != all_blocks_.end();) {

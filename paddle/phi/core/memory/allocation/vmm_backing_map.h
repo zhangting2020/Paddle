@@ -87,16 +87,7 @@ class VMMBackingMap {
   bool IsRangeMapped(VMMDevicePtr va, size_t size) const;
   bool IsRangeUnmapped(VMMDevicePtr va, size_t size) const;
   bool IsRangeReleasable(VMMDevicePtr va, size_t size) const;
-  bool IsRangeReusableForAllocation(VMMDevicePtr va, size_t size) const;
   bool HasIpcExportedPages(VMMDevicePtr va, size_t size) const;
-  std::vector<std::pair<VMMDevicePtr, size_t>> CollectMappedRanges(
-      VMMDevicePtr va, size_t size) const;
-  std::vector<std::pair<VMMDevicePtr, size_t>> CollectUnmappedRanges(
-      VMMDevicePtr va, size_t size) const;
-  std::vector<std::pair<VMMDevicePtr, size_t>> CollectMappedRanges(
-      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const;
-  std::vector<std::pair<VMMDevicePtr, size_t>> CollectUnmappedRanges(
-      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const;
   std::vector<MappedPage> CollectMappedPages(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
       size_t target_bytes = 0) const;
@@ -146,14 +137,6 @@ class VMMBackingMap {
                             const std::shared_ptr<VMMHandleMeta>& meta,
                             bool remap_destination_owned);
   void ResetPageToUnmappedLocked(Page* page, bool clear_ipc_exported);
-  std::vector<std::pair<VMMDevicePtr, size_t>> CollectRangesLocked(
-      VMMDevicePtr va, size_t size, bool mapped, const char* context) const;
-  void AppendRangesLocked(
-      VMMDevicePtr va,
-      size_t size,
-      bool mapped,
-      const char* context,
-      std::vector<std::pair<VMMDevicePtr, size_t>>* ranges) const;
   void AppendMappedPagesLocked(VMMDevicePtr va,
                                size_t size,
                                const char* context,

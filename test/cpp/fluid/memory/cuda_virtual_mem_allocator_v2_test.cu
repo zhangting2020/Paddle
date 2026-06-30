@@ -55,24 +55,8 @@ TEST(VMMBackingMap, TracksMappedAndUnmappedRanges) {
   EXPECT_TRUE(map.IsRangeReleasable(base, page_size * 4));
   EXPECT_FALSE(map.IsRangeReleasable(base - page_size, page_size));
 
-  auto mapped_ranges = map.CollectMappedRanges(base, page_size * 4);
-  ASSERT_EQ(mapped_ranges.size(), 1UL);
-  EXPECT_EQ(mapped_ranges[0].first, base);
-  EXPECT_EQ(mapped_ranges[0].second, page_size * 2);
-  auto unmapped_ranges = map.CollectUnmappedRanges(base, page_size * 4);
-  ASSERT_EQ(unmapped_ranges.size(), 1UL);
-  EXPECT_EQ(unmapped_ranges[0].first, base + page_size * 2);
-  EXPECT_EQ(unmapped_ranges[0].second, page_size * 2);
   std::vector<std::pair<VMMDevicePtr, size_t>> free_ranges = {
       {base, page_size}, {base + page_size, page_size * 3}};
-  mapped_ranges = map.CollectMappedRanges(free_ranges);
-  ASSERT_EQ(mapped_ranges.size(), 1UL);
-  EXPECT_EQ(mapped_ranges[0].first, base);
-  EXPECT_EQ(mapped_ranges[0].second, page_size * 2);
-  unmapped_ranges = map.CollectUnmappedRanges(free_ranges);
-  ASSERT_EQ(unmapped_ranges.size(), 1UL);
-  EXPECT_EQ(unmapped_ranges[0].first, base + page_size * 2);
-  EXPECT_EQ(unmapped_ranges[0].second, page_size * 2);
   auto mapped_pages = map.CollectMappedPages(free_ranges);
   ASSERT_EQ(mapped_pages.size(), 2UL);
   EXPECT_EQ(mapped_pages[0].va, base);
@@ -106,22 +90,6 @@ TEST(VMMBackingMap, TracksMappedAndUnmappedRanges) {
   ASSERT_EQ(unmapped_base_pages.size(), 1UL);
   EXPECT_TRUE(map.ValidateUnmappedPages(unmapped_base_pages,
                                         "unit_test_unmapped_clears_handle"));
-  mapped_ranges = map.CollectMappedRanges(base, page_size * 4);
-  ASSERT_EQ(mapped_ranges.size(), 1UL);
-  EXPECT_EQ(mapped_ranges[0].first, base + page_size);
-  EXPECT_EQ(mapped_ranges[0].second, page_size);
-  unmapped_ranges = map.CollectUnmappedRanges(base, page_size * 4);
-  ASSERT_EQ(unmapped_ranges.size(), 2UL);
-  EXPECT_EQ(unmapped_ranges[0].first, base);
-  EXPECT_EQ(unmapped_ranges[0].second, page_size);
-  EXPECT_EQ(unmapped_ranges[1].first, base + page_size * 2);
-  EXPECT_EQ(unmapped_ranges[1].second, page_size * 2);
-  unmapped_ranges = map.CollectUnmappedRanges(free_ranges);
-  ASSERT_EQ(unmapped_ranges.size(), 2UL);
-  EXPECT_EQ(unmapped_ranges[0].first, base);
-  EXPECT_EQ(unmapped_ranges[0].second, page_size);
-  EXPECT_EQ(unmapped_ranges[1].first, base + page_size * 2);
-  EXPECT_EQ(unmapped_ranges[1].second, page_size * 2);
   mapped_pages = map.CollectMappedPages(free_ranges);
   ASSERT_EQ(mapped_pages.size(), 1UL);
   EXPECT_EQ(mapped_pages[0].va, base + page_size);
@@ -511,10 +479,10 @@ TEST(CUDAVirtualMemAllocatorV2, CollectsAndPinsIpcBlockBacking) {
   EXPECT_EQ(ipc_parts[1].chunk_rel_off, 0UL);
   EXPECT_EQ(ipc_parts[1].len, 2048UL);
 
-  EXPECT_TRUE(allocator.IsRangeReusable(block.begin_va(), block.size()));
+  EXPECT_TRUE(allocator.IsRangeReleasable(block.begin_va(), block.size()));
   ASSERT_TRUE(allocator.MarkIpcExported(block.begin_va(), block.size()));
   EXPECT_TRUE(allocator.HasIpcExportedRange(block.begin_va(), block.size()));
-  EXPECT_FALSE(allocator.IsRangeReusable(block.begin_va(), block.size()));
+  EXPECT_FALSE(allocator.IsRangeReleasable(block.begin_va(), block.size()));
 
   ASSERT_NE(pages[0].meta, nullptr);
   pages[0].meta->MarkOwnedByRemapDestination();
@@ -579,7 +547,6 @@ TEST(CUDAVirtualMemAllocatorV2, LazyPendingStreamBlocksRemapAndRelease) {
   ASSERT_EQ(cudaGetLastError(), cudaSuccess);
 
   ASSERT_TRUE(allocator.SetBlockRemapEvent(block, stream, nullptr));
-  EXPECT_TRUE(allocator.IsRangeReusable(block_base, allocator.handle_size()));
   EXPECT_FALSE(
       allocator.IsRangeReleasable(block_base, allocator.handle_size()));
   std::vector<std::pair<VMMDevicePtr, size_t>> ranges = {
@@ -595,7 +562,6 @@ TEST(CUDAVirtualMemAllocatorV2, LazyPendingStreamBlocksRemapAndRelease) {
             VMMBackingMap::RemapSourceState::kPendingEvent);
 
   ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
-  EXPECT_TRUE(allocator.IsRangeReusable(block_base, allocator.handle_size()));
   EXPECT_TRUE(allocator.IsRangeReleasable(block_base, allocator.handle_size()));
   remap_sources =
       allocator.CollectRemapSourcePages(ranges, allocator.handle_size());

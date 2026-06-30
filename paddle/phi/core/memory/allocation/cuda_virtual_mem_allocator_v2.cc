@@ -966,11 +966,6 @@ bool CUDAVirtualMemAllocatorV2::IsRangeReleasable(VMMDevicePtr ptr,
   return backing_map_.IsRangeReleasable(ptr, size);
 }
 
-bool CUDAVirtualMemAllocatorV2::IsRangeReusable(VMMDevicePtr ptr,
-                                                size_t size) const {
-  return backing_map_.IsRangeReusableForAllocation(ptr, size);
-}
-
 bool CUDAVirtualMemAllocatorV2::CollectIpcParts(
     VMMDevicePtr ptr, size_t size, std::vector<BlockPart>* ipc_parts) const {
   std::vector<IpcBlockPartDescriptor> descriptors;

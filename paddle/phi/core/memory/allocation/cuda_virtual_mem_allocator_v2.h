@@ -157,7 +157,6 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   void MarkBackingIpcExported(VMMDevicePtr ptr, size_t size);
   bool HasIpcExportedRange(VMMDevicePtr ptr, size_t size) const;
   bool IsRangeReleasable(VMMDevicePtr ptr, size_t size) const;
-  bool IsRangeReusable(VMMDevicePtr ptr, size_t size) const;
   bool CollectIpcParts(VMMDevicePtr ptr,
                        size_t size,
                        std::vector<BlockPart>* ipc_parts) const;
