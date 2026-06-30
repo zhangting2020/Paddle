@@ -18,7 +18,7 @@ import copy
 import hashlib
 import inspect
 import warnings
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
@@ -30,7 +30,7 @@ from paddle.base.data_feeder import convert_uint16_to_float, vartype_to_str
 from paddle.base.libpaddle import Place
 from paddle.profiler.utils import in_profiler_mode
 from paddle.utils import deprecated
-from paddle.utils.decorator_utils import tensor_cuda_decorator
+from paddle.utils.decorator_utils import param_one_alias, tensor_cuda_decorator
 from paddle.utils.dlpack import DLDeviceType
 from paddle.utils.download import check_and_create_dir
 
@@ -45,6 +45,7 @@ from .base import switch_to_static_graph
 from .math_op_patch import monkey_patch_math_tensor
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from enum import IntEnum
 
     from typing_extensions import CapsuleType
@@ -284,10 +285,12 @@ def monkey_patch_tensor():
                 )
 
     @framework.dygraph_only
+    @param_one_alias(["grad_tensor", "gradient"])
     def backward(
         self: Tensor,
         grad_tensor: Tensor | None = None,
         retain_graph: bool = False,
+        create_graph: bool = False,
         *,
         dump_backward_graph_path: str | None = None,
     ) -> None:
@@ -368,7 +371,11 @@ def monkey_patch_tensor():
                 self = _grad_scalar.scale(self)
             check_and_create_dir(dump_backward_graph_path)
             core.eager.run_backward(
-                [self], grad_tensor, retain_graph, dump_backward_graph_path
+                [self],
+                grad_tensor,
+                retain_graph,
+                create_graph,
+                dump_backward_graph_path,
             )
 
             if in_profiler_mode():

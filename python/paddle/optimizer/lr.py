@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from typing import TYPE_CHECKING, Any, Callable, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 import numpy
 import numpy.typing as npt
@@ -38,7 +38,7 @@ from paddle.utils.decorator_utils import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 __all__ = [
     'LRScheduler',
@@ -1509,6 +1509,25 @@ class LambdaDecay(LRScheduler):
 
     lr_lambda: Callable[[int], float]
 
+    @overload
+    def __init__(
+        self,
+        learning_rate: float,
+        lr_lambda: Callable[[int], float],
+        last_epoch: int = -1,
+        verbose: bool = False,
+    ): ...
+
+    @overload
+    def __init__(
+        self,
+        optimizer: paddle.optimizer.Optimizer,
+        lr_lambda: Callable[[int], float],
+        last_epoch: int = -1,
+        verbose: bool = False,
+    ): ...
+
+    @lr_scheduler_decorator()
     def __init__(
         self,
         learning_rate: float,

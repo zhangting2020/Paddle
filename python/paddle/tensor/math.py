@@ -104,6 +104,7 @@ from paddle._C_ops import (  # noqa: F401
     sigmoid,
     sigmoid_,
     sign,
+    sign_,
     sin,
     sin_,
     sinh,
@@ -2165,6 +2166,7 @@ def mm(
     mat2: Tensor,
     name: str | None = None,
     *,
+    out_dtype: DTypeLike | None = None,
     out: Tensor | None = None,
 ) -> Tensor:
     """
@@ -2187,10 +2189,11 @@ def mm(
         name (str|None, optional): Name for the operation (optional, default is None). For more information, please refer to :ref:`api_guide_Name`.
 
     Keywords Argument:
+        out_dtype (paddle.dtype|None, optional): The desired output data type. Currently only supports ``paddle.float32`` for CUDA bfloat16 2-D inputs in dynamic graph. Default: None.
         out (Tensor, optional): The output Tensor. It must have the same data type and shape as the expected output. Default is None, and a new Tensor will be created to store the result.
 
     Returns:
-        Tensor: The product Tensor, with same data type of the input Tensor.
+        Tensor: The product Tensor. Its data type is the same as input unless ``out_dtype`` is specified.
 
     ::
 
@@ -2239,6 +2242,36 @@ def mm(
 
 
     """
+    if out_dtype is not None:
+        out_dtype = convert_nptype_to_datatype_or_vartype(out_dtype)
+        float32_dtypes = (core.DataType.FLOAT32, core.VarDesc.VarType.FP32)
+        bf16_dtypes = (core.DataType.BFLOAT16, core.VarDesc.VarType.BF16)
+        if out_dtype not in float32_dtypes:
+            raise TypeError(
+                "The out_dtype of paddle.mm currently only supports paddle.float32."
+            )
+        if input.dtype not in bf16_dtypes:
+            raise TypeError(
+                "The out_dtype of paddle.mm currently only supports bfloat16 input."
+            )
+        if mat2.dtype not in bf16_dtypes:
+            raise TypeError(
+                "The out_dtype of paddle.mm currently only supports bfloat16 mat2."
+            )
+        if len(input.shape) != 2 or len(mat2.shape) != 2:
+            raise ValueError(
+                "The out_dtype of paddle.mm currently only supports 2-D inputs."
+            )
+        if out is not None and out.dtype not in float32_dtypes:
+            raise TypeError(
+                "The out tensor dtype must be paddle.float32 when out_dtype is paddle.float32."
+            )
+        if not in_dynamic_mode():
+            raise NotImplementedError(
+                "The out_dtype of paddle.mm currently only supports dynamic graph."
+            )
+        return _C_ops.mm_out_dtype(input, mat2, out_dtype, out=out)
+
     if in_dynamic_mode():
         return _C_ops.matmul(input, mat2, False, False, out=out)
 
@@ -2297,7 +2330,6 @@ def addmv(
     vec: Tensor,
     beta: float = 1,
     alpha: float = 1,
-    name: str | None = None,
     *,
     out: Tensor | None = None,
 ) -> Tensor:
@@ -2346,7 +2378,6 @@ def addmv_(
     vec: Tensor,
     beta: float = 1,
     alpha: float = 1,
-    name: str | None = None,
 ) -> Tensor:
     """
     Inplace version of ``addmv`` API.
@@ -2361,7 +2392,6 @@ def addr(
     vec2: Tensor,
     beta: float = 1,
     alpha: float = 1,
-    name: str | None = None,
     *,
     out: Tensor | None = None,
 ) -> Tensor:
@@ -2407,12 +2437,68 @@ def addr_(
     vec2: Tensor,
     beta: float = 1,
     alpha: float = 1,
-    name: str | None = None,
 ) -> Tensor:
     """
     Inplace version of ``addr`` API.
     """
     addmm_(input, vec1.unsqueeze(-1), vec2.unsqueeze(0), beta=beta, alpha=alpha)
+    return input
+
+
+def addcdiv(
+    input: Tensor,
+    tensor1: Tensor,
+    tensor2: Tensor,
+    value: float = 1,
+    *,
+    out: Tensor | None = None,
+) -> Tensor:
+    """
+    Performs the element-wise division of `tensor1` by `tensor2`,
+    multiplies the result by the scalar `value` and adds it to `input`.
+
+    The formula is: out = input + value * (tensor1 / tensor2)
+
+    Args:
+        input (Tensor): The input tensor to be added.
+        tensor1 (Tensor): The numerator tensor.
+        tensor2 (Tensor): The denominator tensor.
+        value (float, optional): Multiplier for tensor1 / tensor2. Default: 1.
+        name (str|None, optional): Name for the operation. Default: None.
+
+    Keyword Args:
+        out (Tensor|None, optional): Output tensor. Default: None.
+
+    Returns:
+        Tensor: The result tensor.
+
+    Examples:
+        .. code-block:: pycon
+
+            >>> import paddle
+            >>> input = paddle.randn([3])
+            >>> tensor1 = paddle.randn([3])
+            >>> tensor2 = paddle.randn([3])
+            >>> out = paddle.addcdiv(input, tensor1, tensor2, value=0.5)
+    """
+    result = paddle.add(input, value * paddle.divide(tensor1, tensor2))
+    if out is not None:
+        paddle.assign(result, out)
+        return out
+    return result
+
+
+@inplace_apis_in_dygraph_only
+def addcdiv_(
+    input: Tensor,
+    tensor1: Tensor,
+    tensor2: Tensor,
+    value: float = 1,
+) -> Tensor:
+    """
+    Inplace version of ``addcdiv`` API.
+    """
+    input.add_(value * paddle.divide(tensor1, tensor2))
     return input
 
 
