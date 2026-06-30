@@ -14,12 +14,8 @@
 
 #pragma once
 
-#include <algorithm>
 #include <cstdint>
-#include <iterator>
-#include <limits>
 #include <memory>
-#include <utility>
 #include <vector>
 
 #if defined(PADDLE_WITH_CUDA)
@@ -43,41 +39,6 @@ using VMMDevicePtr = uintptr_t;
 using VMMAllocHandle = uint64_t;
 #endif
 
-// RAII wrapper around gpuEvent_t so that multiple blocks can share
-// ownership of the same event via shared_ptr.  The event is only
-// destroyed when the last reference is dropped, preventing the
-// double-destroy SIGSEGV that occurred when raw gpuEvent_t pointers
-// were shallow-copied across split blocks and then independently
-// destroyed during merge.
-#if defined(PADDLE_WITH_CUDA)
-struct CUDAEventGuard {
-  gpuEvent_t event{nullptr};
-
-  explicit CUDAEventGuard(gpuEvent_t e) : event(e) {}
-  ~CUDAEventGuard() {
-    if (event != nullptr) {
-      cudaEventDestroy(event);
-    }
-  }
-
-  // Non-copyable: ownership is shared via shared_ptr.
-  CUDAEventGuard(const CUDAEventGuard&) = delete;
-  CUDAEventGuard& operator=(const CUDAEventGuard&) = delete;
-};
-
-class VMMRemapEventAllocation {
- public:
-  virtual ~VMMRemapEventAllocation() = default;
-  virtual bool SetVMMRemapEvent(gpuStream_t stream,
-                                std::shared_ptr<CUDAEventGuard> event) = 0;
-};
-
-struct VMMBlockRemapState {
-  gpuStream_t stream{nullptr};
-  std::shared_ptr<CUDAEventGuard> event;
-};
-#endif
-
 // V2 keeps the bottom-layer shared types independent from the best-fit layer
 // so that CUDAVirtualMemAllocatorV2 can be reviewed and compiled separately.
 enum class PoolType : uint8_t {
@@ -86,7 +47,7 @@ enum class PoolType : uint8_t {
 };
 
 // Fixed-size handle metadata returned by the bottom VMM provider. Upper layers
-// may later reference these handles from block-level views or remap metadata.
+// may later reference these handles from block-level views.
 struct VMMHandleMeta {
   VMMHandleMeta() = default;
 
@@ -101,188 +62,16 @@ struct VMMHandleMeta {
   VMMAllocHandle AllocationHandle() const { return handle_; }
   int Device() const { return device_; }
 
-  bool IsOwnedByRemapDestination() const { return owned_by_remap_destination_; }
-  void MarkOwnedByRemapDestination() { owned_by_remap_destination_ = true; }
-  void RestoreOriginalOwnership() { owned_by_remap_destination_ = false; }
-
  private:
   VMMDevicePtr base_{0};
   size_t size_{0};
   VMMAllocHandle handle_{0};
   int device_{0};
-  // Set while a handle's lifetime has moved from the original free block to a
-  // synthetic destination block created by remap compaction. FreeImpl must skip
-  // the original owner because the destination allocation now releases it.
-  bool owned_by_remap_destination_{false};
 };
 
 // HandleLayout is a lightweight allocation-level handle list returned by the
 // bottom VMM provider. It is used to bootstrap upper-layer block state.
 using HandleLayout = std::vector<std::shared_ptr<VMMHandleMeta>>;
-
-// A logical slice of one fixed-size VMM handle. This is the block-level view
-// owned by VMMAutoGrowthBestFitAllocatorV2 and is updated by split / merge /
-// remap after the initial HandleLayout has been consumed.
-struct BlockPartV2 {
-  BlockPartV2() = default;
-
-  BlockPartV2(std::shared_ptr<VMMHandleMeta> handle,
-              size_t handle_rel_off,
-              size_t len)
-      : handle_(std::move(handle)),
-        handle_rel_off_(handle_rel_off),
-        len_(len) {}
-
-  bool HasHandle() const { return handle_ != nullptr; }
-  const std::shared_ptr<VMMHandleMeta>& HandleMeta() const { return handle_; }
-  VMMDevicePtr HandleBase() const { return handle_->Base(); }
-  VMMDevicePtr SliceBase() const { return HandleBase() + handle_rel_off_; }
-  size_t HandleSize() const { return handle_->Size(); }
-  size_t HandleRelOffset() const { return handle_rel_off_; }
-  size_t ByteSize() const { return len_; }
-  VMMAllocHandle AllocationHandle() const {
-    return handle_->AllocationHandle();
-  }
-  int Device() const { return handle_->Device(); }
-
-  bool FullyCoversHandle() const {
-    return handle_rel_off_ == 0 && handle_ != nullptr &&
-           len_ == handle_->Size();
-  }
-
-  bool IsOwnedByRemapDestination() const {
-    return handle_ != nullptr && handle_->IsOwnedByRemapDestination();
-  }
-
-  // Return a sub-slice of this part in handle-relative coordinates.
-  BlockPartV2 Slice(size_t offset, size_t slice_len) const {
-    return {handle_, handle_rel_off_ + offset, slice_len};
-  }
-
-  // Fold an adjacent slice from the same handle into this part.
-  bool TryExtend(const BlockPartV2& next) {
-    if (handle_.get() != next.handle_.get()) {
-      return false;
-    }
-    if (handle_rel_off_ + len_ != next.handle_rel_off_) {
-      return false;
-    }
-    len_ += next.len_;
-    return true;
-  }
-
- private:
-  std::shared_ptr<VMMHandleMeta> handle_;
-  size_t handle_rel_off_{0};
-  size_t len_{0};
-};
-
-inline std::vector<BlockPartV2> BuildBlockPartsFromHandleLayout(
-    const HandleLayout& layout) {
-  std::vector<BlockPartV2> parts;
-  parts.reserve(layout.size());
-  for (const auto& handle : layout) {
-    parts.push_back(BlockPartV2{handle, 0, handle->Size()});
-  }
-  return parts;
-}
-
-inline std::vector<BlockPartV2> SliceBlockPartsForRange(
-    const std::vector<BlockPartV2>& parts,
-    size_t range_offset,
-    size_t range_len) {
-  // parts describes one logical block as an ordered list of handle slices.
-  // The target range is expressed in that same logical block address space.
-  std::vector<BlockPartV2> sliced_parts;
-  if (range_len == 0 || parts.empty()) {
-    return sliced_parts;
-  }
-
-  PADDLE_ENFORCE_LE(
-      range_offset,
-      std::numeric_limits<size_t>::max() - range_len,
-      common::errors::InvalidArgument(
-          "Invalid VMM V2 block-part slice range: offset %zu plus length %zu "
-          "overflows.",
-          range_offset,
-          range_len));
-
-  if (parts.size() == 1) {
-    const auto& part = parts.front();
-    PADDLE_ENFORCE_LE(
-        range_offset,
-        part.ByteSize(),
-        common::errors::InvalidArgument(
-            "Invalid VMM V2 block-part slice offset %zu for part length %zu.",
-            range_offset,
-            part.ByteSize()));
-    PADDLE_ENFORCE_LE(
-        range_len,
-        part.ByteSize() - range_offset,
-        common::errors::InvalidArgument(
-            "Invalid VMM V2 block-part slice length %zu at offset %zu for "
-            "part length %zu.",
-            range_len,
-            range_offset,
-            part.ByteSize()));
-    return {part.Slice(range_offset, range_len)};
-  }
-
-  sliced_parts.reserve(parts.size());
-  const size_t range_end = range_offset + range_len;
-  size_t cursor = 0;
-  size_t sliced_len = 0;
-
-  for (const auto& part : parts) {
-    const size_t part_block_begin = cursor;
-    const size_t part_block_end = cursor + part.ByteSize();
-    cursor = part_block_end;
-
-    if (part_block_end <= range_offset) {
-      continue;
-    }
-    if (part_block_begin >= range_end) {
-      break;
-    }
-
-    const size_t slice_begin = std::max(part_block_begin, range_offset);
-    const size_t slice_end = std::min(part_block_end, range_end);
-    auto slice =
-        part.Slice(slice_begin - part_block_begin, slice_end - slice_begin);
-    const size_t slice_len = slice.ByteSize();
-
-    if (sliced_parts.empty() || !sliced_parts.back().TryExtend(slice)) {
-      sliced_parts.push_back(std::move(slice));
-    }
-    sliced_len += slice_len;
-  }
-  PADDLE_ENFORCE_EQ(
-      sliced_len,
-      range_len,
-      common::errors::InvalidArgument(
-          "Invalid VMM V2 block-part slice range: requested %zu bytes at "
-          "offset %zu, but only sliced %zu bytes from %zu parts.",
-          range_len,
-          range_offset,
-          sliced_len,
-          parts.size()));
-  return sliced_parts;
-}
-
-inline void AppendBlockPartsTail(std::vector<BlockPartV2>* dst,
-                                 std::vector<BlockPartV2>* src) {
-  if (src->empty()) {
-    return;
-  }
-  dst->reserve(dst->size() + src->size());
-  auto begin = src->begin();
-  if (!dst->empty() && dst->back().TryExtend(src->front())) {
-    ++begin;
-  }
-  dst->insert(dst->end(),
-              std::make_move_iterator(begin),
-              std::make_move_iterator(src->end()));
-}
 
 enum class BlockType : uint8_t {
   kActive = 0,
@@ -290,71 +79,7 @@ enum class BlockType : uint8_t {
   kUnmappedFree = 2,
 };
 
-enum class BlockRestoreMappedFreeResult : uint8_t {
-  kOutside = 0,
-  kRangeExceedsBlock = 1,
-  kBuilt = 2,
-};
-
 struct BlockV2 {
-  static BlockV2 MakeMappedBlockWithParts(BlockType type,
-                                          void* ptr,
-                                          size_t size,
-                                          const std::vector<BlockPartV2>& parts,
-                                          size_t parts_offset,
-                                          size_t parts_len,
-                                          PoolType pool_type) {
-    BlockV2 block;
-    block.ResetAsMappedBlock(
-        type, ptr, size, parts, parts_offset, parts_len, pool_type);
-    return block;
-  }
-
-  static BlockV2 MakeMappedActiveBlockWithParts(
-      void* ptr,
-      size_t size,
-      const std::vector<BlockPartV2>& parts,
-      size_t parts_offset,
-      size_t parts_len,
-      PoolType pool_type) {
-    return MakeMappedBlockWithParts(BlockType::kActive,
-                                    ptr,
-                                    size,
-                                    parts,
-                                    parts_offset,
-                                    parts_len,
-                                    pool_type);
-  }
-
-  static BlockV2 MakeMappedFreeBlockWithParts(
-      void* ptr,
-      size_t size,
-      const std::vector<BlockPartV2>& parts,
-      size_t parts_offset,
-      size_t parts_len,
-      PoolType pool_type) {
-    return MakeMappedBlockWithParts(
-        BlockType::kFree, ptr, size, parts, parts_offset, parts_len, pool_type);
-  }
-
-  static BlockV2 MakeMappedFreeBlockWithParts(void* ptr,
-                                              size_t size,
-                                              std::vector<BlockPartV2>&& parts,
-                                              PoolType pool_type) {
-    BlockV2 block;
-    block.Reset(ptr, size, BlockType::kFree, pool_type);
-    block.SetParts(std::move(parts));
-    return block;
-  }
-
-  static BlockV2 MakeMappedFreeBlockFromLayout(void* ptr,
-                                               size_t size,
-                                               const HandleLayout& layout,
-                                               PoolType pool_type) {
-    return MakeMappedFreeBlockWithParts(
-        ptr, size, BuildBlockPartsFromHandleLayout(layout), 0, size, pool_type);
-  }
-
   static BlockV2 MakeMappedBlock(BlockType type,
                                  void* ptr,
                                  size_t size,
@@ -372,52 +97,9 @@ struct BlockV2 {
     return block;
   }
 
-  static BlockV2 MakeSinglePartMappedFreeBlock(
-      void* ptr,
-      size_t size,
-      std::shared_ptr<VMMHandleMeta> meta,
-      PoolType pool_type) {
-    BlockV2 block;
-    block.ResetAsSinglePartMappedFree(ptr, size, std::move(meta), pool_type);
-    return block;
-  }
-
-  static BlockV2 MakeFreeSegment(BlockType type,
-                                 void* ptr,
-                                 size_t size,
-                                 const BlockPartV2* part,
-                                 PoolType pool_type) {
-    BlockV2 block;
-    block.Reset(ptr, size, type, pool_type);
-    if (part != nullptr) {
-      block.AddPart(*part);
-    }
-    return block;
-  }
-
-  static void AppendFreeSegment(std::vector<BlockV2>* segments,
-                                BlockType type,
-                                void* ptr,
-                                size_t size,
-                                const BlockPartV2* part,
-                                PoolType pool_type) {
-    if (size == 0) {
-      return;
-    }
-
-    if (!segments->empty() && segments->back().type_ == type) {
-      segments->back().ExtendSegment(size, part);
-      return;
-    }
-
-    segments->push_back(MakeFreeSegment(type, ptr, size, part, pool_type));
-  }
-
-  bool HasParts() const { return !parts_.empty(); }
   bool IsActive() const { return type_ == BlockType::kActive; }
   bool IsFree() const { return type_ == BlockType::kFree; }
   bool IsMappedFree() const { return IsFree(); }
-  bool CanBeRemapSource() const { return IsMappedFree(); }
   bool IsUnmappedFree() const { return type_ == BlockType::kUnmappedFree; }
   void* Ptr() const { return ptr_; }
   size_t Size() const { return size_; }
@@ -441,70 +123,19 @@ struct BlockV2 {
   bool CanAbsorbAdjacentUnmappedFreeBlock(const BlockV2& next) const {
     return IsUnmappedFree() && next.IsUnmappedFree() && IsAdjacentBefore(next);
   }
-  BlockV2 MakeMappedFreeSubBlockWithParts(size_t offset, size_t len) const {
-    auto block = MakeMappedFreeBlockWithParts(
-        BeginPtr() + offset, len, parts_, offset, len, pool_type_);
-#if defined(PADDLE_WITH_CUDA)
-    block.CopyRemapSafetyFrom(*this);
-#endif
-    return block;
-  }
-  BlockV2 MakeMappedActiveSubBlockWithParts(size_t offset, size_t len) const {
-    return MakeMappedActiveBlockWithParts(
-        BeginPtr() + offset, len, parts_, offset, len, pool_type_);
-  }
   BlockV2 MakeMappedSubBlock(BlockType type, size_t offset, size_t len) const {
-    auto block = MakeMappedBlock(type, BeginPtr() + offset, len, pool_type_);
-#if defined(PADDLE_WITH_CUDA)
-    block.CopyRemapSafetyFrom(*this);
-#endif
-    return block;
+    return MakeMappedBlock(type, BeginPtr() + offset, len, pool_type_);
   }
   BlockV2 MakeMappedFreeSubBlock(size_t offset, size_t len) const {
     return MakeMappedSubBlock(BlockType::kFree, offset, len);
   }
   BlockV2 MakeMappedActiveSubBlock(size_t offset, size_t len) const {
-    auto block = MakeMappedSubBlock(BlockType::kActive, offset, len);
-#if defined(PADDLE_WITH_CUDA)
-    block.ClearRemapSafety();
-#endif
-    return block;
+    return MakeMappedSubBlock(BlockType::kActive, offset, len);
   }
   BlockV2 MakeUnmappedFreeSubBlock(size_t offset, size_t len) const {
     return MakeUnmappedFreeBlock(BeginPtr() + offset, len, pool_type_);
   }
-  BlockRestoreMappedFreeResult BuildRestoreMappedFreeSegments(
-      VMMDevicePtr va,
-      size_t size,
-      const std::shared_ptr<VMMHandleMeta>& meta,
-      std::vector<BlockV2>* segments) const {
-    if (!IsUnmappedFree() || va < BeginVA() || va >= EndVA()) {
-      return BlockRestoreMappedFreeResult::kOutside;
-    }
-    if (size > EndVA() - va) {
-      return BlockRestoreMappedFreeResult::kRangeExceedsBlock;
-    }
-
-    segments->clear();
-    const size_t prefix = va - BeginVA();
-    const size_t suffix = EndVA() - (va + size);
-    if (prefix > 0) {
-      segments->push_back(MakeUnmappedFreeSubBlock(0, prefix));
-    }
-    (void)meta;
-    segments->push_back(MakeMappedBlock(
-        BlockType::kFree, reinterpret_cast<void*>(va), size, pool_type_));
-    if (suffix > 0) {
-      segments->push_back(MakeUnmappedFreeSubBlock(prefix + size, suffix));
-    }
-    return BlockRestoreMappedFreeResult::kBuilt;
-  }
-  void MarkActive() {
-    type_ = BlockType::kActive;
-#if defined(PADDLE_WITH_CUDA)
-    ClearRemapSafety();
-#endif
-  }
+  void MarkActive() { type_ = BlockType::kActive; }
   void MarkFree() { type_ = BlockType::kFree; }
   void MarkMappedFree() { MarkFree(); }
   void MarkUnmappedFree() { type_ = BlockType::kUnmappedFree; }
@@ -513,174 +144,22 @@ struct BlockV2 {
     size_ = size;
     type_ = type;
     pool_type_ = pool_type;
-    parts_.clear();
-#if defined(PADDLE_WITH_CUDA)
-    ClearRemapSafety();
-#endif
   }
-  void ResetAsMappedBlock(BlockType type,
-                          void* ptr,
-                          size_t size,
-                          const std::vector<BlockPartV2>& parts,
-                          size_t parts_offset,
-                          size_t parts_len,
-                          PoolType pool_type) {
-    Reset(ptr, size, type, pool_type);
-    SetPartsFromRange(parts, parts_offset, parts_len);
-  }
-  // Logical allocation-view slices. Ownership/reuse/release/remap safety must
-  // be decided by the backing-state APIs, not by inspecting part layout.
-  size_t AllocationPartCount() const { return parts_.size(); }
-  bool HasSingleAllocationPart(size_t handle_rel_off, size_t len) const {
-    return parts_.size() == 1 &&
-           parts_.front().HandleRelOffset() == handle_rel_off &&
-           parts_.front().ByteSize() == len;
-  }
-  const std::shared_ptr<VMMHandleMeta>& FirstAllocationPartHandleMeta() const {
-    return parts_.front().HandleMeta();
-  }
-  size_t AllocationPartHandleRelOffset(size_t index) const {
-    return parts_.at(index).HandleRelOffset();
-  }
-  size_t AllocationPartByteSize(size_t index) const {
-    return parts_.at(index).ByteSize();
-  }
-  void TrimToPrefix(size_t keep) {
-    if (HasParts()) {
-      TrimPartsToRange(0, keep);
-    }
-    size_ = keep;
-  }
+  void TrimToPrefix(size_t keep) { size_ = keep; }
   void TrimToSuffix(size_t trim, size_t keep) {
-    if (HasParts()) {
-      TrimPartsToRange(trim, keep);
-    }
     ptr_ = reinterpret_cast<uint8_t*>(ptr_) + trim;
     size_ = keep;
   }
-  template <typename Fn>
-  void ForEachPartWithPtr(Fn&& fn) const {
-    auto* base = reinterpret_cast<uint8_t*>(ptr_);
-    size_t offset = 0;
-    for (const auto& part : parts_) {
-      fn(part, base + offset);
-      offset += part.ByteSize();
-    }
-  }
-  void AbsorbAdjacentBlockWithParts(BlockV2* src) {
-    size_ += src->size_;
-    AppendPartsFrom(src);
-#if defined(PADDLE_WITH_CUDA)
-    AppendRemapSafetyFrom(*src);
-#endif
-  }
-  void AbsorbAdjacentBlock(const BlockV2& src) {
-    size_ += src.size_;
-    parts_.clear();
-#if defined(PADDLE_WITH_CUDA)
-    AppendRemapSafetyFrom(src);
-#endif
-  }
+  void AbsorbAdjacentBlock(const BlockV2& src) { size_ += src.size_; }
   void AbsorbAdjacentUnmappedFreeBlock(const BlockV2& src) {
     size_ += src.size_;
-  }
-  void ExtendSegment(size_t size, const BlockPartV2* part) {
-    size_ += size;
-    if (part != nullptr) {
-      TryAppendPart(*part);
-    }
-  }
-  void ResetAsSinglePartMappedFree(void* ptr,
-                                   size_t size,
-                                   std::shared_ptr<VMMHandleMeta> meta,
-                                   PoolType pool_type) {
-    Reset(ptr, size, BlockType::kFree, pool_type);
-    SetSinglePart(std::move(meta), size);
   }
 
   void* ptr_{nullptr};
   size_t size_{0};
   BlockType type_{BlockType::kUnmappedFree};
 
- private:
-  void SetParts(const std::vector<BlockPartV2>& parts) { parts_ = parts; }
-  void SetParts(std::vector<BlockPartV2>&& parts) { parts_ = std::move(parts); }
-  void SetPartsFromRange(const std::vector<BlockPartV2>& parts,
-                         size_t offset,
-                         size_t len) {
-    parts_ = SliceBlockPartsForRange(parts, offset, len);
-  }
-  void TrimPartsToRange(size_t offset, size_t len) {
-    parts_ = SliceBlockPartsForRange(parts_, offset, len);
-  }
-  void SetSinglePart(std::shared_ptr<VMMHandleMeta> meta, size_t len) {
-    parts_.clear();
-    parts_.push_back(BlockPartV2{std::move(meta), 0, len});
-  }
-  bool TryAppendPart(const BlockPartV2& part) {
-    if (parts_.empty() || !parts_.back().TryExtend(part)) {
-      parts_.push_back(part);
-      return false;
-    }
-    return true;
-  }
-  void AppendPartsFrom(BlockV2* src) {
-    AppendBlockPartsTail(&parts_, &src->parts_);
-  }
-  void AddPart(BlockPartV2 part) { parts_.push_back(std::move(part)); }
-
-  std::vector<BlockPartV2> parts_;
-
- public:
   PoolType pool_type_{PoolType::kLarge};
-#if defined(PADDLE_WITH_CUDA)
-  void ClearRemapSafety() {
-    owning_stream_ = nullptr;
-    remap_safe_event_.reset();
-    remap_pending_states_.clear();
-  }
-  void SetRemapSafety(gpuStream_t stream,
-                      std::shared_ptr<CUDAEventGuard> event) {
-    ClearRemapSafety();
-    owning_stream_ = stream;
-    remap_safe_event_ = std::move(event);
-  }
-  void CopyRemapSafetyFrom(const BlockV2& src) {
-    owning_stream_ = src.owning_stream_;
-    remap_safe_event_ = src.remap_safe_event_;
-    remap_pending_states_ = src.remap_pending_states_;
-  }
-  void AppendRemapSafety(gpuStream_t stream,
-                         std::shared_ptr<CUDAEventGuard> event) {
-    if (stream == nullptr && event == nullptr) {
-      return;
-    }
-    if (owning_stream_ == stream && remap_safe_event_.get() == event.get()) {
-      return;
-    }
-    for (const auto& state : remap_pending_states_) {
-      if (state.stream == stream && state.event.get() == event.get()) {
-        return;
-      }
-    }
-    if (owning_stream_ == nullptr && remap_safe_event_ == nullptr) {
-      owning_stream_ = stream;
-      remap_safe_event_ = std::move(event);
-      return;
-    }
-    remap_pending_states_.push_back({stream, std::move(event)});
-  }
-  void AppendRemapSafetyFrom(const BlockV2& src) {
-    AppendRemapSafety(src.owning_stream_, src.remap_safe_event_);
-    for (const auto& state : src.remap_pending_states_) {
-      AppendRemapSafety(state.stream, state.event);
-    }
-  }
-
-  gpuStream_t owning_stream_{nullptr};
-  std::shared_ptr<CUDAEventGuard> remap_safe_event_;
-  std::vector<VMMBlockRemapState> remap_pending_states_;
-#endif
 };
 
 }  // namespace allocation

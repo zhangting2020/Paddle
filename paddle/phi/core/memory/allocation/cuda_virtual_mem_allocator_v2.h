@@ -50,12 +50,6 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
     BlockV2 block;
   };
 
-  struct StagedAllocationWithBlock {
-    Allocation* allocation{nullptr};
-    BlockV2 block;
-    size_t bytes{0};
-  };
-
   struct AllocationLayoutRegistry {
     void Add(void* ptr, const HandleLayout& layout);
     bool Lookup(void* ptr, HandleLayout* layout) const;
@@ -79,8 +73,8 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   VMMDevicePtr VirtualMemBase() const { return virtual_mem_base_; }
   size_t VirtualMemSize() const { return virtual_mem_size_; }
   size_t TailOffset() const { return virtual_mem_alloced_offset_; }
-  // Best-fit/remap layers may consume VA from the reserved range incrementally.
-  // V2 keeps this as an explicit cursor instead of reusing V1's
+  // Best-fit layers may consume VA from the reserved range incrementally. V2
+  // keeps this as an explicit cursor instead of reusing V1's
   // virtual_2_physical_map_ bookkeeping.
   void AdvanceTailOffset(size_t bytes) { virtual_mem_alloced_offset_ += bytes; }
   // Retreat the tail cursor when the compactor discovers that blocks no
@@ -91,48 +85,14 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   void RollbackMappedHandleRange(VMMDevicePtr ptr, size_t handle_count);
   bool MoveBackingPage(const VMMBackingMap::MappedPage& source,
                        const VMMBackingMap::UnmappedPage& target);
-  bool MoveBackingPageForRemap(const VMMBackingMap::MappedPage& source,
-                               const VMMBackingMap::UnmappedPage& target,
-                               const std::shared_ptr<VMMHandleMeta>& meta);
-  enum class RestoreRemapSourceResult : uint8_t {
-    kSkipped = 0,
-    kRestored = 1,
-    kForceReleased = 2,
-  };
-  RestoreRemapSourceResult RestoreRemapSourceMapping(
-      VMMAllocHandle handle,
-      const std::shared_ptr<VMMHandleMeta>& meta,
-      size_t size);
-  RestoreRemapSourceResult ForceReleaseRestoredRemapSourceMapping(
-      VMMAllocHandle handle,
-      const std::shared_ptr<VMMHandleMeta>& meta,
-      size_t size,
-      const char* context,
-      bool unmap_mapped_source);
 
   const GPUPlace& place() const { return place_; }
   AllocationWithBlock AppendWithBlock(size_t size);
   // Create fresh physical backing and map it at an existing reserved VA range.
   // This is used by upper layers to reuse unmapped-free VA space in place.
   AllocationWithBlock PlaceAtVAWithBlock(VMMDevicePtr ptr, size_t size);
-  bool IsAllocationOwnedByRemapDestination(void* ptr) const;
-
-  // Create a staged synthetic Allocation and mapped-free block for handles
-  // moved by remap compaction. The handles already exist (cuMemCreate was done
-  // earlier); rollback paths must explicitly destroy the staged allocation
-  // before discarding the block view.
-  StagedAllocationWithBlock CreateStagedRemapDestinationAllocationWithBlock(
-      VMMDevicePtr ptr,
-      const std::vector<VMMAllocHandle>& handles,
-      size_t start,
-      size_t count,
-      PoolType pool_type);
-  DecoratedAllocationPtr AdoptCommittedSyntheticAllocation(
-      Allocation* allocation);
-  void DestroyStagedSyntheticAllocation(Allocation* allocation);
-
   // Phase-1 BackingMap mirror hooks for driver operations that still happen
-  // outside the bottom allocator (e.g. compactor rollback).
+  // outside the bottom allocator.
   void MarkBackingMapped(VMMDevicePtr ptr, VMMAllocHandle handle, size_t size);
   void MarkBackingUnmapped(VMMDevicePtr ptr, size_t size);
   void MarkBackingReleased(VMMDevicePtr ptr,
@@ -141,24 +101,14 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   bool IsRangeReleasable(VMMDevicePtr ptr, size_t size) const;
   bool IsRangeReusable(VMMDevicePtr ptr, size_t size) const;
   bool IsDriverVaRangeUnmapped(VMMDevicePtr ptr, size_t size) const;
-  bool SetBlockRemapEvent(const BlockV2& block,
-                          gpuStream_t stream,
-                          std::shared_ptr<CUDAEventGuard> event);
   bool IsBlockReusableForAllocation(const BlockV2& block) const;
   bool ValidateBackingLayout(const HandleLayout& layout,
                              const char* context) const;
   std::vector<VMMBackingMap::MappedPage> CollectMappedPages(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
       size_t target_bytes) const;
-  std::vector<VMMBackingMap::MappedPage> CollectRemapSourcePages(
-      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
-      size_t target_bytes) const;
   std::vector<VMMBackingMap::UnmappedPage> CollectUnmappedPages(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
-      size_t target_bytes) const;
-  VMMBackingMap::CompactCandidates CollectCompactCandidates(
-      const std::vector<std::pair<VMMDevicePtr, size_t>>& source_ranges,
-      const std::vector<std::pair<VMMDevicePtr, size_t>>& target_ranges,
       size_t target_bytes) const;
   bool ValidateMappedPages(const std::vector<VMMBackingMap::MappedPage>& pages,
                            const char* context) const;
@@ -173,17 +123,12 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
  private:
   void InitOnce();
   bool IsReservedVaRange(VMMDevicePtr ptr, size_t size) const;
-  bool SetRemapEvent(VMMDevicePtr ptr,
-                     size_t size,
-                     gpuStream_t stream,
-                     std::shared_ptr<CUDAEventGuard> event);
   void MapHandlesToVA(
       VMMDevicePtr ptr,
       const std::vector<VMMAllocHandle>& hs,
       const std::vector<std::shared_ptr<VMMHandleMeta>>* metas = nullptr);
   void RollbackCreatedHandles(const HandleLayout& layout) const;
   void MarkLayoutMapped(const HandleLayout& layout);
-  void MarkRemapDestinationLayoutMapped(const HandleLayout& layout);
   AllocationWithLayout AppendWithLayout(size_t size);
   AllocationWithLayout PlaceAtVAWithLayout(VMMDevicePtr ptr, size_t size);
   HandleLayout CreateMappedHandleLayout(VMMDevicePtr ptr,
@@ -194,10 +139,6 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
                         size_t num_handles,
                         const char* context);
   bool CollectAllocationHandleLayout(void* ptr, HandleLayout* layout) const;
-  bool IsRemapDestinationOwnedLayout(const HandleLayout& layout) const;
-  Allocation* CreateStagedSyntheticAllocation(VMMDevicePtr ptr,
-                                              size_t size,
-                                              const HandleLayout& layout);
   AllocationWithLayout WrapTrackedAllocation(VMMDevicePtr ptr,
                                              size_t size,
                                              HandleLayout layout,

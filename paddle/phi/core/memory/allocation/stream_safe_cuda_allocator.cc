@@ -260,15 +260,13 @@ uint64_t StreamSafeCUDAAllocator::ReleaseImpl(const Place& place) {
   return released_size;
 }
 
-size_t StreamSafeCUDAAllocator::CompactImpl(const Place& place,
-                                            size_t requested_size) {
+size_t StreamSafeCUDAAllocator::CompactImpl(const Place& place) {
   std::lock_guard<SpinLock> lock_guard(allocator_map_lock_);
   VLOG(4) << "enter StreamSafeCUDAAllocator compact!!";
   std::vector<StreamSafeCUDAAllocator*>& allocators = allocator_map_[place];
   size_t compact_free_size = 0;
   for (StreamSafeCUDAAllocator* allocator : allocators) {
-    compact_free_size +=
-        allocator->underlying_allocator_->Compact(place_, requested_size);
+    compact_free_size += allocator->underlying_allocator_->Compact(place_);
   }
   return compact_free_size;
 }

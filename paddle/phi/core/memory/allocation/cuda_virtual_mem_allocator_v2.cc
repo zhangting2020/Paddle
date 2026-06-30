@@ -150,13 +150,6 @@ void CUDAVirtualMemAllocatorV2::MarkLayoutMapped(const HandleLayout& layout) {
   }
 }
 
-void CUDAVirtualMemAllocatorV2::MarkRemapDestinationLayoutMapped(
-    const HandleLayout& layout) {
-  for (const auto& meta : layout) {
-    backing_map_.MarkRemapDestinationMapped(meta->Base(), meta, meta->Size());
-  }
-}
-
 void CUDAVirtualMemAllocatorV2::InitOnce() {
   std::call_once(init_flag_, [this] {
     platform::CUDADeviceGuard guard(place_.device);
@@ -185,7 +178,7 @@ void CUDAVirtualMemAllocatorV2::InitOnce() {
                           "VA multiplier %d for pool %d overflows size_t.",
                           va_multiplier,
                           static_cast<int>(pool_type_)));
-    // Reserves VA by pool to leave room for later split/remap growth.
+    // Reserve VA by pool to leave room for later split and in-place reuse.
     virtual_mem_size_ = AlignedSize(actual_total * va_multiplier, granularity_);
     PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cuMemAddressReserve(
         &virtual_mem_base_, virtual_mem_size_, 0, 0, 0));
@@ -368,57 +361,19 @@ bool CUDAVirtualMemAllocatorV2::CollectAllocationHandleLayout(
   return allocation_layouts_.Lookup(ptr, layout);
 }
 
-bool CUDAVirtualMemAllocatorV2::IsRemapDestinationOwnedLayout(
-    const HandleLayout& layout) const {
-  return std::all_of(layout.begin(), layout.end(), [](const auto& handle) {
-    return handle != nullptr && handle->IsOwnedByRemapDestination();
-  });
-}
-
-bool CUDAVirtualMemAllocatorV2::IsAllocationOwnedByRemapDestination(
-    void* ptr) const {
-  HandleLayout layout;
-  if (!CollectAllocationHandleLayout(ptr, &layout)) {
-    return false;
-  }
-  return IsRemapDestinationOwnedLayout(layout);
-}
-
 void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   auto* ptr = allocation->ptr();
   HandleLayout layout = RequireHandleLayout(ptr);
 
   platform::CUDADeviceGuard guard(place_.device);
   for (const auto& handle : layout) {
-    if (handle->IsOwnedByRemapDestination()) {
-      VLOG(5) << "FreeImpl: skipping remap-destination-owned handle base="
-              << reinterpret_cast<void*>(handle->Base())
-              << " size=" << handle->Size();
-      continue;
-    }
     PADDLE_ENFORCE_GPU_SUCCESS(
         phi::dynload::cuMemUnmap(handle->Base(), handle->Size()));
     backing_map_.MarkUnmapped(handle->Base(), handle->Size());
-    // Use non-throwing release: if the handle was already released by a
-    // subsequent compactor remap (which created a new synthetic allocation
-    // for the same physical handle), cuMemRelease returns
-    // CUDA_ERROR_INVALID_VALUE. This is expected and safe to ignore:
-    // the handle's physical memory is now owned by the newer synthetic
-    // allocation.
-    auto release_status = platform::RecordedGpuMemRelease(
-        handle->AllocationHandle(), handle->Size(), place_.device);
-    if (release_status != CUDA_SUCCESS) {
-      VLOG(0) << "FreeImpl: cuMemRelease returned " << release_status
-              << " for handle " << handle->AllocationHandle()
-              << " base=" << reinterpret_cast<void*>(handle->Base())
-              << " size=" << handle->Size() << " owned_by_remap_destination="
-              << handle->IsOwnedByRemapDestination()
-              << " (likely already released by remap ownership transfer), "
-              << "skipping";
-    } else {
-      backing_map_.MarkReleased(
-          handle->Base(), handle->AllocationHandle(), handle->Size());
-    }
+    PADDLE_ENFORCE_GPU_SUCCESS(platform::RecordedGpuMemRelease(
+        handle->AllocationHandle(), handle->Size(), place_.device));
+    backing_map_.MarkReleased(
+        handle->Base(), handle->AllocationHandle(), handle->Size());
   }
 
   UnregisterHandleLayout(ptr);
@@ -532,92 +487,13 @@ bool CUDAVirtualMemAllocatorV2::MoveBackingPage(
   return true;
 }
 
-bool CUDAVirtualMemAllocatorV2::MoveBackingPageForRemap(
-    const VMMBackingMap::MappedPage& source,
-    const VMMBackingMap::UnmappedPage& target,
-    const std::shared_ptr<VMMHandleMeta>& meta) {
-  if (!MoveBackingPage(source, target)) {
-    return false;
-  }
-  meta->MarkOwnedByRemapDestination();
-  return true;
-}
-
-CUDAVirtualMemAllocatorV2::RestoreRemapSourceResult
-CUDAVirtualMemAllocatorV2::RestoreRemapSourceMapping(
-    VMMAllocHandle handle,
-    const std::shared_ptr<VMMHandleMeta>& meta,
-    size_t size) {
-  if (meta == nullptr || !meta->IsOwnedByRemapDestination()) {
-    return RestoreRemapSourceResult::kSkipped;
-  }
-
-  platform::CUDADeviceGuard guard(place_.device);
-  const VMMDevicePtr original_va = meta->Base();
-  auto map_status = phi::dynload::cuMemMap(original_va, size, 0, handle, 0);
-  if (map_status != CUDA_SUCCESS) {
-    VLOG(0) << "RestoreRemapSourceMapping: cuMemMap("
-            << reinterpret_cast<void*>(original_va)
-            << ") failed status=" << map_status << ", force-releasing handle";
-    return ForceReleaseRestoredRemapSourceMapping(
-        handle, meta, size, "cuMemMap", false);
-  }
-
-  auto access_status = phi::dynload::cuMemSetAccess(
-      original_va, size, access_desc_.data(), access_desc_.size());
-  if (access_status != CUDA_SUCCESS) {
-    VLOG(0) << "RestoreRemapSourceMapping: cuMemSetAccess failed for VA "
-            << reinterpret_cast<void*>(original_va)
-            << " status=" << access_status;
-    phi::dynload::cuMemUnmap(original_va, size);
-    return ForceReleaseRestoredRemapSourceMapping(
-        handle, meta, size, "cuMemSetAccess", false);
-  }
-
-  backing_map_.MarkMapped(original_va, meta, size);
-  return RestoreRemapSourceResult::kRestored;
-}
-
-CUDAVirtualMemAllocatorV2::RestoreRemapSourceResult
-CUDAVirtualMemAllocatorV2::ForceReleaseRestoredRemapSourceMapping(
-    VMMAllocHandle handle,
-    const std::shared_ptr<VMMHandleMeta>& meta,
-    size_t size,
-    const char* context,
-    bool unmap_mapped_source) {
-  platform::CUDADeviceGuard guard(place_.device);
-  const VMMDevicePtr original_va = meta->Base();
-  if (unmap_mapped_source) {
-    auto unmap_status = phi::dynload::cuMemUnmap(original_va, size);
-    if (unmap_status == CUDA_SUCCESS) {
-      backing_map_.MarkUnmapped(original_va, size);
-    } else {
-      VLOG(0) << "RestoreRemapSourceMapping: force-release rollback "
-              << "cuMemUnmap failed for VA "
-              << reinterpret_cast<void*>(original_va)
-              << " status=" << unmap_status;
-    }
-  }
-
-  auto release_status =
-      platform::RecordedGpuMemRelease(handle, size, place_.device);
-  if (release_status == CUDA_SUCCESS) {
-    backing_map_.MarkReleased(original_va, handle, size);
-  } else {
-    VLOG(0) << "RestoreRemapSourceMapping: force-release after "
-            << (context == nullptr ? "unknown" : context)
-            << " failure returned status=" << release_status;
-  }
-  return RestoreRemapSourceResult::kForceReleased;
-}
-
 void CUDAVirtualMemAllocatorV2::MapHandlesToVA(
     VMMDevicePtr ptr,
     const std::vector<VMMAllocHandle>& hs,
     const std::vector<std::shared_ptr<VMMHandleMeta>>* metas) {
   platform::CUDADeviceGuard guard(place_.device);
-  // V2 currently assumes one uniform handle size per pool, so remap can
-  // re-materialize a contiguous VA range by replaying fixed-size mappings.
+  // V2 currently assumes one uniform handle size per pool, so an existing
+  // handle layout can be re-materialized by replaying fixed-size mappings.
   VLOG(10) << "MapHandlesToVA dst=" << reinterpret_cast<void*>(ptr)
            << " handle_count=" << hs.size() << " handle_size=" << handle_size_
            << " total_bytes=" << hs.size() * handle_size_
@@ -691,11 +567,11 @@ CUDAVirtualMemAllocatorV2::AllocationWithBlock
 CUDAVirtualMemAllocatorV2::BuildAllocationWithBlock(
     AllocationWithLayout allocation_with_layout) {
   AllocationWithBlock result;
-  result.block = BlockV2::MakeMappedFreeBlockFromLayout(
-      allocation_with_layout.allocation->ptr(),
-      allocation_with_layout.allocation->size(),
-      allocation_with_layout.layout,
-      pool_type_);
+  result.block =
+      BlockV2::MakeMappedBlock(BlockType::kFree,
+                               allocation_with_layout.allocation->ptr(),
+                               allocation_with_layout.allocation->size(),
+                               pool_type_);
   result.allocation = std::move(allocation_with_layout.allocation);
   return result;
 }
@@ -728,80 +604,6 @@ HandleLayout CUDAVirtualMemAllocatorV2::RequireHandleLayout(void* ptr) const {
 
 void CUDAVirtualMemAllocatorV2::UnregisterHandleLayout(void* ptr) {
   allocation_layouts_.Remove(ptr);
-}
-
-Allocation* CUDAVirtualMemAllocatorV2::CreateStagedSyntheticAllocation(
-    VMMDevicePtr ptr, size_t size, const HandleLayout& layout) {
-  return CreateTrackedAllocation(ptr, size, layout);
-}
-
-CUDAVirtualMemAllocatorV2::StagedAllocationWithBlock
-CUDAVirtualMemAllocatorV2::CreateStagedRemapDestinationAllocationWithBlock(
-    VMMDevicePtr ptr,
-    const std::vector<VMMAllocHandle>& handles,
-    size_t start,
-    size_t count,
-    PoolType pool_type) {
-  HandleLayout layout;
-  layout.reserve(count);
-  for (size_t i = 0; i < count; ++i) {
-    auto meta =
-        std::make_shared<VMMHandleMeta>(VMMHandleMeta{ptr + i * handle_size_,
-                                                      handle_size_,
-                                                      handles[start + i],
-                                                      place_.device});
-    layout.push_back(std::move(meta));
-  }
-
-  StagedAllocationWithBlock result;
-  result.bytes = count * handle_size_;
-  try {
-    result.allocation =
-        CreateStagedSyntheticAllocation(ptr, result.bytes, layout);
-    result.block = BlockV2::MakeMappedFreeBlockFromLayout(
-        reinterpret_cast<void*>(ptr), result.bytes, layout, pool_type);
-    MarkRemapDestinationLayoutMapped(layout);
-  } catch (const std::exception& e) {
-    VLOG(0) << "CreateStagedRemapDestinationAllocationWithBlock: failed to "
-               "materialize destination, destroying staged allocation. dst="
-            << reinterpret_cast<void*>(ptr) << " bytes=" << result.bytes
-            << " start=" << start << " count=" << count
-            << " error=" << e.what();
-    DestroyStagedSyntheticAllocation(result.allocation);
-    result.allocation = nullptr;
-    throw;
-  } catch (...) {
-    VLOG(0) << "CreateStagedRemapDestinationAllocationWithBlock: unknown "
-               "failure while materializing destination, destroying staged "
-               "allocation. dst="
-            << reinterpret_cast<void*>(ptr) << " bytes=" << result.bytes
-            << " start=" << start << " count=" << count;
-    DestroyStagedSyntheticAllocation(result.allocation);
-    result.allocation = nullptr;
-    throw;
-  }
-  return result;
-}
-
-DecoratedAllocationPtr
-CUDAVirtualMemAllocatorV2::AdoptCommittedSyntheticAllocation(
-    Allocation* allocation) {
-  // Use a custom deleter that calls FreeImpl directly, since the
-  // synthetic allocation bypasses the normal Allocate() path and
-  // cannot use RegisterDecoratedAllocator (which is private).
-  CUDAVirtualMemAllocatorV2* self = this;
-  return DecoratedAllocationPtr(allocation, [self](phi::Allocation* a) {
-    self->FreeImpl(static_cast<Allocation*>(a));
-  });
-}
-
-void CUDAVirtualMemAllocatorV2::DestroyStagedSyntheticAllocation(
-    Allocation* allocation) {
-  if (allocation == nullptr) {
-    return;
-  }
-  UnregisterHandleLayout(allocation->ptr());
-  delete allocation;
 }
 
 void CUDAVirtualMemAllocatorV2::MarkBackingMapped(VMMDevicePtr ptr,
@@ -854,25 +656,6 @@ bool CUDAVirtualMemAllocatorV2::IsDriverVaRangeUnmapped(VMMDevicePtr ptr,
   return true;
 }
 
-bool CUDAVirtualMemAllocatorV2::SetBlockRemapEvent(
-    const BlockV2& block,
-    gpuStream_t stream,
-    std::shared_ptr<CUDAEventGuard> event) {
-  if (!IsReservedVaRange(block.BeginVA(), block.Size())) {
-    return false;
-  }
-  return SetRemapEvent(block.BeginVA(), block.Size(), stream, event);
-}
-
-bool CUDAVirtualMemAllocatorV2::SetRemapEvent(
-    VMMDevicePtr ptr,
-    size_t size,
-    gpuStream_t stream,
-    std::shared_ptr<CUDAEventGuard> event) {
-  return backing_map_.MarkPendingEventForRange(
-      ptr, size, stream, std::move(event));
-}
-
 bool CUDAVirtualMemAllocatorV2::IsBlockReusableForAllocation(
     const BlockV2& block) const {
   if (!IsReservedVaRange(block.BeginVA(), block.Size())) {
@@ -896,14 +679,6 @@ CUDAVirtualMemAllocatorV2::CollectMappedPages(
   return backing_map_.CollectMappedPagesFullyCoveredBy(ranges, target_bytes);
 }
 
-std::vector<VMMBackingMap::MappedPage>
-CUDAVirtualMemAllocatorV2::CollectRemapSourcePages(
-    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
-    size_t target_bytes) const {
-  return backing_map_.CollectRemapSourcePagesFullyCoveredBy(ranges,
-                                                            target_bytes);
-}
-
 std::vector<VMMBackingMap::UnmappedPage>
 CUDAVirtualMemAllocatorV2::CollectUnmappedPages(
     const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
@@ -912,15 +687,6 @@ CUDAVirtualMemAllocatorV2::CollectUnmappedPages(
     return backing_map_.CollectUnmappedPagesFullyCoveredBy(ranges);
   }
   return backing_map_.CollectUnmappedPagesFullyCoveredBy(ranges, target_bytes);
-}
-
-VMMBackingMap::CompactCandidates
-CUDAVirtualMemAllocatorV2::CollectCompactCandidates(
-    const std::vector<std::pair<VMMDevicePtr, size_t>>& source_ranges,
-    const std::vector<std::pair<VMMDevicePtr, size_t>>& target_ranges,
-    size_t target_bytes) const {
-  return backing_map_.CollectCompactCandidates(
-      source_ranges, target_ranges, target_bytes);
 }
 
 bool CUDAVirtualMemAllocatorV2::ValidateMappedPages(
