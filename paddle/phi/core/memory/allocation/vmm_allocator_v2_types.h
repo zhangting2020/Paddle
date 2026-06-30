@@ -103,17 +103,12 @@ struct BlockV2 {
   bool IsUnmappedFree() const { return type_ == BlockType::kUnmappedFree; }
   void* Ptr() const { return ptr_; }
   size_t Size() const { return size_; }
-  PoolType Pool() const { return pool_type_; }
   uint8_t* BeginPtr() const { return reinterpret_cast<uint8_t*>(ptr_); }
   uint8_t* EndPtr() const { return BeginPtr() + size_; }
   VMMDevicePtr BeginVA() const {
     return reinterpret_cast<VMMDevicePtr>(BeginPtr());
   }
   VMMDevicePtr EndVA() const { return BeginVA() + size_; }
-  std::pair<VMMDevicePtr, size_t> VARange() const { return {BeginVA(), size_}; }
-  bool ContainsVARange(VMMDevicePtr va, size_t size) const {
-    return va >= BeginVA() && va <= EndVA() && size <= EndVA() - va;
-  }
   bool IsAdjacentBefore(const BlockV2& next) const {
     return EndPtr() == next.BeginPtr();
   }
@@ -123,21 +118,19 @@ struct BlockV2 {
   bool CanAbsorbAdjacentUnmappedFreeBlock(const BlockV2& next) const {
     return IsUnmappedFree() && next.IsUnmappedFree() && IsAdjacentBefore(next);
   }
-  BlockV2 MakeMappedSubBlock(BlockType type, size_t offset, size_t len) const {
-    return MakeMappedBlock(type, BeginPtr() + offset, len, pool_type_);
-  }
   BlockV2 MakeMappedFreeSubBlock(size_t offset, size_t len) const {
-    return MakeMappedSubBlock(BlockType::kFree, offset, len);
+    return MakeMappedBlock(
+        BlockType::kFree, BeginPtr() + offset, len, pool_type_);
   }
   BlockV2 MakeMappedActiveSubBlock(size_t offset, size_t len) const {
-    return MakeMappedSubBlock(BlockType::kActive, offset, len);
+    return MakeMappedBlock(
+        BlockType::kActive, BeginPtr() + offset, len, pool_type_);
   }
   BlockV2 MakeUnmappedFreeSubBlock(size_t offset, size_t len) const {
     return MakeUnmappedFreeBlock(BeginPtr() + offset, len, pool_type_);
   }
   void MarkActive() { type_ = BlockType::kActive; }
   void MarkFree() { type_ = BlockType::kFree; }
-  void MarkMappedFree() { MarkFree(); }
   void MarkUnmappedFree() { type_ = BlockType::kUnmappedFree; }
   void Reset(void* ptr, size_t size, BlockType type, PoolType pool_type) {
     ptr_ = ptr;
