@@ -381,97 +381,6 @@ void CUDAVirtualMemAllocatorV2::RollbackMappedHandleRange(VMMDevicePtr ptr,
   }
 }
 
-bool CUDAVirtualMemAllocatorV2::MoveBackingPage(
-    const VMMBackingMap::MappedPage& source,
-    const VMMBackingMap::UnmappedPage& target) {
-  if (!ValidateMappedPages({source}, "MoveBackingPage::source") ||
-      !ValidateUnmappedPages({target}, "MoveBackingPage::target")) {
-    return false;
-  }
-  platform::CUDADeviceGuard guard(place_.device);
-
-  auto unmap_source_status = phi::dynload::cuMemUnmap(source.va, handle_size_);
-  if (unmap_source_status != CUDA_SUCCESS) {
-    VLOG(0) << "MoveBackingPage: source cuMemUnmap failed at "
-            << reinterpret_cast<void*>(source.va)
-            << " status=" << unmap_source_status;
-    return false;
-  }
-  backing_map_.MarkUnmapped(source.va, handle_size_);
-
-  auto restore_source = [&]() {
-    auto restore_status =
-        phi::dynload::cuMemMap(source.va, handle_size_, 0, source.handle, 0);
-    if (restore_status != CUDA_SUCCESS) {
-      VLOG(0) << "MoveBackingPage: failed to restore source mapping at "
-              << reinterpret_cast<void*>(source.va)
-              << " status=" << restore_status;
-      return false;
-    }
-    auto access_status = phi::dynload::cuMemSetAccess(
-        source.va, handle_size_, access_desc_.data(), access_desc_.size());
-    if (access_status != CUDA_SUCCESS) {
-      VLOG(0) << "MoveBackingPage: failed to restore source access at "
-              << reinterpret_cast<void*>(source.va)
-              << " status=" << access_status;
-      phi::dynload::cuMemUnmap(source.va, handle_size_);
-      return false;
-    }
-    if (source.meta != nullptr) {
-      backing_map_.MarkMapped(source.va, source.meta, handle_size_);
-    } else {
-      backing_map_.MarkMapped(source.va, source.handle, handle_size_);
-    }
-    return true;
-  };
-
-  auto map_target_status =
-      phi::dynload::cuMemMap(target.va, handle_size_, 0, source.handle, 0);
-  if (map_target_status != CUDA_SUCCESS) {
-    VLOG(0) << "MoveBackingPage: target cuMemMap failed at "
-            << reinterpret_cast<void*>(target.va)
-            << " status=" << map_target_status;
-    if (!restore_source()) {
-      VLOG(0) << "MoveBackingPage: source restore also failed after target "
-                 "cuMemMap failure; source VA remains unmapped, source="
-              << reinterpret_cast<void*>(source.va)
-              << " target=" << reinterpret_cast<void*>(target.va)
-              << " handle=" << reinterpret_cast<void*>(source.handle);
-    }
-    return false;
-  }
-
-  auto access_status = phi::dynload::cuMemSetAccess(
-      target.va, handle_size_, access_desc_.data(), access_desc_.size());
-  if (access_status != CUDA_SUCCESS) {
-    VLOG(0) << "MoveBackingPage: target cuMemSetAccess failed at "
-            << reinterpret_cast<void*>(target.va)
-            << " status=" << access_status;
-    auto unmap_target_status =
-        phi::dynload::cuMemUnmap(target.va, handle_size_);
-    if (unmap_target_status != CUDA_SUCCESS) {
-      VLOG(0) << "MoveBackingPage: target rollback cuMemUnmap failed at "
-              << reinterpret_cast<void*>(target.va)
-              << " status=" << unmap_target_status;
-    }
-    if (!restore_source()) {
-      VLOG(0) << "MoveBackingPage: source restore also failed after target "
-                 "cuMemSetAccess failure; source VA remains unmapped, source="
-              << reinterpret_cast<void*>(source.va)
-              << " target=" << reinterpret_cast<void*>(target.va)
-              << " handle=" << reinterpret_cast<void*>(source.handle);
-    }
-    return false;
-  }
-
-  if (source.meta != nullptr) {
-    backing_map_.MarkMapped(target.va, source.meta, handle_size_);
-  } else {
-    backing_map_.MarkMapped(target.va, source.handle, handle_size_);
-  }
-  return true;
-}
-
 void CUDAVirtualMemAllocatorV2::MapHandlesToVA(
     VMMDevicePtr ptr,
     const std::vector<VMMAllocHandle>& hs,
@@ -581,23 +490,6 @@ void CUDAVirtualMemAllocatorV2::UnregisterHandleLayout(void* ptr) {
   allocation_layouts_.Remove(ptr);
 }
 
-void CUDAVirtualMemAllocatorV2::MarkBackingMapped(VMMDevicePtr ptr,
-                                                  VMMAllocHandle handle,
-                                                  size_t size) {
-  backing_map_.MarkMapped(ptr, handle, size);
-}
-
-void CUDAVirtualMemAllocatorV2::MarkBackingUnmapped(VMMDevicePtr ptr,
-                                                    size_t size) {
-  backing_map_.MarkUnmapped(ptr, size);
-}
-
-void CUDAVirtualMemAllocatorV2::MarkBackingReleased(VMMDevicePtr ptr,
-                                                    VMMAllocHandle handle,
-                                                    size_t size) {
-  backing_map_.MarkReleased(ptr, handle, size);
-}
-
 bool CUDAVirtualMemAllocatorV2::IsRangeReleasable(VMMDevicePtr ptr,
                                                   size_t size) const {
   return backing_map_.IsRangeReleasable(ptr, size);
@@ -606,43 +498,6 @@ bool CUDAVirtualMemAllocatorV2::IsRangeReleasable(VMMDevicePtr ptr,
 bool CUDAVirtualMemAllocatorV2::IsRangeReusable(VMMDevicePtr ptr,
                                                 size_t size) const {
   return backing_map_.IsRangeReusableForAllocation(ptr, size);
-}
-
-bool CUDAVirtualMemAllocatorV2::ValidateBackingLayout(
-    const HandleLayout& layout, const char* context) const {
-  return backing_map_.ValidateLayout(layout, context);
-}
-
-std::vector<VMMBackingMap::MappedPage>
-CUDAVirtualMemAllocatorV2::CollectMappedPages(
-    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
-    size_t target_bytes) const {
-  if (target_bytes == 0) {
-    return backing_map_.CollectMappedPagesFullyCoveredBy(ranges);
-  }
-  return backing_map_.CollectMappedPagesFullyCoveredBy(ranges, target_bytes);
-}
-
-std::vector<VMMBackingMap::UnmappedPage>
-CUDAVirtualMemAllocatorV2::CollectUnmappedPages(
-    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
-    size_t target_bytes) const {
-  if (target_bytes == 0) {
-    return backing_map_.CollectUnmappedPagesFullyCoveredBy(ranges);
-  }
-  return backing_map_.CollectUnmappedPagesFullyCoveredBy(ranges, target_bytes);
-}
-
-bool CUDAVirtualMemAllocatorV2::ValidateMappedPages(
-    const std::vector<VMMBackingMap::MappedPage>& pages,
-    const char* context) const {
-  return backing_map_.ValidateMappedPages(pages, context);
-}
-
-bool CUDAVirtualMemAllocatorV2::ValidateUnmappedPages(
-    const std::vector<VMMBackingMap::UnmappedPage>& pages,
-    const char* context) const {
-  return backing_map_.ValidateUnmappedPages(pages, context);
 }
 
 }  // namespace allocation

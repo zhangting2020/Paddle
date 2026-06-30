@@ -195,17 +195,6 @@ TEST(CUDAVirtualMemAllocatorV2, AppendWithBlockReturnsMappedFreeBlock) {
   ASSERT_EQ(block.size_, allocation_with_block.allocation->size());
   EXPECT_EQ(block.ptr_, allocation_with_block.allocation->ptr());
   EXPECT_TRUE(block.IsMappedFree());
-
-  auto base =
-      reinterpret_cast<VMMDevicePtr>(allocation_with_block.allocation->ptr());
-  std::vector<std::pair<VMMDevicePtr, size_t>> ranges = {
-      {base, allocation_with_block.allocation->size()}};
-  auto pages = allocator.CollectMappedPages(
-      ranges, allocation_with_block.allocation->size());
-  ASSERT_EQ(pages.size(), 2UL);
-  for (size_t i = 0; i < pages.size(); ++i) {
-    EXPECT_EQ(pages[i].va, base + i * allocator.HandleSize());
-  }
 }
 
 TEST(CUDAVirtualMemAllocatorV2, FreeRemovesHandleRegistration) {
@@ -223,51 +212,6 @@ TEST(CUDAVirtualMemAllocatorV2, FreeRemovesHandleRegistration) {
       reinterpret_cast<VMMDevicePtr>(ptr), allocator.HandleSize());
   ASSERT_NE(reused.allocation, nullptr);
   EXPECT_EQ(reused.allocation->ptr(), ptr);
-}
-
-TEST(CUDAVirtualMemAllocatorV2, MoveBackingPageRoundTripsHandle) {
-  CUDAVirtualMemAllocatorV2 allocator(
-      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
-
-  auto allocation_with_block =
-      allocator.AppendWithBlock(allocator.HandleSize());
-  ASSERT_NE(allocation_with_block.allocation, nullptr);
-
-  const auto source_va =
-      reinterpret_cast<VMMDevicePtr>(allocation_with_block.allocation->ptr());
-  const auto target_va = allocator.VirtualMemBase() + allocator.TailOffset();
-  ASSERT_NE(source_va, target_va);
-
-  std::vector<std::pair<VMMDevicePtr, size_t>> source_ranges = {
-      {source_va, allocator.HandleSize()}};
-  std::vector<std::pair<VMMDevicePtr, size_t>> target_ranges = {
-      {target_va, allocator.HandleSize()}};
-  auto source_pages =
-      allocator.CollectMappedPages(source_ranges, allocator.HandleSize());
-  auto target_pages =
-      allocator.CollectUnmappedPages(target_ranges, allocator.HandleSize());
-  ASSERT_EQ(source_pages.size(), 1UL);
-  ASSERT_EQ(target_pages.size(), 1UL);
-
-  ASSERT_TRUE(allocator.MoveBackingPage(source_pages[0], target_pages[0]));
-  EXPECT_FALSE(allocator.ValidateUnmappedPages({target_pages[0]},
-                                               "unit_test_move_stale_target"));
-  EXPECT_FALSE(allocator.ValidateMappedPages({source_pages[0]},
-                                             "unit_test_move_stale_source"));
-  auto moved_pages =
-      allocator.CollectMappedPages(target_ranges, allocator.HandleSize());
-  auto source_unmapped_pages =
-      allocator.CollectUnmappedPages(source_ranges, allocator.HandleSize());
-  ASSERT_EQ(moved_pages.size(), 1UL);
-  ASSERT_EQ(source_unmapped_pages.size(), 1UL);
-  EXPECT_EQ(moved_pages[0].handle, source_pages[0].handle);
-
-  ASSERT_TRUE(
-      allocator.MoveBackingPage(moved_pages[0], source_unmapped_pages[0]));
-  auto restored_pages =
-      allocator.CollectMappedPages(source_ranges, allocator.HandleSize());
-  ASSERT_EQ(restored_pages.size(), 1UL);
-  EXPECT_EQ(restored_pages[0].handle, source_pages[0].handle);
 }
 
 }  // namespace allocation

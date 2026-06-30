@@ -83,36 +83,14 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   void SetTailOffset(size_t offset) { virtual_mem_alloced_offset_ = offset; }
 
   void RollbackMappedHandleRange(VMMDevicePtr ptr, size_t handle_count);
-  bool MoveBackingPage(const VMMBackingMap::MappedPage& source,
-                       const VMMBackingMap::UnmappedPage& target);
 
   const GPUPlace& place() const { return place_; }
   AllocationWithBlock AppendWithBlock(size_t size);
   // Create fresh physical backing and map it at an existing reserved VA range.
   // This is used by upper layers to reuse unmapped-free VA space in place.
   AllocationWithBlock PlaceAtVAWithBlock(VMMDevicePtr ptr, size_t size);
-  // Phase-1 BackingMap mirror hooks for driver operations that still happen
-  // outside the bottom allocator.
-  void MarkBackingMapped(VMMDevicePtr ptr, VMMAllocHandle handle, size_t size);
-  void MarkBackingUnmapped(VMMDevicePtr ptr, size_t size);
-  void MarkBackingReleased(VMMDevicePtr ptr,
-                           VMMAllocHandle handle,
-                           size_t size);
   bool IsRangeReleasable(VMMDevicePtr ptr, size_t size) const;
   bool IsRangeReusable(VMMDevicePtr ptr, size_t size) const;
-  bool ValidateBackingLayout(const HandleLayout& layout,
-                             const char* context) const;
-  std::vector<VMMBackingMap::MappedPage> CollectMappedPages(
-      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
-      size_t target_bytes) const;
-  std::vector<VMMBackingMap::UnmappedPage> CollectUnmappedPages(
-      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
-      size_t target_bytes) const;
-  bool ValidateMappedPages(const std::vector<VMMBackingMap::MappedPage>& pages,
-                           const char* context) const;
-  bool ValidateUnmappedPages(
-      const std::vector<VMMBackingMap::UnmappedPage>& pages,
-      const char* context) const;
 
  protected:
   phi::Allocation* AllocateImpl(size_t size) override;
