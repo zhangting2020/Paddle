@@ -67,20 +67,14 @@ class VMMBackingMap {
   std::vector<std::pair<VMMDevicePtr, size_t>> CollectUnmappedRanges(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const;
   std::vector<MappedPage> CollectMappedPages(
-      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const;
-  std::vector<MappedPage> CollectMappedPages(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
-      size_t target_bytes) const;
-  std::vector<MappedPage> CollectMappedPagesFullyCoveredBy(
-      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const;
+      size_t target_bytes = 0) const;
   std::vector<MappedPage> CollectMappedPagesFullyCoveredBy(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
-      size_t target_bytes) const;
-  std::vector<UnmappedPage> CollectUnmappedPagesFullyCoveredBy(
-      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const;
+      size_t target_bytes = 0) const;
   std::vector<UnmappedPage> CollectUnmappedPagesFullyCoveredBy(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
-      size_t target_bytes) const;
+      size_t target_bytes = 0) const;
   bool ValidateMappedPages(const std::vector<MappedPage>& pages,
                            const char* context) const;
   bool ValidateUnmappedPages(const std::vector<UnmappedPage>& pages,
