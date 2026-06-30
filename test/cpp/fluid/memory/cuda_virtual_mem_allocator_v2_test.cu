@@ -307,19 +307,6 @@ TEST(VMMBackingMap, MarksPendingEventForUnalignedRangeOnce) {
   ASSERT_EQ(cudaStreamDestroy(busy_stream), cudaSuccess);
 }
 
-TEST(CUDAVirtualMemAllocatorV2, DetectsDriverVARangeMapping) {
-  CUDAVirtualMemAllocatorV2 allocator(
-      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
-
-  auto allocation = allocator.Allocate(allocator.HandleSize());
-  ASSERT_NE(allocation, nullptr);
-  auto va = reinterpret_cast<VMMDevicePtr>(allocation->ptr());
-  EXPECT_FALSE(allocator.IsDriverVARangeUnmapped(va, allocator.HandleSize()));
-
-  allocation.reset();
-  EXPECT_TRUE(allocator.IsDriverVARangeUnmapped(va, allocator.HandleSize()));
-}
-
 TEST(CUDAVirtualMemAllocatorV2, AppendWithBlockReturnsMappedFreeBlock) {
   CUDAVirtualMemAllocatorV2 allocator(
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
@@ -493,28 +480,6 @@ TEST(CUDAVirtualMemAllocatorV2, StagedRemapDestinationBlocksSource) {
   staged.allocation = nullptr;
 }
 
-TEST(CUDAVirtualMemAllocatorV2, DetectsReusableBlockBacking) {
-  CUDAVirtualMemAllocatorV2 allocator(
-      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
-
-  auto allocation_with_block =
-      allocator.AppendWithBlock(allocator.HandleSize() * 2);
-  ASSERT_NE(allocation_with_block.allocation, nullptr);
-  BlockV2 block = allocation_with_block.block;
-  EXPECT_TRUE(allocator.IsBlockReusableForAllocation(block));
-
-  allocator.MarkBackingIpcExported(block.BeginVA(), allocator.HandleSize());
-  EXPECT_FALSE(allocator.IsBlockReusableForAllocation(block));
-
-  BlockV2 invalid_block = BlockV2::MakeMappedBlock(
-      BlockType::kFree,
-      reinterpret_cast<void*>(allocator.VirtualMemBase() -
-                              allocator.HandleSize()),
-      allocator.HandleSize(),
-      PoolType::kLarge);
-  EXPECT_FALSE(allocator.IsBlockReusableForAllocation(invalid_block));
-}
-
 TEST(CUDAVirtualMemAllocatorV2, CollectsAndPinsIpcBlockBacking) {
   CUDAVirtualMemAllocatorV2 allocator(
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
@@ -545,10 +510,10 @@ TEST(CUDAVirtualMemAllocatorV2, CollectsAndPinsIpcBlockBacking) {
   EXPECT_EQ(ipc_parts[1].chunk_rel_off, 0UL);
   EXPECT_EQ(ipc_parts[1].len, 2048UL);
 
-  EXPECT_TRUE(allocator.IsBlockReusableForAllocation(block));
+  EXPECT_TRUE(allocator.IsRangeReusable(block.BeginVA(), block.Size()));
   ASSERT_TRUE(allocator.MarkIpcExported(block.BeginVA(), block.Size()));
   EXPECT_TRUE(allocator.HasIpcExportedRange(block.BeginVA(), block.Size()));
-  EXPECT_FALSE(allocator.IsBlockReusableForAllocation(block));
+  EXPECT_FALSE(allocator.IsRangeReusable(block.BeginVA(), block.Size()));
 
   ASSERT_NE(pages[0].meta, nullptr);
   pages[0].meta->MarkOwnedByRemapDestination();
@@ -613,7 +578,7 @@ TEST(CUDAVirtualMemAllocatorV2, LazyPendingStreamBlocksRemapAndRelease) {
   ASSERT_EQ(cudaGetLastError(), cudaSuccess);
 
   ASSERT_TRUE(allocator.SetBlockRemapEvent(block, stream, nullptr));
-  EXPECT_TRUE(allocator.IsBlockReusableForAllocation(block));
+  EXPECT_TRUE(allocator.IsRangeReusable(block_base, allocator.HandleSize()));
   EXPECT_FALSE(allocator.IsRangeReleasable(block_base, allocator.HandleSize()));
   std::vector<std::pair<VMMDevicePtr, size_t>> ranges = {
       {block_base, allocator.HandleSize()}};
@@ -627,7 +592,7 @@ TEST(CUDAVirtualMemAllocatorV2, LazyPendingStreamBlocksRemapAndRelease) {
             VMMBackingMap::RemapSourceState::kPendingEvent);
 
   ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
-  EXPECT_TRUE(allocator.IsBlockReusableForAllocation(block));
+  EXPECT_TRUE(allocator.IsRangeReusable(block_base, allocator.HandleSize()));
   EXPECT_TRUE(allocator.IsRangeReleasable(block_base, allocator.HandleSize()));
   remap_sources =
       allocator.CollectRemapSourcePages(ranges, allocator.HandleSize());

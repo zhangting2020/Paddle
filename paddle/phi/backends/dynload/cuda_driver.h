@@ -67,7 +67,6 @@ extern bool HasCUDADriver();
   __macro(cuMemCreate);                            \
   __macro(cuMemMap);                               \
   __macro(cuMemSetAccess);                         \
-  __macro(cuMemRetainAllocationHandle);            \
   __macro(cuMemUnmap);                             \
   __macro(cuMemRelease);                           \
   __macro(cuMemAddressFree);                       \
