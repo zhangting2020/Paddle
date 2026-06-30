@@ -55,7 +55,7 @@ std::vector<std::pair<VMMDevicePtr, size_t>> CollectFreeRanges(
     if (!block.CanBeRemapSource()) {
       continue;
     }
-    ranges.emplace_back(block.VARange());
+    ranges.emplace_back(block.va_range());
   }
   return ranges;
 }
@@ -67,7 +67,7 @@ std::vector<std::pair<VMMDevicePtr, size_t>> CollectUnmappedFreeRanges(
     if (!block.IsUnmappedFree()) {
       continue;
     }
-    ranges.emplace_back(block.VARange());
+    ranges.emplace_back(block.va_range());
   }
   return ranges;
 }
@@ -166,7 +166,7 @@ void AppendMappedFreeSubRange(std::vector<BlockV2>* segments,
     return;
   }
 
-  BlockV2 segment = source.MakeMappedFreeSubBlock(va - source.BeginVA(), size);
+  BlockV2 segment = source.MakeMappedFreeSubBlock(va - source.begin_va(), size);
   if (!segments->empty() &&
       segments->back().CanAbsorbAdjacentFreeBlock(segment)) {
     segments->back().AbsorbAdjacentBlock(segment);
@@ -236,7 +236,7 @@ void RestoreSourceMappings(
       continue;
     }
 
-    VMMDevicePtr original_va = metas[i]->Base();
+    VMMDevicePtr original_va = metas[i]->base();
     if (restore_unmapped_free_to_mapped_free(
             blocks, original_va, handle_size, metas[i])) {
       metas[i]->RestoreOriginalOwnership();
@@ -439,23 +439,23 @@ RemapTransaction::SourceMovePlan RemapTransaction::CollectRemapSourcePlan(
     }
     if (current->HasUnknownRemapSafety()) {
       plan.stats.unknown_safety_blocked_count +=
-          (current->Size() + handle_size_ - 1) / handle_size_;
-      plan.stats.unknown_safety_blocked_bytes += current->Size();
+          (current->size() + handle_size_ - 1) / handle_size_;
+      plan.stats.unknown_safety_blocked_bytes += current->size();
       continue;
     }
     if (!IsRemapSafe(&*current)) {
       plan.stats.event_blocked_count +=
-          (current->Size() + handle_size_ - 1) / handle_size_;
-      plan.stats.event_blocked_bytes += current->Size();
+          (current->size() + handle_size_ - 1) / handle_size_;
+      plan.stats.event_blocked_bytes += current->size();
       continue;
     }
     plan.stats.safe_block_count++;
 
     std::vector<BlockV2> replacement_segments;
     size_t remapped_count_before = plan.handles.size();
-    VMMDevicePtr cursor = current->BeginVA();
-    const VMMDevicePtr block_end = current->EndVA();
-    for (VMMDevicePtr page_va = AlignUp(current->BeginVA(), handle_size_);
+    VMMDevicePtr cursor = current->begin_va();
+    const VMMDevicePtr block_end = current->end_va();
+    for (VMMDevicePtr page_va = AlignUp(current->begin_va(), handle_size_);
          page_va + handle_size_ <= block_end;
          page_va += handle_size_) {
       auto candidate_it = source_candidates.find(page_va);
@@ -477,8 +477,8 @@ RemapTransaction::SourceMovePlan RemapTransaction::CollectRemapSourcePlan(
         if (!logged_first_candidate) {
           VLOG(4) << "First move-page candidate pool="
                   << static_cast<int>(pool_type)
-                  << " block_ptr=" << current->Ptr()
-                  << " block_size=" << current->Size()
+                  << " block_ptr=" << current->ptr()
+                  << " block_size=" << current->size()
                   << " handle_base=" << reinterpret_cast<void*>(candidate.va)
                   << " handle_size=" << handle_size_
                   << " handle=" << reinterpret_cast<void*>(candidate.handle);
@@ -600,12 +600,12 @@ RemapTransaction::PlanUnmappedFreeDestinations(BlockList* blocks,
   for (auto it = blocks->begin(); it != blocks->end(); ++it) {
     if (!it->IsUnmappedFree()) continue;
     size_t unmapped_free_cap = unknown_capacity;
-    if (it->Size() >= required_bytes) {
+    if (it->size() >= required_bytes) {
       unmapped_free_cap =
-          CountLeadingUnmappedBackingPages(it->BeginVA(), it->Size());
+          CountLeadingUnmappedBackingPages(it->begin_va(), it->size());
       const size_t capacity_bytes = unmapped_free_cap * handle_size_;
       if (capacity_bytes >= required_bytes &&
-          CanPrepareSyntheticAllocationRange(it->BeginVA(), required_bytes)) {
+          CanPrepareSyntheticAllocationRange(it->begin_va(), required_bytes)) {
         plan.single_it = it;
         return plan;
       }
@@ -619,11 +619,11 @@ RemapTransaction::PlanUnmappedFreeDestinations(BlockList* blocks,
     size_t unmapped_free_cap = candidate.second;
     if (unmapped_free_cap == unknown_capacity) {
       unmapped_free_cap =
-          CountLeadingUnmappedBackingPages(it->BeginVA(), it->Size());
+          CountLeadingUnmappedBackingPages(it->begin_va(), it->size());
     }
     if (unmapped_free_cap == 0) continue;
 
-    auto dst = it->BeginVA();
+    auto dst = it->begin_va();
     const size_t capacity_bytes = unmapped_free_cap * handle_size_;
     if (CanPrepareSyntheticAllocationRange(dst, capacity_bytes)) {
       plan.total_capacity += capacity_bytes;
@@ -672,11 +672,11 @@ RemapTransaction::DestinationPlan RemapTransaction::SelectDestinationPlan(
   auto unmapped_free_plan = PlanUnmappedFreeDestinations(blocks, handle_count);
   if (unmapped_free_plan.single_it != blocks->end()) {
     BlockIterator unmapped_free_it = unmapped_free_plan.single_it;
-    const VMMDevicePtr unmapped_free_va = unmapped_free_it->BeginVA();
+    const VMMDevicePtr unmapped_free_va = unmapped_free_it->begin_va();
     VLOG(10) << "VMM remap compact using " << log_prefix
              << " unmapped-free path, dst_va="
              << reinterpret_cast<void*>(unmapped_free_va)
-             << " unmapped_free_size=" << unmapped_free_it->Size()
+             << " unmapped_free_size=" << unmapped_free_it->size()
              << " bytes=" << total_remapped;
     plan.kind = DestinationPlanKind::kSingleUnmappedFree;
     plan.placements.push_back(DestinationPlacement::UnmappedFree(
@@ -921,7 +921,7 @@ bool RemapTransaction::TryCommitSingleUnmappedFreeMovePlacement(
     PoolType pool_type,
     MoveCommitStats* move_stats) {
   const size_t handle_count = plan->handles.size();
-  const VMMDevicePtr unmapped_free_va = unmapped_free_it->BeginVA();
+  const VMMDevicePtr unmapped_free_va = unmapped_free_it->begin_va();
   auto placement = DestinationPlacement::UnmappedFree(
       unmapped_free_it, unmapped_free_va, 0, handle_count);
   std::vector<VMMBackingMap::UnmappedPage> target_pages;
@@ -1038,13 +1038,13 @@ RemapTransaction::CompactResult RemapTransaction::CompactFreeBlocks(
   CompactResult result;
   rollback_source_mappings_ = {};
 
-  VMMDevicePtr tail_va = vmm_allocator_->VirtualMemBase();
+  VMMDevicePtr tail_va = vmm_allocator_->virtual_mem_base();
   if (!blocks->empty()) {
     const auto& last = blocks->back();
-    tail_va = last.EndVA();
+    tail_va = last.end_va();
   }
   const VMMDevicePtr va_limit =
-      vmm_allocator_->VirtualMemBase() + vmm_allocator_->VirtualMemSize();
+      vmm_allocator_->virtual_mem_base() + vmm_allocator_->virtual_mem_size();
 
   auto source_start = Clock::now();
   auto move_plan = CollectRemapSourcePlan(blocks, requested_size, pool_type);
@@ -1098,9 +1098,9 @@ RemapTransaction::InstallMappedUnmappedFreeRange(BlockList* blocks,
                                                  BlockIterator unmapped_free_it,
                                                  BlockV2 free_block,
                                                  PoolType pool_type) const {
-  VMMDevicePtr unmapped_free_va = unmapped_free_it->BeginVA();
-  size_t unmapped_free_size = unmapped_free_it->Size();
-  size_t filled_bytes = free_block.Size();
+  VMMDevicePtr unmapped_free_va = unmapped_free_it->begin_va();
+  size_t unmapped_free_size = unmapped_free_it->size();
+  size_t filled_bytes = free_block.size();
 
   if (unmapped_free_size == filled_bytes) {
     *unmapped_free_it = std::move(free_block);
@@ -1210,8 +1210,8 @@ bool RemapTransaction::RestoreUnmappedFreeRangeToMappedFreeBlock(
       VLOG(0) << "RestoreUnmappedFreeRangeToMappedFreeBlock: range exceeds "
                  "unmapped-free block, va="
               << reinterpret_cast<void*>(va) << " size=" << size
-              << " block_start=" << reinterpret_cast<void*>(it->BeginVA())
-              << " unmapped_free_size=" << it->Size();
+              << " block_start=" << reinterpret_cast<void*>(it->begin_va())
+              << " unmapped_free_size=" << it->size();
       return false;
     }
 

@@ -144,7 +144,7 @@ uint64_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::ReleaseImpl(
 
 VMMAutoGrowthBestFitMultiPoolAllocatorV2::AllocationRoute
 VMMAutoGrowthBestFitMultiPoolAllocatorV2::RouteAllocation(size_t size) const {
-  const size_t routed_size = AlignedSize(size, small_allocator_->Alignment());
+  const size_t routed_size = AlignedSize(size, small_allocator_->alignment());
   if (routed_size < small_allocation_threshold_) {
     return {PoolType::kSmall, small_allocator_.get()};
   }

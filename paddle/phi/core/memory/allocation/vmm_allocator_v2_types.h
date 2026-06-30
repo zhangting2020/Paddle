@@ -81,10 +81,10 @@ struct VMMHandleMeta {
                 int device)
       : base_(base), size_(size), handle_(handle), device_(device) {}
 
-  VMMDevicePtr Base() const { return base_; }
-  size_t Size() const { return size_; }
-  VMMAllocHandle AllocationHandle() const { return handle_; }
-  int Device() const { return device_; }
+  VMMDevicePtr base() const { return base_; }
+  size_t size() const { return size_; }
+  VMMAllocHandle handle() const { return handle_; }
+  int device() const { return device_; }
 
   bool IsOwnedByRemapDestination() const { return owned_by_remap_destination_; }
   void MarkOwnedByRemapDestination() { owned_by_remap_destination_ = true; }
@@ -144,20 +144,23 @@ struct BlockV2 {
   bool IsMappedFree() const { return IsFree(); }
   bool CanBeRemapSource() const { return IsMappedFree(); }
   bool IsUnmappedFree() const { return type_ == BlockType::kUnmappedFree; }
-  void* Ptr() const { return ptr_; }
-  size_t Size() const { return size_; }
-  uint8_t* BeginPtr() const { return reinterpret_cast<uint8_t*>(ptr_); }
-  uint8_t* EndPtr() const { return BeginPtr() + size_; }
-  VMMDevicePtr BeginVA() const {
-    return reinterpret_cast<VMMDevicePtr>(BeginPtr());
+  void* ptr() const { return ptr_; }
+  size_t size() const { return size_; }
+  uint8_t* begin_ptr() const { return reinterpret_cast<uint8_t*>(ptr_); }
+  uint8_t* end_ptr() const { return begin_ptr() + size_; }
+  VMMDevicePtr begin_va() const {
+    return reinterpret_cast<VMMDevicePtr>(begin_ptr());
   }
-  VMMDevicePtr EndVA() const { return BeginVA() + size_; }
-  std::pair<VMMDevicePtr, size_t> VARange() const { return {BeginVA(), size_}; }
+  VMMDevicePtr end_va() const { return begin_va() + size_; }
+  std::pair<VMMDevicePtr, size_t> va_range() const {
+    return {begin_va(), size_};
+  }
   bool ContainsVARange(VMMDevicePtr va, size_t size) const {
-    return size > 0 && va >= BeginVA() && va < EndVA() && size <= EndVA() - va;
+    return size > 0 && va >= begin_va() && va < end_va() &&
+           size <= end_va() - va;
   }
   bool IsAdjacentBefore(const BlockV2& next) const {
-    return EndPtr() == next.BeginPtr();
+    return end_ptr() == next.begin_ptr();
   }
   bool CanAbsorbAdjacentFreeBlock(const BlockV2& next) const {
     return IsFree() && next.IsFree() && IsAdjacentBefore(next);
@@ -166,8 +169,8 @@ struct BlockV2 {
     return IsUnmappedFree() && next.IsUnmappedFree() && IsAdjacentBefore(next);
   }
   BlockV2 MakeMappedFreeSubBlock(size_t offset, size_t len) const {
-    auto block =
-        MakeMappedBlock(BlockType::kFree, BeginPtr() + offset, len, pool_type_);
+    auto block = MakeMappedBlock(
+        BlockType::kFree, begin_ptr() + offset, len, pool_type_);
     block.ipc_exported_ = ipc_exported_;
 #if defined(PADDLE_WITH_CUDA)
     block.CopyRemapSafetyFrom(*this);
@@ -176,7 +179,7 @@ struct BlockV2 {
   }
   BlockV2 MakeMappedActiveSubBlock(size_t offset, size_t len) const {
     auto block = MakeMappedBlock(
-        BlockType::kActive, BeginPtr() + offset, len, pool_type_);
+        BlockType::kActive, begin_ptr() + offset, len, pool_type_);
     block.ipc_exported_ = ipc_exported_;
 #if defined(PADDLE_WITH_CUDA)
     block.ClearRemapSafety();
@@ -184,23 +187,23 @@ struct BlockV2 {
     return block;
   }
   BlockV2 MakeUnmappedFreeSubBlock(size_t offset, size_t len) const {
-    return MakeUnmappedFreeBlock(BeginPtr() + offset, len, pool_type_);
+    return MakeUnmappedFreeBlock(begin_ptr() + offset, len, pool_type_);
   }
   BlockRestoreMappedFreeResult BuildRestoreMappedFreeSegments(
       VMMDevicePtr va,
       size_t size,
       const std::shared_ptr<VMMHandleMeta>& meta,
       std::vector<BlockV2>* segments) const {
-    if (!IsUnmappedFree() || va < BeginVA() || va >= EndVA()) {
+    if (!IsUnmappedFree() || va < begin_va() || va >= end_va()) {
       return BlockRestoreMappedFreeResult::kOutside;
     }
-    if (size > EndVA() - va) {
+    if (size > end_va() - va) {
       return BlockRestoreMappedFreeResult::kRangeExceedsBlock;
     }
 
     segments->clear();
-    const size_t prefix = va - BeginVA();
-    const size_t suffix = EndVA() - (va + size);
+    const size_t prefix = va - begin_va();
+    const size_t suffix = end_va() - (va + size);
     if (prefix > 0) {
       segments->push_back(MakeUnmappedFreeSubBlock(0, prefix));
     }

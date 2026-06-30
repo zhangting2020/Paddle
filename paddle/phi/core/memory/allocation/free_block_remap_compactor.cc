@@ -26,7 +26,7 @@ namespace allocation {
 
 size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
                                         size_t requested_size) {
-  const size_t handle_size = vmm_allocator_->HandleSize();
+  const size_t handle_size = vmm_allocator_->handle_size();
   RemapTransaction transaction(vmm_allocator_.get(),
                                handle_size,
                                commit_synthetic_allocation_,

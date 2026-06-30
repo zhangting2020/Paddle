@@ -44,7 +44,7 @@ bool HasBlockWithPtr(const VMMAutoGrowthBestFitAllocatorV2& allocator,
                      void* ptr,
                      BlockType type) {
   for (const auto& block : allocator.all_blocks()) {
-    if (block.Ptr() == ptr && block.type_ == type) {
+    if (block.ptr() == ptr && block.type_ == type) {
       return true;
     }
   }

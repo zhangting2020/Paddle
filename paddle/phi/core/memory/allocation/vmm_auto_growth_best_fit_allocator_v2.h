@@ -75,8 +75,8 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
 
   const BlockList& all_blocks() const { return all_blocks_; }
   BlockList SnapshotAllBlocks() const;
-  PoolType GetPoolType() const { return pool_type_; }
-  size_t Alignment() const { return alignment_; }
+  PoolType pool_type() const { return pool_type_; }
+  size_t alignment() const { return alignment_; }
 
   // Query aggregate free-block statistics for OOM dispatch decisions.
   // total_free = sum of all FREE block sizes, max_free = largest FREE block.

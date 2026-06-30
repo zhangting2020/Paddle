@@ -157,22 +157,22 @@ void CUDAVirtualMemAllocatorV2::RollbackCreatedHandles(
     if (meta == nullptr) {
       continue;
     }
-    phi::dynload::cuMemUnmap(meta->Base(), meta->Size());
+    phi::dynload::cuMemUnmap(meta->base(), meta->size());
     platform::RecordedGpuMemRelease(
-        meta->AllocationHandle(), meta->Size(), place_.device);
+        meta->handle(), meta->size(), place_.device);
   }
 }
 
 void CUDAVirtualMemAllocatorV2::MarkLayoutMapped(const HandleLayout& layout) {
   for (const auto& meta : layout) {
-    backing_map_.MarkMapped(meta->Base(), meta, meta->Size());
+    backing_map_.MarkMapped(meta->base(), meta, meta->size());
   }
 }
 
 void CUDAVirtualMemAllocatorV2::MarkRemapDestinationLayoutMapped(
     const HandleLayout& layout) {
   for (const auto& meta : layout) {
-    backing_map_.MarkRemapDestinationMapped(meta->Base(), meta, meta->Size());
+    backing_map_.MarkRemapDestinationMapped(meta->base(), meta, meta->size());
   }
 }
 
@@ -418,13 +418,13 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   for (const auto& handle : layout) {
     if (handle->IsOwnedByRemapDestination()) {
       VLOG(5) << "FreeImpl: skipping remap-destination-owned handle base="
-              << reinterpret_cast<void*>(handle->Base())
-              << " size=" << handle->Size();
+              << reinterpret_cast<void*>(handle->base())
+              << " size=" << handle->size();
       continue;
     }
     PADDLE_ENFORCE_GPU_SUCCESS(
-        phi::dynload::cuMemUnmap(handle->Base(), handle->Size()));
-    backing_map_.MarkUnmapped(handle->Base(), handle->Size());
+        phi::dynload::cuMemUnmap(handle->base(), handle->size()));
+    backing_map_.MarkUnmapped(handle->base(), handle->size());
     // Use non-throwing release: if the handle was already released by a
     // subsequent compactor remap (which created a new synthetic allocation
     // for the same physical handle), cuMemRelease returns
@@ -432,18 +432,18 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
     // the handle's physical memory is now owned by the newer synthetic
     // allocation.
     auto release_status = platform::RecordedGpuMemRelease(
-        handle->AllocationHandle(), handle->Size(), place_.device);
+        handle->handle(), handle->size(), place_.device);
     if (release_status != CUDA_SUCCESS) {
       VLOG(0) << "FreeImpl: cuMemRelease returned " << release_status
-              << " for handle " << handle->AllocationHandle()
-              << " base=" << reinterpret_cast<void*>(handle->Base())
-              << " size=" << handle->Size() << " owned_by_remap_destination="
+              << " for handle " << handle->handle()
+              << " base=" << reinterpret_cast<void*>(handle->base())
+              << " size=" << handle->size() << " owned_by_remap_destination="
               << handle->IsOwnedByRemapDestination()
               << " (likely already released by remap ownership transfer), "
               << "skipping";
     } else {
       backing_map_.MarkReleased(
-          handle->Base(), handle->AllocationHandle(), handle->Size());
+          handle->base(), handle->handle(), handle->size());
     }
   }
 
@@ -706,7 +706,7 @@ CUDAVirtualMemAllocatorV2::RestoreRemapSourceMapping(
   }
 
   platform::CUDADeviceGuard guard(place_.device);
-  const VMMDevicePtr original_va = meta->Base();
+  const VMMDevicePtr original_va = meta->base();
   auto map_status = phi::dynload::cuMemMap(original_va, size, 0, handle, 0);
   if (map_status != CUDA_SUCCESS) {
     VLOG(0) << "RestoreRemapSourceMapping: cuMemMap("
@@ -741,7 +741,7 @@ CUDAVirtualMemAllocatorV2::ForceReleaseRestoredRemapSourceMapping(
     const char* context,
     bool unmap_mapped_source) {
   platform::CUDADeviceGuard guard(place_.device);
-  const VMMDevicePtr original_va = meta->Base();
+  const VMMDevicePtr original_va = meta->base();
   if (unmap_mapped_source) {
     auto unmap_status = phi::dynload::cuMemUnmap(original_va, size);
     if (unmap_status == CUDA_SUCCESS) {
@@ -1005,10 +1005,10 @@ bool CUDAVirtualMemAllocatorV2::SetBlockRemapEvent(
     const BlockV2& block,
     gpuStream_t stream,
     std::shared_ptr<CUDAEventGuard> event) {
-  if (!IsReservedVARange(block.BeginVA(), block.Size())) {
+  if (!IsReservedVARange(block.begin_va(), block.size())) {
     return false;
   }
-  return SetRemapEvent(block.BeginVA(), block.Size(), stream, event);
+  return SetRemapEvent(block.begin_va(), block.size(), stream, event);
 }
 
 bool CUDAVirtualMemAllocatorV2::SetRemapEvent(

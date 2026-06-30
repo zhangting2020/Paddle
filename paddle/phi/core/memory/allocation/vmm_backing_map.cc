@@ -190,8 +190,8 @@ void VMMBackingMap::MarkMapped(VMMDevicePtr va,
   if (!CheckRangeLocked(va, size, "MarkMapped", &start, &count)) {
     return;
   }
-  const VMMAllocHandle handle = meta == nullptr ? static_cast<VMMAllocHandle>(0)
-                                                : meta->AllocationHandle();
+  const VMMAllocHandle handle =
+      meta == nullptr ? static_cast<VMMAllocHandle>(0) : meta->handle();
   for (size_t i = 0; i < count; ++i) {
     auto& page = pages_[start + i];
     MarkPageMappedLocked(&page, va + i * page_size_, handle, meta, false);
@@ -207,8 +207,8 @@ void VMMBackingMap::MarkRemapDestinationMapped(
           va, size, "MarkRemapDestinationMapped", &start, &count)) {
     return;
   }
-  const VMMAllocHandle handle = meta == nullptr ? static_cast<VMMAllocHandle>(0)
-                                                : meta->AllocationHandle();
+  const VMMAllocHandle handle =
+      meta == nullptr ? static_cast<VMMAllocHandle>(0) : meta->handle();
   for (size_t i = 0; i < count; ++i) {
     auto& page = pages_[start + i];
     MarkPageMappedLocked(&page, va + i * page_size_, handle, meta, true);
@@ -355,7 +355,7 @@ bool VMMBackingMap::ValidateLayout(const HandleLayout& layout,
     size_t start = 0;
     size_t count = 0;
     if (!CheckRangeLocked(
-            meta->Base(), meta->Size(), context, &start, &count)) {
+            meta->base(), meta->size(), context, &start, &count)) {
       ok = false;
       continue;
     }
@@ -365,18 +365,17 @@ bool VMMBackingMap::ValidateLayout(const HandleLayout& layout,
       if (page.mapped != expected_mapped) {
         VLOG(0) << "VMM V2 BackingMap mapped-state mismatch in " << context
                 << " va="
-                << reinterpret_cast<void*>(meta->Base() + i * page_size_)
+                << reinterpret_cast<void*>(meta->base() + i * page_size_)
                 << " tracked_mapped=" << page.mapped
                 << " meta_owned_by_remap_destination="
                 << meta->IsOwnedByRemapDestination();
         ok = false;
       }
-      if (expected_mapped && page.handle != meta->AllocationHandle()) {
+      if (expected_mapped && page.handle != meta->handle()) {
         VLOG(0) << "VMM V2 BackingMap handle mismatch in " << context << " va="
-                << reinterpret_cast<void*>(meta->Base() + i * page_size_)
+                << reinterpret_cast<void*>(meta->base() + i * page_size_)
                 << " tracked=" << reinterpret_cast<void*>(page.handle)
-                << " meta="
-                << reinterpret_cast<void*>(meta->AllocationHandle());
+                << " meta=" << reinterpret_cast<void*>(meta->handle());
         ok = false;
       }
     }
@@ -954,10 +953,10 @@ bool VMMBackingMap::CollectIpcPartDescriptorsLocked(
       const VMMDevicePtr slice_begin = std::max(va, page_va);
       const VMMDevicePtr slice_end = std::min(va + size, page_va + page_size_);
       descriptors->push_back(IpcBlockPartDescriptor{
-          page.meta->Base(),
-          page.meta->Size(),
-          page.meta->AllocationHandle(),
-          page.meta->Device(),
+          page.meta->base(),
+          page.meta->size(),
+          page.meta->handle(),
+          page.meta->device(),
           static_cast<size_t>(slice_begin - page_va),
           static_cast<size_t>(slice_end - slice_begin),
       });
@@ -1056,7 +1055,7 @@ VMMBackingMap::RemapSourceState VMMBackingMap::GetRemapSourceStateLocked(
              : RemapSourceState::kPendingEvent;
 }
 
-size_t VMMBackingMap::TotalMappedBytes() const {
+size_t VMMBackingMap::total_mapped_bytes() const {
   std::lock_guard<SpinLock> guard(spinlock_);
   return mapped_page_count_ * page_size_;
 }
