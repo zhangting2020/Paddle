@@ -951,23 +951,6 @@ void CUDAVirtualMemAllocatorV2::DestroyStagedSyntheticAllocation(
   delete allocation;
 }
 
-void CUDAVirtualMemAllocatorV2::MarkBackingMapped(VMMDevicePtr ptr,
-                                                  VMMAllocHandle handle,
-                                                  size_t size) {
-  backing_map_.MarkMapped(ptr, handle, size);
-}
-
-void CUDAVirtualMemAllocatorV2::MarkBackingUnmapped(VMMDevicePtr ptr,
-                                                    size_t size) {
-  backing_map_.MarkUnmapped(ptr, size);
-}
-
-void CUDAVirtualMemAllocatorV2::MarkBackingReleased(VMMDevicePtr ptr,
-                                                    VMMAllocHandle handle,
-                                                    size_t size) {
-  backing_map_.MarkReleased(ptr, handle, size);
-}
-
 void CUDAVirtualMemAllocatorV2::MarkBackingIpcExported(VMMDevicePtr ptr,
                                                        size_t size) {
   backing_map_.MarkIpcExported(ptr, size);
@@ -1035,11 +1018,6 @@ bool CUDAVirtualMemAllocatorV2::SetRemapEvent(
     std::shared_ptr<CUDAEventGuard> event) {
   return backing_map_.MarkPendingEventForRange(
       ptr, size, stream, std::move(event));
-}
-
-bool CUDAVirtualMemAllocatorV2::ValidateBackingLayout(
-    const HandleLayout& layout, const char* context) const {
-  return backing_map_.ValidateLayout(layout, context);
 }
 
 std::vector<VMMBackingMap::MappedPage>

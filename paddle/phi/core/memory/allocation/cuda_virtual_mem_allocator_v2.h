@@ -154,13 +154,6 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
       Allocation* allocation);
   void DestroyStagedSyntheticAllocation(Allocation* allocation);
 
-  // Phase-1 BackingMap mirror hooks for driver operations that still happen
-  // outside the bottom allocator (e.g. compactor rollback).
-  void MarkBackingMapped(VMMDevicePtr ptr, VMMAllocHandle handle, size_t size);
-  void MarkBackingUnmapped(VMMDevicePtr ptr, size_t size);
-  void MarkBackingReleased(VMMDevicePtr ptr,
-                           VMMAllocHandle handle,
-                           size_t size);
   void MarkBackingIpcExported(VMMDevicePtr ptr, size_t size);
   bool HasIpcExportedRange(VMMDevicePtr ptr, size_t size) const;
   bool IsRangeReleasable(VMMDevicePtr ptr, size_t size) const;
@@ -172,8 +165,6 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   bool SetBlockRemapEvent(const BlockV2& block,
                           gpuStream_t stream,
                           std::shared_ptr<CUDAEventGuard> event);
-  bool ValidateBackingLayout(const HandleLayout& layout,
-                             const char* context) const;
   std::vector<VMMBackingMap::MappedPage> CollectMappedPages(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
       size_t target_bytes) const;

@@ -98,23 +98,17 @@ class VMMBackingMap {
   std::vector<std::pair<VMMDevicePtr, size_t>> CollectUnmappedRanges(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const;
   std::vector<MappedPage> CollectMappedPages(
-      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const;
-  std::vector<MappedPage> CollectMappedPages(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
-      size_t target_bytes) const;
-  std::vector<MappedPage> CollectMappedPagesFullyCoveredBy(
-      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const;
+      size_t target_bytes = 0) const;
   std::vector<MappedPage> CollectMappedPagesFullyCoveredBy(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
-      size_t target_bytes) const;
+      size_t target_bytes = 0) const;
   std::vector<MappedPage> CollectRemapSourcePagesFullyCoveredBy(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
       size_t target_bytes) const;
   std::vector<UnmappedPage> CollectUnmappedPagesFullyCoveredBy(
-      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const;
-  std::vector<UnmappedPage> CollectUnmappedPagesFullyCoveredBy(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
-      size_t target_bytes) const;
+      size_t target_bytes = 0) const;
   CompactCandidates CollectCompactCandidates(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& source_ranges,
       const std::vector<std::pair<VMMDevicePtr, size_t>>& target_ranges,

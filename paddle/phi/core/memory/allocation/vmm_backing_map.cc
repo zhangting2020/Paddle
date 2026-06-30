@@ -530,33 +530,23 @@ VMMBackingMap::CollectUnmappedRanges(
 }
 
 std::vector<VMMBackingMap::MappedPage> VMMBackingMap::CollectMappedPages(
-    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const {
-  std::lock_guard<SpinLock> guard(spinlock_);
-  std::vector<MappedPage> mapped_pages;
-  for (const auto& range : ranges) {
-    AppendMappedPagesLocked(
-        range.first, range.second, "CollectMappedPages", 0, &mapped_pages);
-  }
-  return mapped_pages;
-}
-
-std::vector<VMMBackingMap::MappedPage> VMMBackingMap::CollectMappedPages(
     const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {
   std::lock_guard<SpinLock> guard(spinlock_);
   std::vector<MappedPage> mapped_pages;
-  if (target_bytes == 0 || page_size_ == 0) {
+  if (page_size_ == 0) {
     return mapped_pages;
   }
 
-  const size_t target_pages = (target_bytes + page_size_ - 1) / page_size_;
+  const size_t target_pages =
+      target_bytes == 0 ? 0 : (target_bytes + page_size_ - 1) / page_size_;
   for (const auto& range : ranges) {
     AppendMappedPagesLocked(range.first,
                             range.second,
                             "CollectMappedPages",
                             target_pages,
                             &mapped_pages);
-    if (mapped_pages.size() >= target_pages) {
+    if (target_pages != 0 && mapped_pages.size() >= target_pages) {
       break;
     }
   }
@@ -565,32 +555,16 @@ std::vector<VMMBackingMap::MappedPage> VMMBackingMap::CollectMappedPages(
 
 std::vector<VMMBackingMap::MappedPage>
 VMMBackingMap::CollectMappedPagesFullyCoveredBy(
-    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const {
-  std::lock_guard<SpinLock> guard(spinlock_);
-  std::vector<MappedPage> mapped_pages;
-  for (const auto& range : ranges) {
-    AppendMappedPagesFullyCoveredByLocked(range.first,
-                                          range.second,
-                                          "CollectMappedPagesFullyCoveredBy",
-                                          0,
-                                          false,
-                                          false,
-                                          &mapped_pages);
-  }
-  return mapped_pages;
-}
-
-std::vector<VMMBackingMap::MappedPage>
-VMMBackingMap::CollectMappedPagesFullyCoveredBy(
     const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {
   std::lock_guard<SpinLock> guard(spinlock_);
   std::vector<MappedPage> mapped_pages;
-  if (target_bytes == 0 || page_size_ == 0) {
+  if (page_size_ == 0) {
     return mapped_pages;
   }
 
-  const size_t target_pages = (target_bytes + page_size_ - 1) / page_size_;
+  const size_t target_pages =
+      target_bytes == 0 ? 0 : (target_bytes + page_size_ - 1) / page_size_;
   for (const auto& range : ranges) {
     AppendMappedPagesFullyCoveredByLocked(range.first,
                                           range.second,
@@ -599,7 +573,7 @@ VMMBackingMap::CollectMappedPagesFullyCoveredBy(
                                           false,
                                           false,
                                           &mapped_pages);
-    if (mapped_pages.size() >= target_pages) {
+    if (target_pages != 0 && mapped_pages.size() >= target_pages) {
       break;
     }
   }
@@ -658,31 +632,16 @@ VMMBackingMap::CollectRemapSourcePagesFullyCoveredBy(
 
 std::vector<VMMBackingMap::UnmappedPage>
 VMMBackingMap::CollectUnmappedPagesFullyCoveredBy(
-    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const {
-  std::lock_guard<SpinLock> guard(spinlock_);
-  std::vector<UnmappedPage> unmapped_pages;
-  for (const auto& range : ranges) {
-    AppendUnmappedPagesFullyCoveredByLocked(
-        range.first,
-        range.second,
-        "CollectUnmappedPagesFullyCoveredBy",
-        0,
-        &unmapped_pages);
-  }
-  return unmapped_pages;
-}
-
-std::vector<VMMBackingMap::UnmappedPage>
-VMMBackingMap::CollectUnmappedPagesFullyCoveredBy(
     const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {
   std::lock_guard<SpinLock> guard(spinlock_);
   std::vector<UnmappedPage> unmapped_pages;
-  if (target_bytes == 0 || page_size_ == 0) {
+  if (page_size_ == 0) {
     return unmapped_pages;
   }
 
-  const size_t target_pages = (target_bytes + page_size_ - 1) / page_size_;
+  const size_t target_pages =
+      target_bytes == 0 ? 0 : (target_bytes + page_size_ - 1) / page_size_;
   for (const auto& range : ranges) {
     AppendUnmappedPagesFullyCoveredByLocked(
         range.first,
@@ -690,7 +649,7 @@ VMMBackingMap::CollectUnmappedPagesFullyCoveredBy(
         "CollectUnmappedPagesFullyCoveredBy",
         target_pages,
         &unmapped_pages);
-    if (unmapped_pages.size() >= target_pages) {
+    if (target_pages != 0 && unmapped_pages.size() >= target_pages) {
       break;
     }
   }
