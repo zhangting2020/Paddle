@@ -958,6 +958,9 @@ void CUDAVirtualMemAllocatorV2::MarkBackingIpcExported(VMMDevicePtr ptr,
 
 bool CUDAVirtualMemAllocatorV2::HasIpcExportedRange(VMMDevicePtr ptr,
                                                     size_t size) const {
+  if (!IsReservedVARange(ptr, size)) {
+    return false;
+  }
   return backing_map_.HasIpcExportedPages(ptr, size);
 }
 
@@ -1006,6 +1009,9 @@ bool CUDAVirtualMemAllocatorV2::CollectIpcParts(
 }
 
 bool CUDAVirtualMemAllocatorV2::MarkIpcExported(VMMDevicePtr ptr, size_t size) {
+  if (!IsReservedVARange(ptr, size)) {
+    return false;
+  }
   MarkBackingIpcExported(ptr, size);
   return true;
 }
