@@ -175,6 +175,24 @@ void AppendMappedFreeSubRange(std::vector<BlockV2>* segments,
   segments->push_back(std::move(segment));
 }
 
+void AppendUnmappedFreeRange(std::vector<BlockV2>* segments,
+                             VMMDevicePtr va,
+                             size_t size,
+                             PoolType pool_type) {
+  if (size == 0) {
+    return;
+  }
+
+  BlockV2 segment = BlockV2::MakeUnmappedFreeBlock(
+      reinterpret_cast<void*>(va), size, pool_type);
+  if (!segments->empty() &&
+      segments->back().CanMergeAdjacentUnmappedFreeBlock(segment)) {
+    segments->back().MergeAdjacentUnmappedFreeBlock(segment);
+    return;
+  }
+  segments->push_back(std::move(segment));
+}
+
 using SourcePageMap =
     std::unordered_map<VMMDevicePtr, VMMBackingMap::MappedPage>;
 
@@ -499,12 +517,8 @@ RemapTransaction::SourceMovePlan RemapTransaction::CollectRemapSourcePlan(
         plan.source_pages.push_back(source_page);
         plan.handles.push_back(candidate.handle);
         plan.metas.push_back(candidate.meta);
-        BlockV2::AppendFreeSegment(&replacement_segments,
-                                   BlockType::kUnmappedFree,
-                                   reinterpret_cast<void*>(page_va),
-                                   handle_size_,
-                                   nullptr,
-                                   pool_type);
+        AppendUnmappedFreeRange(
+            &replacement_segments, page_va, handle_size_, pool_type);
         cursor = page_va + handle_size_;
         continue;
       }
@@ -568,7 +582,7 @@ bool RemapTransaction::TailIsUsable(VMMDevicePtr tail_va,
   if (tail_va + total_bytes > va_limit) {
     return false;
   }
-  return vmm_allocator_->IsDriverVaRangeUnmapped(tail_va, total_bytes);
+  return vmm_allocator_->IsRangeUnmapped(tail_va, total_bytes);
 }
 
 size_t RemapTransaction::CountLeadingUnmappedBackingPages(VMMDevicePtr va,
