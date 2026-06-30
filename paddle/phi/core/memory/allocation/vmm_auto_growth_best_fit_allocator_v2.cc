@@ -1060,6 +1060,20 @@ bool VMMAutoGrowthBestFitAllocatorV2::IsRangeEntirelyFree(uint8_t* base,
 void VMMAutoGrowthBestFitAllocatorV2::ReplaceRangeWithUnmappedFree(
     uint8_t* base, size_t size) {
   auto* end = base + size;
+  auto erase_free_index = [this](BlockList::iterator it) {
+    if (it->IsUnmappedFree()) {
+      EraseUnmappedFreeBlock(it);
+    } else {
+      EraseFreeBlock(it);
+    }
+  };
+  auto insert_free_index = [this](BlockList::iterator it) {
+    if (it->IsUnmappedFree()) {
+      InsertUnmappedFreeBlock(it);
+    } else {
+      InsertFreeBlock(it);
+    }
+  };
 
   for (auto it = all_blocks_.begin(); it != all_blocks_.end();) {
     auto* bptr = it->begin_ptr();
@@ -1071,12 +1085,9 @@ void VMMAutoGrowthBestFitAllocatorV2::ReplaceRangeWithUnmappedFree(
     }
     if (bptr >= end) break;
 
-    const bool is_unmapped_free = it->IsUnmappedFree();
-
     // Case 1: block entirely within [base, end): remove it.
     if (bptr >= base && bend <= end) {
-      if (!is_unmapped_free) EraseFreeBlock(it);
-      if (is_unmapped_free) EraseUnmappedFreeBlock(it);
+      erase_free_index(it);
       it = all_blocks_.erase(it);
       continue;
     }
@@ -1084,15 +1095,9 @@ void VMMAutoGrowthBestFitAllocatorV2::ReplaceRangeWithUnmappedFree(
     // Case 2: block straddles left boundary only: keep left remnant.
     if (bptr < base && bend <= end) {
       const size_t keep = static_cast<size_t>(base - bptr);
-      if (!is_unmapped_free) {
-        EraseFreeBlock(it);
-        it->TrimToPrefix(keep);
-        InsertFreeBlock(it);
-      } else {
-        EraseUnmappedFreeBlock(it);
-        it->TrimToPrefix(keep);
-        InsertUnmappedFreeBlock(it);
-      }
+      erase_free_index(it);
+      it->TrimToPrefix(keep);
+      insert_free_index(it);
       ++it;
       continue;
     }
@@ -1101,15 +1106,9 @@ void VMMAutoGrowthBestFitAllocatorV2::ReplaceRangeWithUnmappedFree(
     if (bptr >= base && bend > end) {
       const size_t trim = static_cast<size_t>(end - bptr);
       const size_t keep = it->size_ - trim;
-      if (!is_unmapped_free) {
-        EraseFreeBlock(it);
-        it->TrimToSuffix(trim, keep);
-        InsertFreeBlock(it);
-      } else {
-        EraseUnmappedFreeBlock(it);
-        it->TrimToSuffix(trim, keep);
-        InsertUnmappedFreeBlock(it);
-      }
+      erase_free_index(it);
+      it->TrimToSuffix(trim, keep);
+      insert_free_index(it);
       break;  // nothing more in range
     }
 
@@ -1119,23 +1118,23 @@ void VMMAutoGrowthBestFitAllocatorV2::ReplaceRangeWithUnmappedFree(
       const size_t right_offset = static_cast<size_t>(end - bptr);
       const size_t right_size = it->size_ - right_offset;
 
-      if (!is_unmapped_free) {
+      if (!it->IsUnmappedFree()) {
         BlockV2 right = it->MakeMappedFreeSubBlock(right_offset, right_size);
-        EraseFreeBlock(it);
+        erase_free_index(it);
         it->TrimToPrefix(left_size);
-        InsertFreeBlock(it);
+        insert_free_index(it);
         right.CopyRemapSafetyFrom(*it);
         auto right_it = all_blocks_.insert(std::next(it), std::move(right));
-        InsertFreeBlock(right_it);
+        insert_free_index(right_it);
       } else {
         // Unmapped-free: just shrink left and insert right unmapped-free
         // block.
         BlockV2 right = it->MakeUnmappedFreeSubBlock(right_offset, right_size);
-        EraseUnmappedFreeBlock(it);
+        erase_free_index(it);
         it->TrimToPrefix(left_size);
-        InsertUnmappedFreeBlock(it);
+        insert_free_index(it);
         auto right_it = all_blocks_.insert(std::next(it), std::move(right));
-        InsertUnmappedFreeBlock(right_it);
+        insert_free_index(right_it);
       }
       break;  // done
     }
