@@ -16,12 +16,15 @@
 
 #if defined(PADDLE_WITH_CUDA)
 
+#include <algorithm>
 #include <exception>
 #include <limits>
 
 #include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
 #include "paddle/phi/core/memory/allocation/free_block_remap_compactor.h"
+#include "paddle/phi/core/platform/cuda_device_guard.h"
+#include "paddle/phi/core/platform/device/gpu/gpu_info.h"
 
 COMMON_DECLARE_bool(vmm_v2_compact_all);
 
@@ -45,6 +48,35 @@ void EmplaceOrEnforce(Map* map,
       common::errors::AlreadyExists(
           "Duplicate key inserted into %s, allocator state is inconsistent.",
           map_name));
+}
+
+struct RemapSourceStateCounters {
+  size_t ready{0};
+  size_t remap_destination_owned{0};
+  size_t pending_event{0};
+  size_t partial_or_invalid{0};
+};
+
+RemapSourceStateCounters CountRemapSourceStates(
+    const std::vector<VMMBackingMap::MappedPage>& pages) {
+  RemapSourceStateCounters counters;
+  for (const auto& page : pages) {
+    switch (page.remap_source_state) {
+      case VMMBackingMap::RemapSourceState::kReady:
+        ++counters.ready;
+        break;
+      case VMMBackingMap::RemapSourceState::kRemapDestinationOwned:
+        ++counters.remap_destination_owned;
+        break;
+      case VMMBackingMap::RemapSourceState::kPendingEvent:
+        ++counters.pending_event;
+        break;
+      case VMMBackingMap::RemapSourceState::kPartialOrInvalid:
+        ++counters.partial_or_invalid;
+        break;
+    }
+  }
+  return counters;
 }
 
 }  // namespace
@@ -286,23 +318,125 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   size_t total_free = 0;
   size_t max_free = 0;
   size_t tail_free = 0;
+  size_t mapped_free_blocks = 0;
+  size_t mapped_free_bytes = 0;
+  size_t largest_mapped_free = 0;
+  size_t indexable_mapped_free_blocks = 0;
+  size_t indexable_mapped_free_bytes = 0;
+  size_t ipc_exported_mapped_free_blocks = 0;
+  size_t ipc_exported_mapped_free_bytes = 0;
+  size_t unmapped_free_blocks_count = 0;
+  size_t unmapped_free_bytes = 0;
+  size_t largest_unmapped_free = 0;
   std::vector<std::pair<VMMDevicePtr, size_t>> compact_source_ranges;
   for (const auto& blk : all_blocks_) {
     if (blk.IsMappedFree()) {
+      ++mapped_free_blocks;
+      mapped_free_bytes += blk.size_;
+      largest_mapped_free = std::max(largest_mapped_free, blk.size_);
       total_free += blk.size_;
       compact_source_ranges.emplace_back(blk.va_range());
+      if (blk.ipc_exported_) {
+        ++ipc_exported_mapped_free_blocks;
+        ipc_exported_mapped_free_bytes += blk.size_;
+      }
     }
     if (CanIndexFreeBlock(blk)) {
+      ++indexable_mapped_free_blocks;
+      indexable_mapped_free_bytes += blk.size_;
       max_free = std::max(max_free, blk.size_);
     }
+    if (blk.IsUnmappedFree()) {
+      ++unmapped_free_blocks_count;
+      unmapped_free_bytes += blk.size_;
+      largest_unmapped_free = std::max(largest_unmapped_free, blk.size_);
+    }
   }
-  if (!all_blocks_.empty() && CanIndexFreeBlock(all_blocks_.back())) {
+  const bool has_tail_block = !all_blocks_.empty();
+  const bool tail_is_indexable =
+      has_tail_block && CanIndexFreeBlock(all_blocks_.back());
+  const bool tail_is_unmapped =
+      has_tail_block && all_blocks_.back().IsUnmappedFree();
+  if (tail_is_indexable) {
     tail_free = all_blocks_.back().size_;
   }
+
+  auto log_compact_precheck_summary =
+      [&](const char* reason,
+          size_t current_compact_target,
+          size_t current_required_releasable_bytes,
+          size_t current_releasable_target_bytes,
+          size_t current_releasable_handles,
+          size_t current_releasable_bytes,
+          size_t bounded_source_page_count) {
+        const auto all_source_pages =
+            underlying_allocator_->CollectRemapSourcePages(
+                compact_source_ranges, 0);
+        const auto all_source_state_counts =
+            CountRemapSourceStates(all_source_pages);
+
+        size_t driver_actual_avail = 0;
+        size_t driver_actual_total = 0;
+        phi::gpuError_t mem_info_status = phi::gpuSuccess;
+        {
+          platform::CUDADeviceGuard guard(place_.device);
+          mem_info_status =
+              cudaMemGetInfo(&driver_actual_avail, &driver_actual_total);
+          if (mem_info_status != phi::gpuSuccess) {
+            driver_actual_avail = 0;
+            driver_actual_total = 0;
+            (void)platform::GpuGetLastError();
+          }
+        }
+
+        LOG(INFO)
+            << "VMM V2 compact precheck summary: pool="
+            << static_cast<int>(pool_type_) << " reason=" << reason
+            << " requested=" << requested_size
+            << " compact_target=" << current_compact_target
+            << " required_releasable_bytes="
+            << current_required_releasable_bytes
+            << " releasable_target_bytes=" << current_releasable_target_bytes
+            << " releasable_handles=" << current_releasable_handles
+            << " releasable_bytes=" << current_releasable_bytes
+            << " bounded_source_pages=" << bounded_source_page_count
+            << " source_ranges=" << compact_source_ranges.size()
+            << " all_source_pages=" << all_source_pages.size()
+            << " source_ready=" << all_source_state_counts.ready
+            << " source_remap_destination_owned="
+            << all_source_state_counts.remap_destination_owned
+            << " source_pending_event=" << all_source_state_counts.pending_event
+            << " source_partial_or_invalid="
+            << all_source_state_counts.partial_or_invalid
+            << " mapped_free_blocks=" << mapped_free_blocks
+            << " mapped_free_bytes=" << mapped_free_bytes
+            << " largest_mapped_free=" << largest_mapped_free
+            << " indexable_mapped_free_blocks=" << indexable_mapped_free_blocks
+            << " indexable_mapped_free_bytes=" << indexable_mapped_free_bytes
+            << " largest_indexable_mapped_free=" << max_free
+            << " ipc_exported_mapped_free_blocks="
+            << ipc_exported_mapped_free_blocks
+            << " ipc_exported_mapped_free_bytes="
+            << ipc_exported_mapped_free_bytes
+            << " unmapped_free_blocks=" << unmapped_free_blocks_count
+            << " unmapped_free_bytes=" << unmapped_free_bytes
+            << " largest_unmapped_free=" << largest_unmapped_free
+            << " tail_free=" << tail_free
+            << " tail_is_indexable=" << tail_is_indexable
+            << " tail_is_unmapped=" << tail_is_unmapped
+            << " all_blocks=" << all_blocks_.size()
+            << " free_index_size=" << free_blocks_.size()
+            << " unmapped_free_index_size=" << unmapped_free_blocks_.size()
+            << " driver_actual_avail=" << driver_actual_avail
+            << " driver_actual_total=" << driver_actual_total
+            << " mem_info_status=" << static_cast<int>(mem_info_status);
+      };
 
   size_t compact_target = requested_size;
   if (requested_size > 0) {
     if (max_free >= requested_size) {
+      log_compact_precheck_summary(
+          "large_free_block_available", compact_target, 0, 0, 0, 0, 0);
       VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
               << " compact skip: max_free=" << max_free
               << " >= requested=" << requested_size;
@@ -311,6 +445,8 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
 
     if (total_free < requested_size) {
       if (total_free <= tail_free) {
+        log_compact_precheck_summary(
+            "insufficient_non_tail_mapped_free", compact_target, 0, 0, 0, 0, 0);
         VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
                 << " compact skip: total_free=" << total_free
                 << " < requested=" << requested_size
@@ -355,6 +491,13 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
 
   if (requested_size > 0 && !FLAGS_vmm_v2_compact_all &&
       releasable_bytes < required_releasable_bytes) {
+    log_compact_precheck_summary("insufficient_releasable_mapped_free",
+                                 compact_target,
+                                 required_releasable_bytes,
+                                 releasable_target_bytes,
+                                 releasable_handles,
+                                 releasable_bytes,
+                                 source_pages.size());
     VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
             << " compact skip: releasable_bytes=" << releasable_bytes
             << " < required=" << required_releasable_bytes
@@ -366,6 +509,13 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   }
 
   if (releasable_handles == 0) {
+    log_compact_precheck_summary("no_releasable_handles",
+                                 compact_target,
+                                 required_releasable_bytes,
+                                 releasable_target_bytes,
+                                 releasable_handles,
+                                 releasable_bytes,
+                                 source_pages.size());
     VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
             << " compact skip: no releasable handles"
             << " (total_free=" << total_free << " max_free=" << max_free

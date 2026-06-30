@@ -123,7 +123,7 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, CrossPoolAllocFree) {
 }
 
 TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
-     VMMTensorPartsVisitorFindsRoutedV2Blocks) {
+     CollectTensorPartsFindsRoutedV2Blocks) {
   auto allocator = CreateAllocator();
 
   auto small = allocator->Allocate(256UL);
@@ -131,23 +131,19 @@ TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2,
   ASSERT_NE(small, nullptr);
   ASSERT_NE(large, nullptr);
 
-  paddle::memory::VMMTensorPartsVisitor small_visitor(small->ptr(),
-                                                      small->size());
-  allocator->Accept(&small_visitor);
+  std::vector<BlockPart> small_parts;
+  ASSERT_TRUE(allocator->small_allocator()->CollectTensorParts(
+      small->ptr(), small->size(), &small_parts));
+  ASSERT_EQ(small_parts.size(), 1UL);
+  EXPECT_EQ(small_parts[0].chunk_rel_off, 0UL);
+  EXPECT_EQ(small_parts[0].len, small->size());
 
-  ASSERT_TRUE(small_visitor.Found());
-  ASSERT_EQ(small_visitor.Parts().size(), 1UL);
-  EXPECT_EQ(small_visitor.Parts()[0].chunk_rel_off, 0UL);
-  EXPECT_EQ(small_visitor.Parts()[0].len, small->size());
-
-  paddle::memory::VMMTensorPartsVisitor large_visitor(large->ptr(),
-                                                      large->size());
-  allocator->Accept(&large_visitor);
-
-  ASSERT_TRUE(large_visitor.Found());
-  ASSERT_EQ(large_visitor.Parts().size(), 1UL);
-  EXPECT_EQ(large_visitor.Parts()[0].chunk_rel_off, 0UL);
-  EXPECT_EQ(large_visitor.Parts()[0].len, large->size());
+  std::vector<BlockPart> large_parts;
+  ASSERT_TRUE(allocator->large_allocator()->CollectTensorParts(
+      large->ptr(), large->size(), &large_parts));
+  ASSERT_EQ(large_parts.size(), 1UL);
+  EXPECT_EQ(large_parts[0].chunk_rel_off, 0UL);
+  EXPECT_EQ(large_parts[0].len, large->size());
 }
 
 }  // namespace allocation
