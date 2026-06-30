@@ -146,7 +146,6 @@ struct BlockV2 {
   bool IsUnmappedFree() const { return type_ == BlockType::kUnmappedFree; }
   void* Ptr() const { return ptr_; }
   size_t Size() const { return size_; }
-  PoolType Pool() const { return pool_type_; }
   uint8_t* BeginPtr() const { return reinterpret_cast<uint8_t*>(ptr_); }
   uint8_t* EndPtr() const { return BeginPtr() + size_; }
   VMMDevicePtr BeginVA() const {
@@ -155,7 +154,7 @@ struct BlockV2 {
   VMMDevicePtr EndVA() const { return BeginVA() + size_; }
   std::pair<VMMDevicePtr, size_t> VARange() const { return {BeginVA(), size_}; }
   bool ContainsVARange(VMMDevicePtr va, size_t size) const {
-    return va >= BeginVA() && va <= EndVA() && size <= EndVA() - va;
+    return size > 0 && va >= BeginVA() && va < EndVA() && size <= EndVA() - va;
   }
   bool IsAdjacentBefore(const BlockV2& next) const {
     return EndPtr() == next.BeginPtr();
@@ -166,19 +165,19 @@ struct BlockV2 {
   bool CanAbsorbAdjacentUnmappedFreeBlock(const BlockV2& next) const {
     return IsUnmappedFree() && next.IsUnmappedFree() && IsAdjacentBefore(next);
   }
-  BlockV2 MakeMappedSubBlock(BlockType type, size_t offset, size_t len) const {
-    auto block = MakeMappedBlock(type, BeginPtr() + offset, len, pool_type_);
+  BlockV2 MakeMappedFreeSubBlock(size_t offset, size_t len) const {
+    auto block =
+        MakeMappedBlock(BlockType::kFree, BeginPtr() + offset, len, pool_type_);
     block.ipc_exported_ = ipc_exported_;
 #if defined(PADDLE_WITH_CUDA)
     block.CopyRemapSafetyFrom(*this);
 #endif
     return block;
   }
-  BlockV2 MakeMappedFreeSubBlock(size_t offset, size_t len) const {
-    return MakeMappedSubBlock(BlockType::kFree, offset, len);
-  }
   BlockV2 MakeMappedActiveSubBlock(size_t offset, size_t len) const {
-    auto block = MakeMappedSubBlock(BlockType::kActive, offset, len);
+    auto block = MakeMappedBlock(
+        BlockType::kActive, BeginPtr() + offset, len, pool_type_);
+    block.ipc_exported_ = ipc_exported_;
 #if defined(PADDLE_WITH_CUDA)
     block.ClearRemapSafety();
 #endif
@@ -220,7 +219,6 @@ struct BlockV2 {
 #endif
   }
   void MarkFree() { type_ = BlockType::kFree; }
-  void MarkMappedFree() { MarkFree(); }
   void MarkUnmappedFree() { type_ = BlockType::kUnmappedFree; }
   void Reset(void* ptr, size_t size, BlockType type, PoolType pool_type) {
     ptr_ = ptr;
