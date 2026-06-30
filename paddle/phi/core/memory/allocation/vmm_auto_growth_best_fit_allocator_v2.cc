@@ -185,6 +185,13 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   const size_t grow_size = (requested_size > tail_reuse_size)
                                ? (requested_size - tail_reuse_size)
                                : 0;
+  auto restore_tail_free_block = [&] {
+    if (has_tail_reuse) {
+      auto restored_it =
+          all_blocks_.insert(all_blocks_.end(), std::move(combined_free_block));
+      InsertFreeBlock(restored_it);
+    }
+  };
 
   // Grow: obtain a new raw allocation from the bottom VMM provider.
   // If cuMemCreate fails due to physical memory exhaustion (CU error 2),
@@ -195,12 +202,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
     try {
       grow_alloc = underlying_allocator_->AppendWithBlock(grow_size);
     } catch (const BadAlloc& bad_alloc) {
-      // Grow failed: restore the tail FREE block before propagating.
-      if (has_tail_reuse) {
-        auto restored_it = all_blocks_.insert(all_blocks_.end(),
-                                              std::move(combined_free_block));
-        InsertFreeBlock(restored_it);
-      }
+      restore_tail_free_block();
       PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
           "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes.\n"
           "Underlying VMM allocation failure:\n%s",
@@ -208,12 +210,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
           grow_size,
           bad_alloc.what()));
     } catch (const std::exception& e) {
-      // Grow failed: restore the tail FREE block before propagating.
-      if (has_tail_reuse) {
-        auto restored_it = all_blocks_.insert(all_blocks_.end(),
-                                              std::move(combined_free_block));
-        InsertFreeBlock(restored_it);
-      }
+      restore_tail_free_block();
       PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
           "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes.\n"
           "Underlying VMM allocation exception:\n%s",
@@ -221,12 +218,7 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
           grow_size,
           e.what()));
     } catch (...) {
-      // Grow failed: restore the tail FREE block before propagating.
-      if (has_tail_reuse) {
-        auto restored_it = all_blocks_.insert(all_blocks_.end(),
-                                              std::move(combined_free_block));
-        InsertFreeBlock(restored_it);
-      }
+      restore_tail_free_block();
       PADDLE_THROW_BAD_ALLOC(common::errors::ResourceExhausted(
           "VMM V2 best-fit allocator (pool %d) failed to grow by %zu bytes "
           "with an unknown underlying VMM allocation exception.",
