@@ -100,7 +100,7 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
                            size_t size);
   bool IsRangeReleasable(VMMDevicePtr ptr, size_t size) const;
   bool IsRangeReusable(VMMDevicePtr ptr, size_t size) const;
-  bool IsDriverVaRangeUnmapped(VMMDevicePtr ptr, size_t size) const;
+  bool IsDriverVARangeUnmapped(VMMDevicePtr ptr, size_t size) const;
   bool IsBlockReusableForAllocation(const BlockV2& block) const;
   bool ValidateBackingLayout(const HandleLayout& layout,
                              const char* context) const;
@@ -122,7 +122,7 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
 
  private:
   void InitOnce();
-  bool IsReservedVaRange(VMMDevicePtr ptr, size_t size) const;
+  bool IsReservedVARange(VMMDevicePtr ptr, size_t size) const;
   void MapHandlesToVA(
       VMMDevicePtr ptr,
       const std::vector<VMMAllocHandle>& hs,

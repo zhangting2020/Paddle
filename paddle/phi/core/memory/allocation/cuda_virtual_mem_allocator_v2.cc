@@ -117,7 +117,7 @@ CUDAVirtualMemAllocatorV2::CUDAVirtualMemAllocatorV2(const GPUPlace& place,
 
 bool CUDAVirtualMemAllocatorV2::IsAllocThreadSafe() const { return false; }
 
-bool CUDAVirtualMemAllocatorV2::IsReservedVaRange(VMMDevicePtr ptr,
+bool CUDAVirtualMemAllocatorV2::IsReservedVARange(VMMDevicePtr ptr,
                                                   size_t size) const {
   if (ptr == 0 || size == 0 || virtual_mem_base_ == 0 ||
       virtual_mem_size_ == 0) {
@@ -633,7 +633,7 @@ bool CUDAVirtualMemAllocatorV2::IsRangeReusable(VMMDevicePtr ptr,
   return backing_map_.IsRangeReusableForAllocation(ptr, size);
 }
 
-bool CUDAVirtualMemAllocatorV2::IsDriverVaRangeUnmapped(VMMDevicePtr ptr,
+bool CUDAVirtualMemAllocatorV2::IsDriverVARangeUnmapped(VMMDevicePtr ptr,
                                                         size_t size) const {
   platform::CUDADeviceGuard guard(place_.device);
   for (size_t off = 0; off < size; off += handle_size_) {
@@ -658,7 +658,7 @@ bool CUDAVirtualMemAllocatorV2::IsDriverVaRangeUnmapped(VMMDevicePtr ptr,
 
 bool CUDAVirtualMemAllocatorV2::IsBlockReusableForAllocation(
     const BlockV2& block) const {
-  if (!IsReservedVaRange(block.BeginVA(), block.Size())) {
+  if (!IsReservedVARange(block.BeginVA(), block.Size())) {
     return false;
   }
   return IsRangeReusable(block.BeginVA(), block.Size());
