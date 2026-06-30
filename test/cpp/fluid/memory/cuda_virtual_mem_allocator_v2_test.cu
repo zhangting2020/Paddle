@@ -183,19 +183,6 @@ TEST(VMMBackingMap, RejectsMappedPageHandleOverwrite) {
                common::enforce::EnforceNotMet);
 }
 
-TEST(CUDAVirtualMemAllocatorV2, DetectsDriverVARangeMapping) {
-  CUDAVirtualMemAllocatorV2 allocator(
-      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
-
-  auto allocation = allocator.Allocate(allocator.HandleSize());
-  ASSERT_NE(allocation, nullptr);
-  auto va = reinterpret_cast<VMMDevicePtr>(allocation->ptr());
-  EXPECT_FALSE(allocator.IsDriverVARangeUnmapped(va, allocator.HandleSize()));
-
-  allocation.reset();
-  EXPECT_TRUE(allocator.IsDriverVARangeUnmapped(va, allocator.HandleSize()));
-}
-
 TEST(CUDAVirtualMemAllocatorV2, AppendWithBlockReturnsMappedFreeBlock) {
   CUDAVirtualMemAllocatorV2 allocator(
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
@@ -281,23 +268,6 @@ TEST(CUDAVirtualMemAllocatorV2, MoveBackingPageRoundTripsHandle) {
       allocator.CollectMappedPages(source_ranges, allocator.HandleSize());
   ASSERT_EQ(restored_pages.size(), 1UL);
   EXPECT_EQ(restored_pages[0].handle, source_pages[0].handle);
-}
-
-TEST(CUDAVirtualMemAllocatorV2, DetectsReusableBlockBacking) {
-  CUDAVirtualMemAllocatorV2 allocator(
-      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
-
-  auto allocation_with_block =
-      allocator.AppendWithBlock(allocator.HandleSize() * 2);
-  ASSERT_NE(allocation_with_block.allocation, nullptr);
-  BlockV2 block = allocation_with_block.block;
-  EXPECT_TRUE(allocator.IsBlockReusableForAllocation(block));
-
-  BlockV2 invalid_block = BlockV2::MakeMappedBlock(BlockType::kFree,
-                                                   reinterpret_cast<void*>(0x1),
-                                                   allocator.HandleSize(),
-                                                   PoolType::kLarge);
-  EXPECT_FALSE(allocator.IsBlockReusableForAllocation(invalid_block));
 }
 
 }  // namespace allocation

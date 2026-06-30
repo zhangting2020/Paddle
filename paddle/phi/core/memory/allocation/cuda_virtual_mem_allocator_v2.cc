@@ -117,21 +117,6 @@ CUDAVirtualMemAllocatorV2::CUDAVirtualMemAllocatorV2(const GPUPlace& place,
 
 bool CUDAVirtualMemAllocatorV2::IsAllocThreadSafe() const { return false; }
 
-bool CUDAVirtualMemAllocatorV2::IsReservedVARange(VMMDevicePtr ptr,
-                                                  size_t size) const {
-  if (ptr == 0 || size == 0 || virtual_mem_base_ == 0 ||
-      virtual_mem_size_ == 0) {
-    return false;
-  }
-  if (ptr < virtual_mem_base_ || ptr + size < ptr) {
-    return false;
-  }
-  if (virtual_mem_base_ + virtual_mem_size_ < virtual_mem_base_) {
-    return false;
-  }
-  return ptr + size <= virtual_mem_base_ + virtual_mem_size_;
-}
-
 void CUDAVirtualMemAllocatorV2::RollbackCreatedHandles(
     const HandleLayout& layout) const {
   for (const auto& meta : layout) {
@@ -631,37 +616,6 @@ bool CUDAVirtualMemAllocatorV2::IsRangeReleasable(VMMDevicePtr ptr,
 bool CUDAVirtualMemAllocatorV2::IsRangeReusable(VMMDevicePtr ptr,
                                                 size_t size) const {
   return backing_map_.IsRangeReusableForAllocation(ptr, size);
-}
-
-bool CUDAVirtualMemAllocatorV2::IsDriverVARangeUnmapped(VMMDevicePtr ptr,
-                                                        size_t size) const {
-  platform::CUDADeviceGuard guard(place_.device);
-  for (size_t off = 0; off < size; off += handle_size_) {
-    CUmemGenericAllocationHandle probe_handle;
-    CUresult probe = phi::dynload::cuMemRetainAllocationHandle(
-        &probe_handle, reinterpret_cast<void*>(ptr + off));
-    if (probe == CUDA_SUCCESS) {
-      auto release_status = phi::dynload::cuMemRelease(probe_handle);
-      if (release_status != CUDA_SUCCESS) {
-        VLOG(0) << "VMM V2 driver VA probe retained handle release failed"
-                << " va=" << reinterpret_cast<void*>(ptr + off)
-                << " handle=" << reinterpret_cast<void*>(probe_handle)
-                << " status=" << release_status;
-      }
-      VLOG(3) << "VMM V2 driver VA slot " << reinterpret_cast<void*>(ptr + off)
-              << " is already mapped, range cannot be reused";
-      return false;
-    }
-  }
-  return true;
-}
-
-bool CUDAVirtualMemAllocatorV2::IsBlockReusableForAllocation(
-    const BlockV2& block) const {
-  if (!IsReservedVARange(block.BeginVA(), block.Size())) {
-    return false;
-  }
-  return IsRangeReusable(block.BeginVA(), block.Size());
 }
 
 bool CUDAVirtualMemAllocatorV2::ValidateBackingLayout(
