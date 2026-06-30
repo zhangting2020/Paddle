@@ -212,9 +212,7 @@ class PADDLE_API Allocator : public phi::Allocator {
   }
 
   uint64_t Release(const Place& place) { return ReleaseImpl(place); }
-  size_t Compact(const Place& place, size_t requested_size = 0) {
-    return CompactImpl(place, requested_size);
-  }
+  size_t Compact(const Place& place) { return CompactImpl(place); }
 
   virtual void Accept(AllocatorVisitor* visitor);
 
@@ -222,8 +220,8 @@ class PADDLE_API Allocator : public phi::Allocator {
   virtual phi::Allocation* AllocateImpl(size_t size) = 0;
   virtual void FreeImpl(phi::Allocation* allocation);
   virtual uint64_t ReleaseImpl(const Place& place UNUSED) { return 0; }
-  virtual size_t CompactImpl(const Place& place UNUSED,
-                             size_t requested_size UNUSED) {
+  virtual size_t CompactImpl(const Place& place UNUSED) {
+    PADDLE_THROW(phi::errors::Unimplemented("Compact is not supported"));
     return 0;
   }
 };

@@ -74,8 +74,8 @@ class StatAllocator : public Allocator {
     return underlying_allocator_->Release(place);
   }
 
-  size_t CompactImpl(const Place& place, size_t requested_size) override {
-    return underlying_allocator_->Compact(place, requested_size);
+  size_t CompactImpl(const Place& place) override {
+    return underlying_allocator_->Compact(place);
   }
 
  private:

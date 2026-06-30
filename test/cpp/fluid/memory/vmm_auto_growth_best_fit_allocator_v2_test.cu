@@ -69,9 +69,7 @@ void ExpectIndexedFreeStats(VMMAutoGrowthBestFitAllocatorV2* allocator,
   EXPECT_EQ(actual_max_free, max_free);
 }
 
-void ExpectBlockView(const BlockV2& block) {
-  EXPECT_EQ(block.AllocationPartCount(), 0UL);
-}
+void ExpectBlockView(const BlockV2& block) { EXPECT_GT(block.size_, 0UL); }
 
 }  // namespace
 
@@ -349,7 +347,6 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactRemapsWholeFreeHandleToTail) {
   ASSERT_EQ(it->type_, BlockType::kUnmappedFree);
   EXPECT_EQ(it->ptr_, middle_ptr);
   EXPECT_EQ(it->size_, underlying->HandleSize());
-  EXPECT_EQ(it->AllocationPartCount(), 0UL);
   ++it;
   ASSERT_EQ(it->type_, BlockType::kActive);
   EXPECT_EQ(it->ptr_, last_ptr);
