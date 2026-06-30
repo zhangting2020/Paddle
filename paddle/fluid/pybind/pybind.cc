@@ -1619,8 +1619,9 @@ PYBIND11_MODULE(libpaddle, m) {
       .def(py::init<const DataType &>())
       .def_property_readonly("min",
                              [](const iinfo &a) { return py::int_(a.min); })
-      .def_property_readonly("max",
-                             [](const iinfo &a) { return py::int_(a.max); })
+      .def_property_readonly(
+          "max",
+          [](const iinfo &a) { return py::cast(static_cast<uint64_t>(a.max)); })
       .def_readonly("bits", &iinfo::bits)
       .def_readonly("dtype", &iinfo::dtype)
       .def("__repr__", [](const iinfo &a) {
@@ -3787,8 +3788,11 @@ All parameter, weight, gradient are variables in Paddle.
   m.def("vmm_free_block_info", [](int device_id) {
     return paddle::memory::FreeBlockInfoOfVmmAllocator(GPUPlace(device_id));
   });
+  m.def("all_block_info", [](int device_id) {
+    return paddle::memory::AllBlockInfoOfAllocator(GPUPlace(device_id));
+  });
   m.def("vmm_all_block_info", [](int device_id) {
-    return paddle::memory::AllBlockInfoOfVmmAllocator(GPUPlace(device_id));
+    return paddle::memory::AllBlockInfoOfAllocator(GPUPlace(device_id));
   });
   m.def("get_allocate_record", [](int device_id) {
     return paddle::memory::GetAllocateEvent(GPUPlace(device_id));
