@@ -971,6 +971,15 @@ bool CUDAVirtualMemAllocatorV2::IsRangeReleasable(VMMDevicePtr ptr,
   return backing_map_.IsRangeReleasable(ptr, size);
 }
 
+bool CUDAVirtualMemAllocatorV2::IsReservedVARange(VMMDevicePtr ptr,
+                                                  size_t size) const {
+  if (size == 0 || ptr < virtual_mem_base_) {
+    return false;
+  }
+  const VMMDevicePtr offset = ptr - virtual_mem_base_;
+  return offset <= virtual_mem_size_ && size <= virtual_mem_size_ - offset;
+}
+
 bool CUDAVirtualMemAllocatorV2::CollectIpcParts(
     VMMDevicePtr ptr, size_t size, std::vector<BlockPart>* ipc_parts) const {
   std::vector<IpcBlockPartDescriptor> descriptors;
