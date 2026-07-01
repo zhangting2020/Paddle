@@ -215,6 +215,39 @@ void VMMBackingMap::MarkRemapDestinationMapped(
   }
 }
 
+bool VMMBackingMap::ClearRemapDestinationOwnership(VMMDevicePtr va,
+                                                   size_t size) {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  size_t start = 0;
+  size_t count = 0;
+  if (!CheckRangeLocked(
+          va, size, "ClearRemapDestinationOwnership", &start, &count)) {
+    return false;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    auto& page = pages_[start + i];
+    if (!page.mapped || page.meta == nullptr) {
+      VLOG(0) << "VMM V2 BackingMap cannot clear remap destination ownership "
+              << "for non-mapped page at "
+              << reinterpret_cast<void*>(va + i * page_size_);
+      return false;
+    }
+    bool changed = false;
+    if (page.remap_destination_owned) {
+      page.remap_destination_owned = false;
+      changed = true;
+    }
+    if (page.meta->IsOwnedByRemapDestination()) {
+      page.meta->RestoreOriginalOwnership();
+      changed = true;
+    }
+    if (changed) {
+      page.epoch++;
+    }
+  }
+  return true;
+}
+
 void VMMBackingMap::MarkUnmapped(VMMDevicePtr va, size_t size) {
   std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;

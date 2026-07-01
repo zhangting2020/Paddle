@@ -139,6 +139,7 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   // This is used by upper layers to reuse unmapped-free VA space in place.
   AllocationWithBlock PlaceAtVAWithBlock(VMMDevicePtr ptr, size_t size);
   bool IsAllocationOwnedByRemapDestination(void* ptr) const;
+  bool ClearRemapDestinationOwnership(VMMDevicePtr ptr, size_t size);
 
   // Create a staged synthetic Allocation and mapped-free block for handles
   // moved by remap compaction. The handles already exist (cuMemCreate was done

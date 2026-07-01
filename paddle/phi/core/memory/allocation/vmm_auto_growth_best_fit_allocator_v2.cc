@@ -405,21 +405,35 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
         const auto all_source_state_counts =
             CountRemapSourceStates(all_source_pages);
         const auto memory_stats = CollectRuntimeMemoryStats(place_.device);
+        const size_t missing_releasable_bytes =
+            current_required_releasable_bytes > current_releasable_bytes
+                ? current_required_releasable_bytes - current_releasable_bytes
+                : 0;
+        const size_t blocked_source_pages =
+            all_source_pages.size() > all_source_state_counts.ready
+                ? all_source_pages.size() - all_source_state_counts.ready
+                : 0;
+        const size_t driver_topup_gap_bytes =
+            missing_releasable_bytes > memory_stats.driver_actual_avail
+                ? missing_releasable_bytes - memory_stats.driver_actual_avail
+                : 0;
 
         LOG(INFO)
             << "VMM V2 compact precheck summary: pool="
-            << static_cast<int>(pool_type_) << " reason=" << reason
-            << " requested=" << requested_size
+            << static_cast<int>(pool_type_) << " action=skip"
+            << " reason=" << reason << " requested=" << requested_size
             << " compact_target=" << current_compact_target
             << " required_releasable_bytes="
             << current_required_releasable_bytes
             << " releasable_target_bytes=" << current_releasable_target_bytes
             << " releasable_handles=" << current_releasable_handles
             << " releasable_bytes=" << current_releasable_bytes
+            << " missing_releasable_bytes=" << missing_releasable_bytes
             << " bounded_source_pages=" << bounded_source_page_count
             << " source_ranges=" << compact_source_ranges.size()
             << " all_source_pages=" << all_source_pages.size()
             << " source_ready=" << all_source_state_counts.ready
+            << " source_blocked_pages=" << blocked_source_pages
             << " source_remap_destination_owned="
             << all_source_state_counts.remap_destination_owned
             << " source_pending_event=" << all_source_state_counts.pending_event
@@ -449,6 +463,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
             << memory_stats.paddle_peak_reserved_bytes
             << " driver_actual_avail=" << memory_stats.driver_actual_avail
             << " driver_actual_total=" << memory_stats.driver_actual_total
+            << " driver_topup_gap_bytes=" << driver_topup_gap_bytes
             << " mem_info_status="
             << static_cast<int>(memory_stats.mem_info_status);
       };
@@ -568,14 +583,20 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   }
 
   const auto memory_stats = CollectRuntimeMemoryStats(place_.device);
+  const size_t driver_topup_bytes =
+      required_releasable_bytes > releasable_bytes
+          ? required_releasable_bytes - releasable_bytes
+          : 0;
   LOG(INFO) << "VMM V2 compact attempt summary: pool="
-            << static_cast<int>(pool_type_) << " requested=" << requested_size
+            << static_cast<int>(pool_type_) << " action=compact"
+            << " requested=" << requested_size
             << " compact_target=" << compact_target
             << " partial=" << (compact_target < requested_size)
             << " required_releasable_bytes=" << required_releasable_bytes
             << " releasable_target_bytes=" << releasable_target_bytes
             << " releasable_handles=" << releasable_handles
             << " releasable_bytes=" << releasable_bytes
+            << " driver_topup_bytes=" << driver_topup_bytes
             << " source_ranges=" << compact_source_ranges.size()
             << " source_pages=" << source_pages.size()
             << " total_free=" << total_free << " max_free=" << max_free

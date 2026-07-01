@@ -410,6 +410,18 @@ bool CUDAVirtualMemAllocatorV2::IsAllocationOwnedByRemapDestination(
   return IsRemapDestinationOwnedLayout(layout);
 }
 
+bool CUDAVirtualMemAllocatorV2::ClearRemapDestinationOwnership(VMMDevicePtr ptr,
+                                                               size_t size) {
+  if (!IsReservedVARange(ptr, size)) {
+    VLOG(0) << "ClearRemapDestinationOwnership: range outside reserved VA, ptr="
+            << reinterpret_cast<void*>(ptr) << " size=" << size
+            << " base=" << reinterpret_cast<void*>(virtual_mem_base_)
+            << " reserved_size=" << virtual_mem_size_;
+    return false;
+  }
+  return backing_map_.ClearRemapDestinationOwnership(ptr, size);
+}
+
 void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   auto* ptr = allocation->ptr();
   HandleLayout layout = RequireHandleLayout(ptr);

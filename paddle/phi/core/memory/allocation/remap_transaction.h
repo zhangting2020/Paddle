@@ -276,6 +276,8 @@ class RemapTransaction {
                                      const DestinationPlacement& placement,
                                      BlockV2 free_block,
                                      PoolType pool_type) const;
+  void FinalizeDestinationPlacementOwnership(
+      const DestinationPlacement& placement) const;
   BlockV2 MakeUnmappedFreeBlock(void* ptr,
                                 size_t size,
                                 PoolType pool_type) const;

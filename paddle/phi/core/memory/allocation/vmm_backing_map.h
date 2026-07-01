@@ -67,6 +67,7 @@ class VMMBackingMap {
   void MarkRemapDestinationMapped(VMMDevicePtr va,
                                   const std::shared_ptr<VMMHandleMeta>& meta,
                                   size_t size);
+  bool ClearRemapDestinationOwnership(VMMDevicePtr va, size_t size);
   void MarkUnmapped(VMMDevicePtr va, size_t size);
   void MarkReleased(VMMDevicePtr va, VMMAllocHandle handle, size_t size);
   void MarkIpcExported(VMMDevicePtr va, size_t size);
