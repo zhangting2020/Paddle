@@ -386,6 +386,10 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
       largest_unmapped_free = std::max(largest_unmapped_free, blk.size_);
     }
   }
+  const size_t ipc_exported_backing_bytes =
+      underlying_allocator_->CountIpcExportedBytes(compact_source_ranges);
+  const bool ipc_exported_metadata_match =
+      ipc_exported_mapped_free_bytes == ipc_exported_backing_bytes;
   const bool has_tail_block = !all_blocks_.empty();
   const bool tail_is_indexable =
       has_tail_block && CanIndexFreeBlock(all_blocks_.back());
@@ -439,6 +443,8 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
             << ipc_exported_mapped_free_blocks
             << " ipc_exported_mapped_free_bytes="
             << ipc_exported_mapped_free_bytes
+            << " ipc_exported_backing_bytes=" << ipc_exported_backing_bytes
+            << " ipc_exported_metadata_match=" << ipc_exported_metadata_match
             << " unmapped_free_blocks=" << unmapped_free_blocks_count
             << " unmapped_free_bytes=" << unmapped_free_bytes
             << " largest_unmapped_free=" << largest_unmapped_free
@@ -575,6 +581,8 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
       << " largest_indexable_mapped_free=" << max_free
       << " ipc_exported_mapped_free_blocks=" << ipc_exported_mapped_free_blocks
       << " ipc_exported_mapped_free_bytes=" << ipc_exported_mapped_free_bytes
+      << " ipc_exported_backing_bytes=" << ipc_exported_backing_bytes
+      << " ipc_exported_metadata_match=" << ipc_exported_metadata_match
       << " unmapped_free_blocks=" << unmapped_free_blocks_count
       << " unmapped_free_bytes=" << unmapped_free_bytes
       << " largest_unmapped_free=" << largest_unmapped_free

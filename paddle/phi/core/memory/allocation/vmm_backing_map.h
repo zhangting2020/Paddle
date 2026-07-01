@@ -88,6 +88,8 @@ class VMMBackingMap {
   bool IsRangeUnmapped(VMMDevicePtr va, size_t size) const;
   bool IsRangeReleasable(VMMDevicePtr va, size_t size) const;
   bool HasIpcExportedPages(VMMDevicePtr va, size_t size) const;
+  size_t CountIpcExportedBytes(
+      const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const;
   std::vector<MappedPage> CollectMappedPages(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
       size_t target_bytes = 0) const;

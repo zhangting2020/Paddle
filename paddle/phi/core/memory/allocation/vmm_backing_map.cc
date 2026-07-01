@@ -466,6 +466,39 @@ bool VMMBackingMap::HasIpcExportedPages(VMMDevicePtr va, size_t size) const {
   return false;
 }
 
+size_t VMMBackingMap::CountIpcExportedBytes(
+    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  size_t bytes = 0;
+  for (const auto& range : ranges) {
+    const auto va = range.first;
+    const auto size = range.second;
+    size_t start = 0;
+    size_t count = 0;
+    if (!ComputeOverlappedPages(base_,
+                                size_,
+                                page_size_,
+                                va,
+                                size,
+                                "CountIpcExportedBytes",
+                                &start,
+                                &count)) {
+      continue;
+    }
+    for (size_t i = 0; i < count; ++i) {
+      const auto& page = pages_[start + i];
+      if (!page.ipc_exported) {
+        continue;
+      }
+      const VMMDevicePtr page_va = base_ + (start + i) * page_size_;
+      const VMMDevicePtr slice_begin = std::max(va, page_va);
+      const VMMDevicePtr slice_end = std::min(va + size, page_va + page_size_);
+      bytes += slice_end - slice_begin;
+    }
+  }
+  return bytes;
+}
+
 std::vector<VMMBackingMap::MappedPage> VMMBackingMap::CollectMappedPages(
     const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
     size_t target_bytes) const {

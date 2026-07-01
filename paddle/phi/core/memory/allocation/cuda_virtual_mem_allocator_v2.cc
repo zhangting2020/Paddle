@@ -964,6 +964,11 @@ bool CUDAVirtualMemAllocatorV2::HasIpcExportedRange(VMMDevicePtr ptr,
   return backing_map_.HasIpcExportedPages(ptr, size);
 }
 
+size_t CUDAVirtualMemAllocatorV2::CountIpcExportedBytes(
+    const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const {
+  return backing_map_.CountIpcExportedBytes(ranges);
+}
+
 bool CUDAVirtualMemAllocatorV2::IsRangeUnmapped(VMMDevicePtr ptr,
                                                 size_t size) const {
   return backing_map_.IsRangeUnmapped(ptr, size);
