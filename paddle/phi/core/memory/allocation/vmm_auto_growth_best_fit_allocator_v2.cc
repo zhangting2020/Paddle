@@ -650,10 +650,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
                                     commit_synthetic_allocation,
                                     can_prepare_synthetic_allocation,
                                     prepare_synthetic_allocation);
-  const bool compact_all = FLAGS_vmm_v2_compact_all;
-  const size_t bounded_compact_target = compact_all ? 0 : compact_target;
-  const size_t remapped =
-      compactor.Compact(&all_blocks_, bounded_compact_target);
+  const size_t remapped = compactor.Compact(&all_blocks_, compact_target);
   // Always rebuild: Phase 1 may have replaced FREE blocks with
   // UNMAPPED-FREE/FREE
   // segments before Phase 2 fails.  Without rebuild, free_blocks_ holds
