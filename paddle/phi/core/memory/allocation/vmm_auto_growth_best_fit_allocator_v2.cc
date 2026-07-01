@@ -23,6 +23,7 @@
 #include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
 #include "paddle/phi/core/memory/allocation/free_block_remap_compactor.h"
+#include "paddle/phi/core/memory/stats.h"
 #include "paddle/phi/core/platform/cuda_device_guard.h"
 #include "paddle/phi/core/platform/device/gpu/gpu_info.h"
 
@@ -374,6 +375,18 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
                 compact_source_ranges, 0);
         const auto all_source_state_counts =
             CountRemapSourceStates(all_source_pages);
+        const auto paddle_allocated_bytes =
+            paddle::memory::DeviceMemoryStatCurrentValue("Allocated",
+                                                         place_.device);
+        const auto paddle_reserved_bytes =
+            paddle::memory::DeviceMemoryStatCurrentValue("Reserved",
+                                                         place_.device);
+        const auto paddle_peak_allocated_bytes =
+            paddle::memory::DeviceMemoryStatPeakValue("Allocated",
+                                                      place_.device);
+        const auto paddle_peak_reserved_bytes =
+            paddle::memory::DeviceMemoryStatPeakValue("Reserved",
+                                                      place_.device);
 
         size_t driver_actual_avail = 0;
         size_t driver_actual_total = 0;
@@ -427,6 +440,10 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
             << " all_blocks=" << all_blocks_.size()
             << " free_index_size=" << free_blocks_.size()
             << " unmapped_free_index_size=" << unmapped_free_blocks_.size()
+            << " paddle_allocated_bytes=" << paddle_allocated_bytes
+            << " paddle_reserved_bytes=" << paddle_reserved_bytes
+            << " paddle_peak_allocated_bytes=" << paddle_peak_allocated_bytes
+            << " paddle_peak_reserved_bytes=" << paddle_peak_reserved_bytes
             << " driver_actual_avail=" << driver_actual_avail
             << " driver_actual_total=" << driver_actual_total
             << " mem_info_status=" << static_cast<int>(mem_info_status);
