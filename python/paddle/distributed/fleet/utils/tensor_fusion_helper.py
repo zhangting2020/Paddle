@@ -14,6 +14,7 @@
 import enum
 import itertools
 import os
+import struct
 import weakref
 from collections import OrderedDict
 
@@ -30,6 +31,69 @@ from paddle.utils import strtobool
 
 from .log_util import logger
 
+_VMM_IPC_HEADER_SIZE = 35
+_VMM_IPC_HEADER_FMT = "<BHI IQQQ".replace(" ", "")
+_ipc_export_debug_total_bytes = 0
+
+
+def _tensor_nbytes(tensor):
+    return int(np.prod(tensor.shape)) * core.size_of_dtype(tensor.dtype)
+
+
+def _vmm_ipc_meta_stats(meta):
+    if meta is None or len(meta) != 5:
+        return None
+    blob = meta[0]
+    if not isinstance(blob, bytes) or len(blob) < _VMM_IPC_HEADER_SIZE:
+        return None
+    version, flags, pid, num_entries, alloc_size, offset, reserved_size = (
+        struct.unpack_from(_VMM_IPC_HEADER_FMT, blob, 0)
+    )
+    return {
+        "version": version,
+        "flags": flags,
+        "pid": pid,
+        "num_entries": num_entries,
+        "alloc_size": alloc_size,
+        "offset": offset,
+        "reserved_size": reserved_size,
+        "blob_size": len(blob),
+    }
+
+
+def _maybe_log_ipc_export(tensor, meta, source):
+    if os.getenv("FLAGS_vmm_ipc_export_debug", "0") != "1":
+        return
+    global _ipc_export_debug_total_bytes
+    tensor_bytes = _tensor_nbytes(tensor)
+    _ipc_export_debug_total_bytes += tensor_bytes
+    vmm_stats = _vmm_ipc_meta_stats(meta)
+    if vmm_stats is not None:
+        logger.info(
+            "[VMM-IPC/export-python] source=%s tensor_bytes=%d "
+            "total_tensor_bytes=%d vmm_alloc_size=%d vmm_reserved_size=%d "
+            "vmm_num_entries=%d vmm_offset=%d vmm_blob_size=%d",
+            source,
+            tensor_bytes,
+            _ipc_export_debug_total_bytes,
+            vmm_stats["alloc_size"],
+            vmm_stats["reserved_size"],
+            vmm_stats["num_entries"],
+            vmm_stats["offset"],
+            vmm_stats["blob_size"],
+        )
+    else:
+        meta_size = meta[2] if meta is not None and len(meta) > 2 else None
+        logger.info(
+            "[VMM-IPC/export-python] source=%s tensor_bytes=%d "
+            "total_tensor_bytes=%d cuda_ipc_meta_size=%s meta_len=%s",
+            source,
+            tensor_bytes,
+            _ipc_export_debug_total_bytes,
+            meta_size,
+            len(meta) if meta is not None else None,
+        )
+
 
 def _share_tensor_ipc_meta(tensor):
     if tensor is None:
@@ -39,7 +103,9 @@ def _share_tensor_ipc_meta(tensor):
         return tensor.value().get_tensor()._share_xpu()
 
     if core.is_compiled_with_cuda() and not core.is_compiled_with_rocm():
-        return tensor.value().get_tensor()._share_cuda()
+        meta = tensor.value().get_tensor()._share_cuda()
+        _maybe_log_ipc_export(tensor, meta, "fleet.tensor_fusion")
+        return meta
     return None
 
 
