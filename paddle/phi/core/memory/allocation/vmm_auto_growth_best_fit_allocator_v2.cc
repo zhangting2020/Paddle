@@ -58,6 +58,39 @@ struct RemapSourceStateCounters {
   size_t partial_or_invalid{0};
 };
 
+struct RuntimeMemoryStats {
+  int64_t paddle_allocated_bytes{0};
+  int64_t paddle_reserved_bytes{0};
+  int64_t paddle_peak_allocated_bytes{0};
+  int64_t paddle_peak_reserved_bytes{0};
+  size_t driver_actual_avail{0};
+  size_t driver_actual_total{0};
+  phi::gpuError_t mem_info_status{phi::gpuSuccess};
+};
+
+RuntimeMemoryStats CollectRuntimeMemoryStats(int device) {
+  RuntimeMemoryStats stats;
+  stats.paddle_allocated_bytes =
+      paddle::memory::DeviceMemoryStatCurrentValue("Allocated", device);
+  stats.paddle_reserved_bytes =
+      paddle::memory::DeviceMemoryStatCurrentValue("Reserved", device);
+  stats.paddle_peak_allocated_bytes =
+      paddle::memory::DeviceMemoryStatPeakValue("Allocated", device);
+  stats.paddle_peak_reserved_bytes =
+      paddle::memory::DeviceMemoryStatPeakValue("Reserved", device);
+  {
+    platform::CUDADeviceGuard guard(device);
+    stats.mem_info_status =
+        cudaMemGetInfo(&stats.driver_actual_avail, &stats.driver_actual_total);
+    if (stats.mem_info_status != phi::gpuSuccess) {
+      stats.driver_actual_avail = 0;
+      stats.driver_actual_total = 0;
+      (void)platform::GpuGetLastError();
+    }
+  }
+  return stats;
+}
+
 RemapSourceStateCounters CountRemapSourceStates(
     const std::vector<VMMBackingMap::MappedPage>& pages) {
   RemapSourceStateCounters counters;
@@ -375,32 +408,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
                 compact_source_ranges, 0);
         const auto all_source_state_counts =
             CountRemapSourceStates(all_source_pages);
-        const auto paddle_allocated_bytes =
-            paddle::memory::DeviceMemoryStatCurrentValue("Allocated",
-                                                         place_.device);
-        const auto paddle_reserved_bytes =
-            paddle::memory::DeviceMemoryStatCurrentValue("Reserved",
-                                                         place_.device);
-        const auto paddle_peak_allocated_bytes =
-            paddle::memory::DeviceMemoryStatPeakValue("Allocated",
-                                                      place_.device);
-        const auto paddle_peak_reserved_bytes =
-            paddle::memory::DeviceMemoryStatPeakValue("Reserved",
-                                                      place_.device);
-
-        size_t driver_actual_avail = 0;
-        size_t driver_actual_total = 0;
-        phi::gpuError_t mem_info_status = phi::gpuSuccess;
-        {
-          platform::CUDADeviceGuard guard(place_.device);
-          mem_info_status =
-              cudaMemGetInfo(&driver_actual_avail, &driver_actual_total);
-          if (mem_info_status != phi::gpuSuccess) {
-            driver_actual_avail = 0;
-            driver_actual_total = 0;
-            (void)platform::GpuGetLastError();
-          }
-        }
+        const auto memory_stats = CollectRuntimeMemoryStats(place_.device);
 
         LOG(INFO)
             << "VMM V2 compact precheck summary: pool="
@@ -440,13 +448,16 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
             << " all_blocks=" << all_blocks_.size()
             << " free_index_size=" << free_blocks_.size()
             << " unmapped_free_index_size=" << unmapped_free_blocks_.size()
-            << " paddle_allocated_bytes=" << paddle_allocated_bytes
-            << " paddle_reserved_bytes=" << paddle_reserved_bytes
-            << " paddle_peak_allocated_bytes=" << paddle_peak_allocated_bytes
-            << " paddle_peak_reserved_bytes=" << paddle_peak_reserved_bytes
-            << " driver_actual_avail=" << driver_actual_avail
-            << " driver_actual_total=" << driver_actual_total
-            << " mem_info_status=" << static_cast<int>(mem_info_status);
+            << " paddle_allocated_bytes=" << memory_stats.paddle_allocated_bytes
+            << " paddle_reserved_bytes=" << memory_stats.paddle_reserved_bytes
+            << " paddle_peak_allocated_bytes="
+            << memory_stats.paddle_peak_allocated_bytes
+            << " paddle_peak_reserved_bytes="
+            << memory_stats.paddle_peak_reserved_bytes
+            << " driver_actual_avail=" << memory_stats.driver_actual_avail
+            << " driver_actual_total=" << memory_stats.driver_actual_total
+            << " mem_info_status="
+            << static_cast<int>(memory_stats.mem_info_status);
       };
 
   size_t compact_target = requested_size;
@@ -543,6 +554,42 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
             << " source_ranges=" << compact_source_ranges.size() << ")";
     return 0;
   }
+
+  const auto memory_stats = CollectRuntimeMemoryStats(place_.device);
+  LOG(INFO)
+      << "VMM V2 compact attempt summary: pool=" << static_cast<int>(pool_type_)
+      << " requested=" << requested_size << " compact_target=" << compact_target
+      << " partial=" << (compact_target < requested_size)
+      << " required_releasable_bytes=" << required_releasable_bytes
+      << " releasable_target_bytes=" << releasable_target_bytes
+      << " releasable_handles=" << releasable_handles
+      << " releasable_bytes=" << releasable_bytes
+      << " source_ranges=" << compact_source_ranges.size()
+      << " source_pages=" << source_pages.size() << " total_free=" << total_free
+      << " max_free=" << max_free << " tail_free=" << tail_free
+      << " mapped_free_blocks=" << mapped_free_blocks
+      << " mapped_free_bytes=" << mapped_free_bytes
+      << " largest_mapped_free=" << largest_mapped_free
+      << " indexable_mapped_free_blocks=" << indexable_mapped_free_blocks
+      << " indexable_mapped_free_bytes=" << indexable_mapped_free_bytes
+      << " largest_indexable_mapped_free=" << max_free
+      << " ipc_exported_mapped_free_blocks=" << ipc_exported_mapped_free_blocks
+      << " ipc_exported_mapped_free_bytes=" << ipc_exported_mapped_free_bytes
+      << " unmapped_free_blocks=" << unmapped_free_blocks_count
+      << " unmapped_free_bytes=" << unmapped_free_bytes
+      << " largest_unmapped_free=" << largest_unmapped_free
+      << " all_blocks=" << all_blocks_.size()
+      << " free_index_size=" << free_blocks_.size()
+      << " unmapped_free_index_size=" << unmapped_free_blocks_.size()
+      << " paddle_allocated_bytes=" << memory_stats.paddle_allocated_bytes
+      << " paddle_reserved_bytes=" << memory_stats.paddle_reserved_bytes
+      << " paddle_peak_allocated_bytes="
+      << memory_stats.paddle_peak_allocated_bytes
+      << " paddle_peak_reserved_bytes="
+      << memory_stats.paddle_peak_reserved_bytes
+      << " driver_actual_avail=" << memory_stats.driver_actual_avail
+      << " driver_actual_total=" << memory_stats.driver_actual_total
+      << " mem_info_status=" << static_cast<int>(memory_stats.mem_info_status);
 
   VLOG(3) << "VMM V2 pool " << static_cast<int>(pool_type_)
           << " compact: total_free=" << total_free << " max_free=" << max_free
