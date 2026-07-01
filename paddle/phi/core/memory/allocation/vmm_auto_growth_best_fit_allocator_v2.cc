@@ -525,21 +525,40 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
 
   if (requested_size > 0 && !FLAGS_vmm_v2_compact_all &&
       releasable_bytes < required_releasable_bytes) {
-    log_compact_precheck_summary("insufficient_releasable_mapped_free",
-                                 compact_target,
-                                 required_releasable_bytes,
-                                 releasable_target_bytes,
-                                 releasable_handles,
-                                 releasable_bytes,
-                                 source_pages.size());
-    VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
-            << " compact skip: releasable_bytes=" << releasable_bytes
-            << " < required=" << required_releasable_bytes
-            << " requested=" << requested_size << " total_free=" << total_free
-            << " max_free=" << max_free << " tail_free=" << tail_free
-            << " compact_target=" << compact_target
-            << " source_ranges=" << compact_source_ranges.size();
-    return 0;
+    const auto memory_stats = CollectRuntimeMemoryStats(place_.device);
+    const size_t driver_topup_bytes =
+        required_releasable_bytes - releasable_bytes;
+    const bool driver_can_top_up =
+        memory_stats.mem_info_status == phi::gpuSuccess &&
+        memory_stats.driver_actual_avail >= driver_topup_bytes;
+    if (!driver_can_top_up) {
+      log_compact_precheck_summary("insufficient_releasable_mapped_free",
+                                   compact_target,
+                                   required_releasable_bytes,
+                                   releasable_target_bytes,
+                                   releasable_handles,
+                                   releasable_bytes,
+                                   source_pages.size());
+      VLOG(4) << "VMM V2 pool " << static_cast<int>(pool_type_)
+              << " compact skip: releasable_bytes=" << releasable_bytes
+              << " < required=" << required_releasable_bytes
+              << " and driver_actual_avail=" << memory_stats.driver_actual_avail
+              << " < driver_topup_bytes=" << driver_topup_bytes
+              << " requested=" << requested_size << " total_free=" << total_free
+              << " max_free=" << max_free << " tail_free=" << tail_free
+              << " compact_target=" << compact_target
+              << " source_ranges=" << compact_source_ranges.size();
+      return 0;
+    }
+    compact_target = releasable_bytes;
+    VLOG(3) << "VMM V2 pool " << static_cast<int>(pool_type_)
+            << " compact partial with driver top-up: releasable_bytes="
+            << releasable_bytes
+            << " required_releasable_bytes=" << required_releasable_bytes
+            << " driver_actual_avail=" << memory_stats.driver_actual_avail
+            << " driver_topup_bytes=" << driver_topup_bytes
+            << " requested=" << requested_size
+            << " compact_target=" << compact_target;
   }
 
   if (releasable_handles == 0) {
