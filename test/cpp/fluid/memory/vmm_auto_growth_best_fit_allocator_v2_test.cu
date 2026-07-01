@@ -411,7 +411,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
-     CollectTensorPartsMarksIpcExportedAndPinsFreedBlock) {
+     CollectTensorPartsMarksIpcExportedButAllowsRegularReuse) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
       underlying, 256, phi::GPUPlace(), PoolType::kLarge);
@@ -447,7 +447,8 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   EXPECT_TRUE(allocator.all_blocks().front().IsFree());
   EXPECT_TRUE(underlying->HasIpcExportedRange(
       reinterpret_cast<VMMDevicePtr>(ptr), underlying->handle_size() * 2));
-  ExpectIndexedFreeStats(&allocator, 0UL, 0UL);
+  ExpectIndexedFreeStats(
+      &allocator, underlying->handle_size() * 2, underlying->handle_size() * 2);
 
   auto released = allocator.Release(phi::GPUPlace());
   EXPECT_EQ(released, 0UL);
@@ -461,8 +462,8 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
 
   auto next = allocator.Allocate(underlying->handle_size() * 2);
   ASSERT_NE(next, nullptr);
-  EXPECT_NE(next->ptr(), ptr);
-  EXPECT_GT(underlying->tail_offset(), tail_after_first_alloc);
+  EXPECT_EQ(next->ptr(), ptr);
+  EXPECT_EQ(underlying->tail_offset(), tail_after_first_alloc);
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
@@ -495,7 +496,8 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
       reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->handle_size()));
   EXPECT_EQ(allocator.all_blocks().front().size_,
             underlying->handle_size() * 2);
-  ExpectIndexedFreeStats(&allocator, 0UL, 0UL);
+  ExpectIndexedFreeStats(
+      &allocator, underlying->handle_size() * 2, underlying->handle_size() * 2);
 
   auto released = allocator.Release(phi::GPUPlace());
   EXPECT_EQ(released, underlying->handle_size());
@@ -513,8 +515,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
 
   auto next = allocator.Allocate(underlying->handle_size());
   ASSERT_NE(next, nullptr);
-  EXPECT_NE(next->ptr(), exported_ptr);
-  EXPECT_EQ(next->ptr(), regular_ptr);
+  EXPECT_EQ(next->ptr(), exported_ptr);
   EXPECT_EQ(underlying->tail_offset(), tail_after_two_allocs);
 }
 
@@ -547,10 +548,11 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
       reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->handle_size()));
   EXPECT_EQ(allocator.all_blocks().front().size_,
             underlying->handle_size() * 2);
-  ExpectIndexedFreeStats(&allocator, 0UL, 0UL);
+  ExpectIndexedFreeStats(
+      &allocator, underlying->handle_size() * 2, underlying->handle_size() * 2);
 
   auto compacted =
-      allocator.Compact(phi::GPUPlace(), underlying->handle_size());
+      allocator.Compact(phi::GPUPlace(), underlying->handle_size() * 3);
   EXPECT_EQ(compacted, underlying->handle_size());
   ASSERT_GE(allocator.all_blocks().size(), 4UL);
 

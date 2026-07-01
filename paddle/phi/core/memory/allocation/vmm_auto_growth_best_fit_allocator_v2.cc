@@ -357,8 +357,6 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   size_t largest_mapped_free = 0;
   size_t indexable_mapped_free_blocks = 0;
   size_t indexable_mapped_free_bytes = 0;
-  size_t ipc_exported_mapped_free_blocks = 0;
-  size_t ipc_exported_mapped_free_bytes = 0;
   size_t unmapped_free_blocks_count = 0;
   size_t unmapped_free_bytes = 0;
   size_t largest_unmapped_free = 0;
@@ -370,10 +368,6 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
       largest_mapped_free = std::max(largest_mapped_free, blk.size_);
       total_free += blk.size_;
       compact_source_ranges.emplace_back(blk.va_range());
-      if (blk.ipc_exported_) {
-        ++ipc_exported_mapped_free_blocks;
-        ipc_exported_mapped_free_bytes += blk.size_;
-      }
     }
     if (CanIndexFreeBlock(blk)) {
       ++indexable_mapped_free_blocks;
@@ -388,8 +382,6 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   }
   const size_t ipc_exported_backing_bytes =
       underlying_allocator_->CountIpcExportedBytes(compact_source_ranges);
-  const bool ipc_exported_metadata_match =
-      ipc_exported_mapped_free_bytes == ipc_exported_backing_bytes;
   const bool has_tail_block = !all_blocks_.empty();
   const bool tail_is_indexable =
       has_tail_block && CanIndexFreeBlock(all_blocks_.back());
@@ -439,12 +431,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
             << " indexable_mapped_free_blocks=" << indexable_mapped_free_blocks
             << " indexable_mapped_free_bytes=" << indexable_mapped_free_bytes
             << " largest_indexable_mapped_free=" << max_free
-            << " ipc_exported_mapped_free_blocks="
-            << ipc_exported_mapped_free_blocks
-            << " ipc_exported_mapped_free_bytes="
-            << ipc_exported_mapped_free_bytes
             << " ipc_exported_backing_bytes=" << ipc_exported_backing_bytes
-            << " ipc_exported_metadata_match=" << ipc_exported_metadata_match
             << " unmapped_free_blocks=" << unmapped_free_blocks_count
             << " unmapped_free_bytes=" << unmapped_free_bytes
             << " largest_unmapped_free=" << largest_unmapped_free
@@ -581,42 +568,41 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   }
 
   const auto memory_stats = CollectRuntimeMemoryStats(place_.device);
-  LOG(INFO)
-      << "VMM V2 compact attempt summary: pool=" << static_cast<int>(pool_type_)
-      << " requested=" << requested_size << " compact_target=" << compact_target
-      << " partial=" << (compact_target < requested_size)
-      << " required_releasable_bytes=" << required_releasable_bytes
-      << " releasable_target_bytes=" << releasable_target_bytes
-      << " releasable_handles=" << releasable_handles
-      << " releasable_bytes=" << releasable_bytes
-      << " source_ranges=" << compact_source_ranges.size()
-      << " source_pages=" << source_pages.size() << " total_free=" << total_free
-      << " max_free=" << max_free << " tail_free=" << tail_free
-      << " mapped_free_blocks=" << mapped_free_blocks
-      << " mapped_free_bytes=" << mapped_free_bytes
-      << " largest_mapped_free=" << largest_mapped_free
-      << " indexable_mapped_free_blocks=" << indexable_mapped_free_blocks
-      << " indexable_mapped_free_bytes=" << indexable_mapped_free_bytes
-      << " largest_indexable_mapped_free=" << max_free
-      << " ipc_exported_mapped_free_blocks=" << ipc_exported_mapped_free_blocks
-      << " ipc_exported_mapped_free_bytes=" << ipc_exported_mapped_free_bytes
-      << " ipc_exported_backing_bytes=" << ipc_exported_backing_bytes
-      << " ipc_exported_metadata_match=" << ipc_exported_metadata_match
-      << " unmapped_free_blocks=" << unmapped_free_blocks_count
-      << " unmapped_free_bytes=" << unmapped_free_bytes
-      << " largest_unmapped_free=" << largest_unmapped_free
-      << " all_blocks=" << all_blocks_.size()
-      << " free_index_size=" << free_blocks_.size()
-      << " unmapped_free_index_size=" << unmapped_free_blocks_.size()
-      << " paddle_allocated_bytes=" << memory_stats.paddle_allocated_bytes
-      << " paddle_reserved_bytes=" << memory_stats.paddle_reserved_bytes
-      << " paddle_peak_allocated_bytes="
-      << memory_stats.paddle_peak_allocated_bytes
-      << " paddle_peak_reserved_bytes="
-      << memory_stats.paddle_peak_reserved_bytes
-      << " driver_actual_avail=" << memory_stats.driver_actual_avail
-      << " driver_actual_total=" << memory_stats.driver_actual_total
-      << " mem_info_status=" << static_cast<int>(memory_stats.mem_info_status);
+  LOG(INFO) << "VMM V2 compact attempt summary: pool="
+            << static_cast<int>(pool_type_) << " requested=" << requested_size
+            << " compact_target=" << compact_target
+            << " partial=" << (compact_target < requested_size)
+            << " required_releasable_bytes=" << required_releasable_bytes
+            << " releasable_target_bytes=" << releasable_target_bytes
+            << " releasable_handles=" << releasable_handles
+            << " releasable_bytes=" << releasable_bytes
+            << " source_ranges=" << compact_source_ranges.size()
+            << " source_pages=" << source_pages.size()
+            << " total_free=" << total_free << " max_free=" << max_free
+            << " tail_free=" << tail_free
+            << " mapped_free_blocks=" << mapped_free_blocks
+            << " mapped_free_bytes=" << mapped_free_bytes
+            << " largest_mapped_free=" << largest_mapped_free
+            << " indexable_mapped_free_blocks=" << indexable_mapped_free_blocks
+            << " indexable_mapped_free_bytes=" << indexable_mapped_free_bytes
+            << " largest_indexable_mapped_free=" << max_free
+            << " ipc_exported_backing_bytes=" << ipc_exported_backing_bytes
+            << " unmapped_free_blocks=" << unmapped_free_blocks_count
+            << " unmapped_free_bytes=" << unmapped_free_bytes
+            << " largest_unmapped_free=" << largest_unmapped_free
+            << " all_blocks=" << all_blocks_.size()
+            << " free_index_size=" << free_blocks_.size()
+            << " unmapped_free_index_size=" << unmapped_free_blocks_.size()
+            << " paddle_allocated_bytes=" << memory_stats.paddle_allocated_bytes
+            << " paddle_reserved_bytes=" << memory_stats.paddle_reserved_bytes
+            << " paddle_peak_allocated_bytes="
+            << memory_stats.paddle_peak_allocated_bytes
+            << " paddle_peak_reserved_bytes="
+            << memory_stats.paddle_peak_reserved_bytes
+            << " driver_actual_avail=" << memory_stats.driver_actual_avail
+            << " driver_actual_total=" << memory_stats.driver_actual_total
+            << " mem_info_status="
+            << static_cast<int>(memory_stats.mem_info_status);
 
   VLOG(3) << "VMM V2 pool " << static_cast<int>(pool_type_)
           << " compact: total_free=" << total_free << " max_free=" << max_free
@@ -990,7 +976,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::TryReleaseIdleUnderlying(
 
 bool VMMAutoGrowthBestFitAllocatorV2::CanIndexFreeBlock(
     const BlockV2& block) const {
-  return block.IsMappedFree() && !block.ipc_exported_;
+  return block.IsMappedFree();
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::InsertFreeBlock(BlockListIt it) {
