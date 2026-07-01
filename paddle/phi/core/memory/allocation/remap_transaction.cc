@@ -751,7 +751,7 @@ bool RemapTransaction::TryCommitTailMovePlacement(BlockList* blocks,
       MaterializeDestinationPlacement(placement, plan->handles, pool_type);
   InstallMappedDestinationRange(
       blocks, placement, std::move(mapped.free_block), pool_type);
-  FinalizeDestinationPlacementOwnership(placement);
+  MaybeFinalizeDestinationPlacementOwnership(placement);
   NormalizeBlocks(blocks);
   Commit();
   return true;
@@ -860,7 +860,12 @@ bool RemapTransaction::MovePlannedPagesToTargets(
                                                  true,
                                                  true)) {
       VLOG(0) << "VMM V2 remap transaction: MoveBackingPage failed at " << i
-              << "/" << handle_count;
+              << "/" << handle_count
+              << " source=" << reinterpret_cast<void*>(plan->source_pages[i].va)
+              << " target=" << reinterpret_cast<void*>(target_pages[i].va)
+              << " handle="
+              << reinterpret_cast<void*>(plan->source_pages[i].handle)
+              << " meta=" << plan->metas[i].get();
       Rollback();
       return false;
     }
@@ -955,7 +960,7 @@ bool RemapTransaction::TryCommitSingleUnmappedFreeMovePlacement(
       MaterializeDestinationPlacement(placement, plan->handles, pool_type);
   InstallMappedDestinationRange(
       blocks, placement, std::move(mapped.free_block), pool_type);
-  FinalizeDestinationPlacementOwnership(placement);
+  MaybeFinalizeDestinationPlacementOwnership(placement);
   NormalizeBlocks(blocks);
   Commit();
   return true;
@@ -986,7 +991,7 @@ bool RemapTransaction::TryCommitUnmappedFreeMoveScatter(
     auto mapped = MaterializeDestinationPlacement(p, plan->handles, pool_type);
     InstallMappedDestinationRange(
         blocks, p, std::move(mapped.free_block), pool_type);
-    FinalizeDestinationPlacementOwnership(p);
+    MaybeFinalizeDestinationPlacementOwnership(p);
   }
   NormalizeBlocks(blocks);
   Commit();
@@ -1054,6 +1059,7 @@ RemapTransaction::CompactResult RemapTransaction::CompactFreeBlocks(
     BlockList* blocks, size_t requested_size, PoolType pool_type) {
   CompactResult result;
   rollback_source_mappings_ = {};
+  finalize_destination_ownership_ = requested_size > 0;
 
   VMMDevicePtr tail_va = vmm_allocator_->virtual_mem_base();
   if (!blocks->empty()) {
@@ -1173,6 +1179,14 @@ void RemapTransaction::FinalizeDestinationPlacementOwnership(
           "bytes %zu.",
           reinterpret_cast<void*>(placement.dst),
           bytes));
+}
+
+void RemapTransaction::MaybeFinalizeDestinationPlacementOwnership(
+    const DestinationPlacement& placement) const {
+  if (!finalize_destination_ownership_) {
+    return;
+  }
+  FinalizeDestinationPlacementOwnership(placement);
 }
 
 BlockV2 RemapTransaction::MakeUnmappedFreeBlock(void* ptr,

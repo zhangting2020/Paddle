@@ -58,12 +58,18 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   };
 
   struct AllocationLayoutRegistry {
-    void Add(void* ptr, const HandleLayout& layout);
+    void Add(Allocation* allocation, void* ptr, const HandleLayout& layout);
     bool Lookup(void* ptr, HandleLayout* layout) const;
-    void Remove(void* ptr);
+    bool Lookup(Allocation* allocation, HandleLayout* layout) const;
+    void Remove(Allocation* allocation, void* ptr);
 
    private:
-    std::unordered_map<void*, HandleLayout> layouts_;
+    struct PtrEntry {
+      Allocation* allocation{nullptr};
+      HandleLayout layout;
+    };
+    std::unordered_map<void*, PtrEntry> layouts_by_ptr_;
+    std::unordered_map<Allocation*, HandleLayout> layouts_by_allocation_;
     mutable SpinLock spinlock_;
   };
 
@@ -140,6 +146,8 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   AllocationWithBlock PlaceAtVAWithBlock(VMMDevicePtr ptr, size_t size);
   bool IsAllocationOwnedByRemapDestination(void* ptr) const;
   bool ClearRemapDestinationOwnership(VMMDevicePtr ptr, size_t size);
+  size_t ClearRemapDestinationOwnershipFullyInRange(VMMDevicePtr ptr,
+                                                    size_t size);
 
   // Create a staged synthetic Allocation and mapped-free block for handles
   // moved by remap compaction. The handles already exist (cuMemCreate was done
@@ -228,9 +236,11 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   Allocation* CreateTrackedAllocation(VMMDevicePtr ptr,
                                       size_t size,
                                       const HandleLayout& layout);
-  void RegisterHandleLayout(void* ptr, const HandleLayout& layout);
-  HandleLayout RequireHandleLayout(void* ptr) const;
-  void UnregisterHandleLayout(void* ptr);
+  void RegisterHandleLayout(Allocation* allocation,
+                            void* ptr,
+                            const HandleLayout& layout);
+  HandleLayout RequireHandleLayout(Allocation* allocation) const;
+  void UnregisterHandleLayout(Allocation* allocation, void* ptr);
 
   GPUPlace place_;
   size_t handle_size_;

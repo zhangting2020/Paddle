@@ -121,13 +121,11 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
     iterator Erase(iterator it);
 
    private:
-    using Index = std::map<uint8_t*, iterator>;
     static uint8_t* Begin(const DecoratedAllocationPtr& allocation);
     static uint8_t* End(const DecoratedAllocationPtr& allocation);
     bool HasOverlap(void* ptr, size_t size) const;
 
     List allocations_;
-    Index allocations_by_ptr_;
   };
 
   phi::Allocation* AllocFromFreeBlocks(size_t size);

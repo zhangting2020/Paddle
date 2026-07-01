@@ -248,6 +248,57 @@ bool VMMBackingMap::ClearRemapDestinationOwnership(VMMDevicePtr va,
   return true;
 }
 
+size_t VMMBackingMap::ClearRemapDestinationOwnershipFullyInRange(
+    VMMDevicePtr va, size_t size) {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  if (!configured_) {
+    VLOG(0) << "VMM V2 BackingMap ClearRemapDestinationOwnershipFullyInRange "
+            << "before Configure, va=" << reinterpret_cast<void*>(va)
+            << " size=" << size;
+    return 0;
+  }
+  if (size == 0 || page_size_ == 0 || AddOverflow(base_, size_) || va < base_ ||
+      va + size < va || va + size > base_ + size_) {
+    VLOG(0) << "VMM V2 BackingMap invalid range in "
+            << "ClearRemapDestinationOwnershipFullyInRange"
+            << ": va=" << reinterpret_cast<void*>(va) << " size=" << size
+            << " base=" << reinterpret_cast<void*>(base_)
+            << " backing_size=" << size_ << " page_size=" << page_size_;
+    return 0;
+  }
+
+  const VMMDevicePtr range_end = va + size;
+  const size_t start_offset = va - base_;
+  const size_t end_offset = range_end - base_;
+  const size_t first_page = (start_offset + page_size_ - 1) / page_size_;
+  const size_t end_page = end_offset / page_size_;
+  if (first_page >= end_page) {
+    return 0;
+  }
+
+  size_t cleared_pages = 0;
+  for (size_t page_idx = first_page; page_idx < end_page; ++page_idx) {
+    auto& page = pages_[page_idx];
+    if (!page.mapped || page.meta == nullptr) {
+      continue;
+    }
+    bool changed = false;
+    if (page.remap_destination_owned) {
+      page.remap_destination_owned = false;
+      changed = true;
+    }
+    if (page.meta->IsOwnedByRemapDestination()) {
+      page.meta->RestoreOriginalOwnership();
+      changed = true;
+    }
+    if (changed) {
+      page.epoch++;
+      cleared_pages++;
+    }
+  }
+  return cleared_pages * page_size_;
+}
+
 void VMMBackingMap::MarkUnmapped(VMMDevicePtr va, size_t size) {
   std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
@@ -471,6 +522,27 @@ bool VMMBackingMap::IsRangeReleasable(VMMDevicePtr va, size_t size) const {
   for (size_t i = 0; i < count; ++i) {
     if (pages_[start + i].ipc_exported ||
         !PageCanUseBackingLocked(&pages_[start + i], "IsRangeReleasable")) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool VMMBackingMap::CanReleaseHandle(VMMDevicePtr va,
+                                     VMMAllocHandle handle,
+                                     const std::shared_ptr<VMMHandleMeta>& meta,
+                                     size_t size) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  size_t start = 0;
+  size_t count = 0;
+  if (!CheckRangeLocked(va, size, "CanReleaseHandle", &start, &count)) {
+    return false;
+  }
+  for (size_t i = 0; i < count; ++i) {
+    auto& page = pages_[start + i];
+    if (!page.mapped || page.handle != handle || page.meta != meta ||
+        page.ipc_exported ||
+        !PageEventsReadyLocked(&page, "CanReleaseHandle")) {
       return false;
     }
   }

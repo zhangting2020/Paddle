@@ -68,6 +68,8 @@ class VMMBackingMap {
                                   const std::shared_ptr<VMMHandleMeta>& meta,
                                   size_t size);
   bool ClearRemapDestinationOwnership(VMMDevicePtr va, size_t size);
+  size_t ClearRemapDestinationOwnershipFullyInRange(VMMDevicePtr va,
+                                                    size_t size);
   void MarkUnmapped(VMMDevicePtr va, size_t size);
   void MarkReleased(VMMDevicePtr va, VMMAllocHandle handle, size_t size);
   void MarkIpcExported(VMMDevicePtr va, size_t size);
@@ -88,6 +90,10 @@ class VMMBackingMap {
   bool IsRangeMapped(VMMDevicePtr va, size_t size) const;
   bool IsRangeUnmapped(VMMDevicePtr va, size_t size) const;
   bool IsRangeReleasable(VMMDevicePtr va, size_t size) const;
+  bool CanReleaseHandle(VMMDevicePtr va,
+                        VMMAllocHandle handle,
+                        const std::shared_ptr<VMMHandleMeta>& meta,
+                        size_t size) const;
   bool HasIpcExportedPages(VMMDevicePtr va, size_t size) const;
   size_t CountIpcExportedBytes(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const;

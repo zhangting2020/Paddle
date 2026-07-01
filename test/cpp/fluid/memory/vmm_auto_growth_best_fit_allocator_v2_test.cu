@@ -343,7 +343,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactRemapsWholeFreeHandleToTail) {
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
-     AllocateSkipsOwnershipOverlappedUnmappedFreeBlock) {
+     AllocateReusesUnmappedFreeRangeInsideStaleUnderlyingAllocation) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
       underlying, 256, phi::GPUPlace(), PoolType::kLarge);
@@ -371,8 +371,8 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   const size_t tail_before_unmapped_reuse = underlying->tail_offset();
   auto unmapped_reuse = allocator.Allocate(underlying->handle_size());
   ASSERT_NE(unmapped_reuse, nullptr);
-  EXPECT_NE(unmapped_reuse->ptr(), middle_ptr);
-  EXPECT_GT(underlying->tail_offset(), tail_before_unmapped_reuse);
+  EXPECT_EQ(unmapped_reuse->ptr(), middle_ptr);
+  EXPECT_EQ(underlying->tail_offset(), tail_before_unmapped_reuse);
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
@@ -927,7 +927,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactUsesBlockListTailPlacement) {
       underlying->handle_size());
   ASSERT_EQ(remap_sources.size(), 1UL);
   EXPECT_EQ(remap_sources[0].remap_source_state,
-            VMMBackingMap::RemapSourceState::kReady);
+            VMMBackingMap::RemapSourceState::kRemapDestinationOwned);
 
   auto remapped_active = allocator.Allocate(underlying->handle_size());
   ASSERT_NE(remapped_active, nullptr);
@@ -1090,6 +1090,59 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   const auto* old_source_b = FindBlockByPtr(allocator, source_b_ptr);
   ASSERT_NE(old_source_b, nullptr);
   EXPECT_TRUE(old_source_b->IsFree());
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2,
+     RemapCanUseUnmappedFreeRangeInsideStaleUnderlyingAllocation) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
+
+  const size_t handle_size = underlying->handle_size();
+  auto large = allocator.Allocate(4UL * handle_size);
+  ASSERT_NE(large, nullptr);
+  auto* base_ptr = large->ptr();
+  large.reset();
+
+  auto target = allocator.Allocate(handle_size);
+  auto first_source = allocator.Allocate(handle_size);
+  auto second_source = allocator.Allocate(handle_size);
+  auto tail_guard_source = allocator.Allocate(handle_size);
+  ASSERT_NE(target, nullptr);
+  ASSERT_NE(first_source, nullptr);
+  ASSERT_NE(second_source, nullptr);
+  ASSERT_NE(tail_guard_source, nullptr);
+  EXPECT_EQ(target->ptr(), base_ptr);
+  auto* first_source_ptr = first_source->ptr();
+  auto* second_source_ptr = second_source->ptr();
+
+  MarkRemapSafeForTest(first_source.get());
+  first_source.reset();
+  ASSERT_EQ(allocator.Compact(phi::GPUPlace(), handle_size + 1UL), handle_size);
+
+  auto consume_tail_destination = allocator.Allocate(handle_size);
+  ASSERT_NE(consume_tail_destination, nullptr);
+  auto hidden_tail_mapping = underlying->AppendWithBlock(handle_size);
+  ASSERT_TRUE(hidden_tail_mapping.HasAllocation());
+
+  MarkRemapSafeForTest(second_source.get());
+  second_source.reset();
+  ASSERT_EQ(allocator.Compact(phi::GPUPlace(), handle_size + 1UL), handle_size);
+
+  const auto* first_source_block = FindBlockByPtr(allocator, first_source_ptr);
+  ASSERT_NE(first_source_block, nullptr);
+  EXPECT_TRUE(first_source_block->IsFree());
+
+  const auto* second_source_block =
+      FindBlockByPtr(allocator, second_source_ptr);
+  ASSERT_NE(second_source_block, nullptr);
+  EXPECT_TRUE(second_source_block->IsUnmappedFree());
+
+  target.reset();
+  tail_guard_source.reset();
+  consume_tail_destination.reset();
+  hidden_tail_mapping.allocation.reset();
+  EXPECT_GT(allocator.Release(phi::GPUPlace()), 0UL);
 }
 
 }  // namespace allocation

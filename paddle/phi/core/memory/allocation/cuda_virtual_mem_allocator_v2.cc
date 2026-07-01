@@ -121,16 +121,33 @@ void EmplaceOrEnforce(Map* map,
 }  // namespace
 
 void CUDAVirtualMemAllocatorV2::AllocationLayoutRegistry::Add(
-    void* ptr, const HandleLayout& layout) {
+    Allocation* allocation, void* ptr, const HandleLayout& layout) {
   std::lock_guard<SpinLock> guard(spinlock_);
-  EmplaceOrEnforce(&layouts_, ptr, layout, "allocation_layout_map_");
+  EmplaceOrEnforce(&layouts_by_allocation_,
+                   allocation,
+                   layout,
+                   "allocation_layout_by_allocation_");
+  layouts_by_ptr_[ptr] = PtrEntry{allocation, layout};
 }
 
 bool CUDAVirtualMemAllocatorV2::AllocationLayoutRegistry::Lookup(
     void* ptr, HandleLayout* layout) const {
   std::lock_guard<SpinLock> guard(spinlock_);
-  auto it = layouts_.find(ptr);
-  if (it == layouts_.end()) {
+  auto it = layouts_by_ptr_.find(ptr);
+  if (it == layouts_by_ptr_.end()) {
+    return false;
+  }
+  if (layout != nullptr) {
+    *layout = it->second.layout;
+  }
+  return true;
+}
+
+bool CUDAVirtualMemAllocatorV2::AllocationLayoutRegistry::Lookup(
+    Allocation* allocation, HandleLayout* layout) const {
+  std::lock_guard<SpinLock> guard(spinlock_);
+  auto it = layouts_by_allocation_.find(allocation);
+  if (it == layouts_by_allocation_.end()) {
     return false;
   }
   if (layout != nullptr) {
@@ -139,9 +156,15 @@ bool CUDAVirtualMemAllocatorV2::AllocationLayoutRegistry::Lookup(
   return true;
 }
 
-void CUDAVirtualMemAllocatorV2::AllocationLayoutRegistry::Remove(void* ptr) {
+void CUDAVirtualMemAllocatorV2::AllocationLayoutRegistry::Remove(
+    Allocation* allocation, void* ptr) {
   std::lock_guard<SpinLock> guard(spinlock_);
-  layouts_.erase(ptr);
+  layouts_by_allocation_.erase(allocation);
+  auto ptr_it = layouts_by_ptr_.find(ptr);
+  if (ptr_it != layouts_by_ptr_.end() &&
+      ptr_it->second.allocation == allocation) {
+    layouts_by_ptr_.erase(ptr_it);
+  }
 }
 
 CUDAVirtualMemAllocatorV2::CUDAVirtualMemAllocatorV2(const GPUPlace& place,
@@ -172,6 +195,9 @@ void CUDAVirtualMemAllocatorV2::MarkLayoutMapped(const HandleLayout& layout) {
 void CUDAVirtualMemAllocatorV2::MarkRemapDestinationLayoutMapped(
     const HandleLayout& layout) {
   for (const auto& meta : layout) {
+    if (meta != nullptr && !meta->IsOwnedByRemapDestination()) {
+      meta->MarkOwnedByRemapDestination();
+    }
     backing_map_.MarkRemapDestinationMapped(meta->base(), meta, meta->size());
   }
 }
@@ -422,16 +448,32 @@ bool CUDAVirtualMemAllocatorV2::ClearRemapDestinationOwnership(VMMDevicePtr ptr,
   return backing_map_.ClearRemapDestinationOwnership(ptr, size);
 }
 
+size_t CUDAVirtualMemAllocatorV2::ClearRemapDestinationOwnershipFullyInRange(
+    VMMDevicePtr ptr, size_t size) {
+  if (!IsReservedVARange(ptr, size)) {
+    VLOG(0) << "ClearRemapDestinationOwnershipFullyInRange: range outside "
+            << "reserved VA, ptr=" << reinterpret_cast<void*>(ptr)
+            << " size=" << size
+            << " base=" << reinterpret_cast<void*>(virtual_mem_base_)
+            << " reserved_size=" << virtual_mem_size_;
+    return 0;
+  }
+  return backing_map_.ClearRemapDestinationOwnershipFullyInRange(ptr, size);
+}
+
 void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   auto* ptr = allocation->ptr();
-  HandleLayout layout = RequireHandleLayout(ptr);
+  HandleLayout layout =
+      RequireHandleLayout(static_cast<Allocation*>(allocation));
 
   platform::CUDADeviceGuard guard(place_.device);
   for (const auto& handle : layout) {
-    if (handle->IsOwnedByRemapDestination()) {
-      VLOG(5) << "FreeImpl: skipping remap-destination-owned handle base="
+    if (!backing_map_.CanReleaseHandle(
+            handle->base(), handle->handle(), handle, handle->size())) {
+      VLOG(6) << "FreeImpl: skipping stale/non-releasable handle base="
               << reinterpret_cast<void*>(handle->base())
-              << " size=" << handle->size();
+              << " size=" << handle->size()
+              << " handle=" << reinterpret_cast<void*>(handle->handle());
       continue;
     }
     PADDLE_ENFORCE_GPU_SUCCESS(
@@ -459,7 +501,7 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
     }
   }
 
-  UnregisterHandleLayout(ptr);
+  UnregisterHandleLayout(static_cast<Allocation*>(allocation), ptr);
   delete allocation;
 }
 
@@ -655,6 +697,13 @@ bool CUDAVirtualMemAllocatorV2::MoveBackingPageForRemap(
     MoveBackingPageStats* stats,
     bool defer_target_access,
     bool source_already_unmapped) {
+  if (meta == nullptr) {
+    VLOG(0) << "MoveBackingPageForRemap: missing handle metadata for source "
+            << reinterpret_cast<void*>(source.va)
+            << " target=" << reinterpret_cast<void*>(target.va)
+            << " handle=" << reinterpret_cast<void*>(source.handle);
+    return false;
+  }
   if (!MoveBackingPage(source,
                        target,
                        stats,
@@ -859,32 +908,36 @@ CUDAVirtualMemAllocatorV2::BuildAllocationWithBlock(
 
 Allocation* CUDAVirtualMemAllocatorV2::CreateTrackedAllocation(
     VMMDevicePtr ptr, size_t size, const HandleLayout& layout) {
-  RegisterHandleLayout(reinterpret_cast<void*>(ptr), layout);
-  return new Allocation(reinterpret_cast<void*>(ptr), size, place_);
+  auto* allocation = new Allocation(reinterpret_cast<void*>(ptr), size, place_);
+  RegisterHandleLayout(allocation, reinterpret_cast<void*>(ptr), layout);
+  return allocation;
 }
 
 void CUDAVirtualMemAllocatorV2::RegisterHandleLayout(
-    void* ptr, const HandleLayout& layout) {
-  allocation_layouts_.Add(ptr, layout);
+    Allocation* allocation, void* ptr, const HandleLayout& layout) {
+  allocation_layouts_.Add(allocation, ptr, layout);
   if (!backing_map_.ValidateLayout(layout, "RegisterHandleLayout")) {
     VLOG(0) << "VMM V2 BackingMap validation failed while registering layout "
             << ptr;
   }
 }
 
-HandleLayout CUDAVirtualMemAllocatorV2::RequireHandleLayout(void* ptr) const {
+HandleLayout CUDAVirtualMemAllocatorV2::RequireHandleLayout(
+    Allocation* allocation) const {
   HandleLayout layout;
-  const bool found = allocation_layouts_.Lookup(ptr, &layout);
+  const bool found = allocation_layouts_.Lookup(allocation, &layout);
   PADDLE_ENFORCE_EQ(
       found,
       true,
       common::errors::NotFound(
-          "No VMMAllocatorV2 handle layout found for allocation %p.", ptr));
+          "No VMMAllocatorV2 handle layout found for allocation %p.",
+          allocation));
   return layout;
 }
 
-void CUDAVirtualMemAllocatorV2::UnregisterHandleLayout(void* ptr) {
-  allocation_layouts_.Remove(ptr);
+void CUDAVirtualMemAllocatorV2::UnregisterHandleLayout(Allocation* allocation,
+                                                       void* ptr) {
+  allocation_layouts_.Remove(allocation, ptr);
 }
 
 Allocation* CUDAVirtualMemAllocatorV2::CreateStagedSyntheticAllocation(
@@ -959,7 +1012,7 @@ void CUDAVirtualMemAllocatorV2::DestroyStagedSyntheticAllocation(
   if (allocation == nullptr) {
     return;
   }
-  UnregisterHandleLayout(allocation->ptr());
+  UnregisterHandleLayout(allocation, allocation->ptr());
   delete allocation;
 }
 

@@ -118,14 +118,6 @@ RemapSourceStateCounters CountRemapSourceStates(
 void VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::Add(
     DecoratedAllocationPtr allocation) {
   allocations_.emplace_back(std::move(allocation));
-  auto it = std::prev(allocations_.end());
-  auto* begin = Begin(*it);
-  PADDLE_ENFORCE_EQ(
-      allocations_by_ptr_.emplace(begin, it).second,
-      true,
-      common::errors::AlreadyExists(
-          "Duplicate underlying allocation base %p in VMM V2 registry.",
-          begin));
 }
 
 namespace {
@@ -155,16 +147,12 @@ uint8_t* VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::End(
 
 bool VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::HasOverlap(
     void* ptr, size_t size) const {
-  auto* begin = reinterpret_cast<uint8_t*>(ptr);
-  auto* end = begin + size;
-  auto it = allocations_by_ptr_.lower_bound(begin);
-  if (it != allocations_by_ptr_.begin()) {
-    auto prev = std::prev(it);
-    if (End(*prev->second) > begin) {
+  for (const auto& allocation : allocations_) {
+    if (RangesOverlap(ptr, size, allocation->ptr(), allocation->size())) {
       return true;
     }
   }
-  return it != allocations_by_ptr_.end() && it->first < end;
+  return false;
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::Overlaps(
@@ -200,7 +188,6 @@ bool VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::
       ++it;
       continue;
     }
-    allocations_by_ptr_.erase(Begin(*it));
     it = allocations_.erase(it);
   }
   return ok;
@@ -209,7 +196,6 @@ bool VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::
 VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::iterator
 VMMAutoGrowthBestFitAllocatorV2::UnderlyingAllocationRegistry::Erase(
     iterator it) {
-  allocations_by_ptr_.erase(Begin(*it));
   return allocations_.erase(it);
 }
 
@@ -650,7 +636,9 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
                                     commit_synthetic_allocation,
                                     can_prepare_synthetic_allocation,
                                     prepare_synthetic_allocation);
-  const size_t remapped = compactor.Compact(&all_blocks_, compact_target);
+  const size_t remap_target =
+      FLAGS_vmm_v2_compact_all ? static_cast<size_t>(0) : compact_target;
+  const size_t remapped = compactor.Compact(&all_blocks_, remap_target);
   // Always rebuild: Phase 1 may have replaced FREE blocks with
   // UNMAPPED-FREE/FREE
   // segments before Phase 2 fails.  Without rebuild, free_blocks_ holds
@@ -804,6 +792,9 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   auto block_it = it->second;
   EraseFreeBlock(block_it);
 
+  underlying_allocator_->ClearRemapDestinationOwnershipFullyInRange(
+      block_it->begin_va(), size);
+
   if (block_it->size_ > size) {
     const size_t remaining_size = block_it->size_ - size;
     BlockV2 remaining_block =
@@ -854,6 +845,9 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
           << " backing_size=" << backing_size
           << " original_unmapped_free_size=" << best->size_
           << " tail_offset=" << underlying_allocator_->tail_offset();
+  if (!ReleaseRemapDestinationUnderlyingAllocations(best->ptr_, backing_size)) {
+    return nullptr;
+  }
   CUDAVirtualMemAllocatorV2::AllocationWithBlock unmapped_free_alloc;
   try {
     unmapped_free_alloc = underlying_allocator_->PlaceAtVAWithBlock(
@@ -916,7 +910,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::AllocationOwnedByRemapDestination(
     size_t target_size) const {
   if (!underlying_allocator_->IsAllocationOwnedByRemapDestination(
           allocation->ptr())) {
-    VLOG(0) << "VMM V2 synthetic allocation preparation: target range "
+    VLOG(6) << "VMM V2 synthetic allocation preparation: target range "
             << target_ptr << " size=" << target_size
             << " overlaps non-remap-destination underlying allocation "
             << allocation->ptr() << " size=" << allocation->size();
@@ -928,15 +922,21 @@ bool VMMAutoGrowthBestFitAllocatorV2::AllocationOwnedByRemapDestination(
 bool VMMAutoGrowthBestFitAllocatorV2::
     CanReleaseRemapDestinationUnderlyingAllocations(void* ptr,
                                                     size_t size) const {
-  return underlying_allocations_.AllOverlapsSatisfy(
-      ptr, size, [this, ptr, size](const DecoratedAllocationPtr& allocation) {
-        return AllocationOwnedByRemapDestination(allocation, ptr, size);
-      });
+  if (underlying_allocations_.AllOverlapsSatisfy(
+          ptr,
+          size,
+          [this, ptr, size](const DecoratedAllocationPtr& allocation) {
+            return AllocationOwnedByRemapDestination(allocation, ptr, size);
+          })) {
+    return true;
+  }
+  return underlying_allocator_->IsRangeUnmapped(
+      reinterpret_cast<VMMDevicePtr>(ptr), size);
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::
     ReleaseRemapDestinationUnderlyingAllocations(void* ptr, size_t size) {
-  return underlying_allocations_.EraseOverlapsIf(
+  const bool released_owned_overlaps = underlying_allocations_.EraseOverlapsIf(
       ptr, size, [this, ptr, size](const DecoratedAllocationPtr& allocation) {
         if (!AllocationOwnedByRemapDestination(allocation, ptr, size)) {
           return false;
@@ -946,6 +946,11 @@ bool VMMAutoGrowthBestFitAllocatorV2::
                 << allocation->ptr() << " size=" << allocation->size();
         return true;
       });
+  if (released_owned_overlaps) {
+    return true;
+  }
+  return underlying_allocator_->IsRangeUnmapped(
+      reinterpret_cast<VMMDevicePtr>(ptr), size);
 }
 
 BlockV2 VMMAutoGrowthBestFitAllocatorV2::AdoptBackingBlock(
@@ -963,7 +968,11 @@ BlockV2 VMMAutoGrowthBestFitAllocatorV2::AdoptBackingBlock(
 
 bool VMMAutoGrowthBestFitAllocatorV2::RangeOverlapsUnderlying(
     void* ptr, size_t size) const {
-  return underlying_allocations_.Overlaps(ptr, size);
+  if (!underlying_allocations_.Overlaps(ptr, size)) {
+    return false;
+  }
+  return !underlying_allocator_->IsRangeUnmapped(
+      reinterpret_cast<VMMDevicePtr>(ptr), size);
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::CanReleaseIdleUnderlying(
