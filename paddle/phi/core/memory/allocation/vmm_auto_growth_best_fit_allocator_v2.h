@@ -121,11 +121,13 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
     iterator Erase(iterator it);
 
    private:
+    using Index = std::map<uint8_t*, iterator>;
     static uint8_t* Begin(const DecoratedAllocationPtr& allocation);
     static uint8_t* End(const DecoratedAllocationPtr& allocation);
     bool HasOverlap(void* ptr, size_t size) const;
 
     List allocations_;
+    Index allocations_by_ptr_;
   };
 
   phi::Allocation* AllocFromFreeBlocks(size_t size);
@@ -140,7 +142,6 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   bool CanReleaseRemapDestinationUnderlyingAllocations(void* ptr,
                                                        size_t size) const;
   bool ReleaseRemapDestinationUnderlyingAllocations(void* ptr, size_t size);
-  bool RangeOverlapsUnderlying(void* ptr, size_t size) const;
   bool CanReleaseIdleUnderlying(uint8_t* base, size_t size) const;
   bool TryReleaseIdleUnderlying(
       UnderlyingAllocationRegistry::iterator* alloc_it, uint64_t* released);

@@ -25,7 +25,8 @@ namespace memory {
 namespace allocation {
 
 size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
-                                        size_t requested_size) {
+                                        size_t requested_size,
+                                        uint64_t compact_seq) {
   const size_t handle_size = vmm_allocator_->handle_size();
   RemapTransaction transaction(vmm_allocator_.get(),
                                handle_size,
@@ -91,7 +92,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
             << " remapped_blocked_bytes=" << stats.remapped_blocked_bytes
             << " backing_blocked=" << stats.backing_blocked_count
             << " backing_blocked_bytes=" << stats.backing_blocked_bytes;
-    LOG(INFO) << "VMM V2 compact summary: phase1 done"
+    LOG(INFO) << "VMM V2 compact summary: seq=" << compact_seq << " phase1=done"
               << " pool=" << static_cast<int>(pool_type_)
               << " requested=" << requested_size
               << " success=" << compact_result.success

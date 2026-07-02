@@ -52,7 +52,9 @@ class FreeBlockRemapCompactor {
   // If requested_size > 0, performs bounded compaction: stops collecting
   // handles once enough are gathered to satisfy the requested allocation size.
   // If requested_size == 0, compacts all eligible handles (unbounded).
-  size_t Compact(std::list<BlockV2>* blocks, size_t requested_size = 0);
+  size_t Compact(std::list<BlockV2>* blocks,
+                 size_t requested_size = 0,
+                 uint64_t compact_seq = 0);
 
  private:
   std::shared_ptr<CUDAVirtualMemAllocatorV2> vmm_allocator_;

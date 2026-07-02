@@ -468,12 +468,10 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
 
   platform::CUDADeviceGuard guard(place_.device);
   for (const auto& handle : layout) {
-    if (!backing_map_.CanReleaseHandle(
-            handle->base(), handle->handle(), handle, handle->size())) {
-      VLOG(6) << "FreeImpl: skipping stale/non-releasable handle base="
+    if (handle->IsOwnedByRemapDestination()) {
+      VLOG(6) << "FreeImpl: skipping remap-destination-owned handle base="
               << reinterpret_cast<void*>(handle->base())
-              << " size=" << handle->size()
-              << " handle=" << reinterpret_cast<void*>(handle->handle());
+              << " size=" << handle->size();
       continue;
     }
     PADDLE_ENFORCE_GPU_SUCCESS(

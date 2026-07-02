@@ -751,7 +751,6 @@ bool RemapTransaction::TryCommitTailMovePlacement(BlockList* blocks,
       MaterializeDestinationPlacement(placement, plan->handles, pool_type);
   InstallMappedDestinationRange(
       blocks, placement, std::move(mapped.free_block), pool_type);
-  MaybeFinalizeDestinationPlacementOwnership(placement);
   NormalizeBlocks(blocks);
   Commit();
   return true;
@@ -960,7 +959,6 @@ bool RemapTransaction::TryCommitSingleUnmappedFreeMovePlacement(
       MaterializeDestinationPlacement(placement, plan->handles, pool_type);
   InstallMappedDestinationRange(
       blocks, placement, std::move(mapped.free_block), pool_type);
-  MaybeFinalizeDestinationPlacementOwnership(placement);
   NormalizeBlocks(blocks);
   Commit();
   return true;
@@ -991,7 +989,6 @@ bool RemapTransaction::TryCommitUnmappedFreeMoveScatter(
     auto mapped = MaterializeDestinationPlacement(p, plan->handles, pool_type);
     InstallMappedDestinationRange(
         blocks, p, std::move(mapped.free_block), pool_type);
-    MaybeFinalizeDestinationPlacementOwnership(p);
   }
   NormalizeBlocks(blocks);
   Commit();
@@ -1059,7 +1056,6 @@ RemapTransaction::CompactResult RemapTransaction::CompactFreeBlocks(
     BlockList* blocks, size_t requested_size, PoolType pool_type) {
   CompactResult result;
   rollback_source_mappings_ = {};
-  finalize_destination_ownership_ = requested_size > 0;
 
   VMMDevicePtr tail_va = vmm_allocator_->virtual_mem_base();
   if (!blocks->empty()) {
@@ -1166,27 +1162,6 @@ void RemapTransaction::InstallMappedDestinationRange(
   }
   InstallMappedUnmappedFreeRange(
       blocks, placement.unmapped_free_it, std::move(free_block), pool_type);
-}
-
-void RemapTransaction::FinalizeDestinationPlacementOwnership(
-    const DestinationPlacement& placement) const {
-  const size_t bytes = placement.count * handle_size_;
-  PADDLE_ENFORCE_EQ(
-      vmm_allocator_->ClearRemapDestinationOwnership(placement.dst, bytes),
-      true,
-      common::errors::PreconditionNotMet(
-          "Failed to finalize VMM V2 remap destination ownership for VA %p, "
-          "bytes %zu.",
-          reinterpret_cast<void*>(placement.dst),
-          bytes));
-}
-
-void RemapTransaction::MaybeFinalizeDestinationPlacementOwnership(
-    const DestinationPlacement& placement) const {
-  if (!finalize_destination_ownership_) {
-    return;
-  }
-  FinalizeDestinationPlacementOwnership(placement);
 }
 
 BlockV2 RemapTransaction::MakeUnmappedFreeBlock(void* ptr,

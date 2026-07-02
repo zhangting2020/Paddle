@@ -276,10 +276,6 @@ class RemapTransaction {
                                      const DestinationPlacement& placement,
                                      BlockV2 free_block,
                                      PoolType pool_type) const;
-  void FinalizeDestinationPlacementOwnership(
-      const DestinationPlacement& placement) const;
-  void MaybeFinalizeDestinationPlacementOwnership(
-      const DestinationPlacement& placement) const;
   BlockV2 MakeUnmappedFreeBlock(void* ptr,
                                 size_t size,
                                 PoolType pool_type) const;
@@ -315,7 +311,6 @@ class RemapTransaction {
   std::vector<RollbackMappedDestinationFn> rollback_mapped_destinations_;
   RollbackSourceMappingsFn rollback_source_mappings_;
   std::vector<Allocation*> pending_synthetic_allocations_;
-  bool finalize_destination_ownership_{true};
   bool completed_{false};
 };
 
