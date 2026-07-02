@@ -195,9 +195,6 @@ void CUDAVirtualMemAllocatorV2::MarkLayoutMapped(const HandleLayout& layout) {
 void CUDAVirtualMemAllocatorV2::MarkRemapDestinationLayoutMapped(
     const HandleLayout& layout) {
   for (const auto& meta : layout) {
-    if (meta != nullptr && !meta->IsOwnedByRemapDestination()) {
-      meta->MarkOwnedByRemapDestination();
-    }
     backing_map_.MarkRemapDestinationMapped(meta->base(), meta, meta->size());
   }
 }
