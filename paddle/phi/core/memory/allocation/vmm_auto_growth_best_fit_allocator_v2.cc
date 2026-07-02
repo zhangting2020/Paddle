@@ -1103,6 +1103,15 @@ bool VMMAutoGrowthBestFitAllocatorV2::TryReleaseIdleUnderlying(
     return false;
   }
 
+  if (underlying_allocator_->IsAllocationOwnedByRemapDestination(base)) {
+    const size_t cleared =
+        underlying_allocator_->ClearRemapDestinationOwnershipFullyInRange(
+            reinterpret_cast<VMMDevicePtr>(base), alloc_size);
+    VLOG(5) << "VMM V2 pool " << static_cast<int>(pool_type_)
+            << " cleared remap-destination ownership for " << cleared
+            << " bytes before releasing idle chunk " << base
+            << " size=" << alloc_size;
+  }
   ReplaceRangeWithUnmappedFree(base, alloc_size);
   *released += alloc_size;
   VLOG(5) << "VMM V2 pool " << static_cast<int>(pool_type_)

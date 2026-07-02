@@ -968,7 +968,11 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CompactKeepsMappedFreeBlocksAsViews) {
     }
   }
 
+  const size_t tail_before_release = underlying->tail_offset();
   EXPECT_GT(allocator.Release(phi::GPUPlace()), 0UL);
+  std::vector<std::pair<VMMDevicePtr, size_t>> released_range = {
+      {underlying->virtual_mem_base(), tail_before_release}};
+  EXPECT_TRUE(underlying->CollectMappedPages(released_range, 0).empty());
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
