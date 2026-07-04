@@ -1096,7 +1096,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::CanReleaseIdleUnderlying(
 
 bool VMMAutoGrowthBestFitAllocatorV2::TryReleaseIdleUnderlying(
     UnderlyingAllocationRegistry::iterator* alloc_it, uint64_t* released) {
-  auto& allocation = **alloc_it;
+  auto* allocation = (**alloc_it).get();
   auto* base = reinterpret_cast<uint8_t*>(allocation->ptr());
   const size_t alloc_size = allocation->size();
   if (!CanReleaseIdleUnderlying(base, alloc_size)) {
