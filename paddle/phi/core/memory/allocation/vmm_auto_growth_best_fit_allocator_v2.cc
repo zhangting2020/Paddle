@@ -1232,6 +1232,11 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMergeUnmappedFree(BlockListIt it) {
 uint64_t VMMAutoGrowthBestFitAllocatorV2::ReleaseImpl(
     const Place& place UNUSED) {
   std::lock_guard<SpinLock> guard(spinlock_);
+  // FreeIdleChunks may release CUDA VMM mappings and physical handles. Those
+  // driver calls are not ordered by the stream-safe wrapper, so wait before
+  // making any previously returned VA range invalid.
+  platform::CUDADeviceGuard device_guard(place_.device);
+  PADDLE_ENFORCE_GPU_SUCCESS(cudaDeviceSynchronize());
   return FreeIdleChunks();
 }
 
@@ -1245,16 +1250,33 @@ uint64_t VMMAutoGrowthBestFitAllocatorV2::FreeIdleChunks() {
     }
   }
 
+  TrimTrailingUnmappedFreeBlocks();
   underlying_allocator_->SetTailOffset(ComputeTailOffset());
   return released;
 }
 
-size_t VMMAutoGrowthBestFitAllocatorV2::ComputeTailOffset() const {
-  if (all_blocks_.empty()) {
-    return 0;
+void VMMAutoGrowthBestFitAllocatorV2::TrimTrailingUnmappedFreeBlocks() {
+  while (!all_blocks_.empty()) {
+    auto tail_it = std::prev(all_blocks_.end());
+    if (!tail_it->IsUnmappedFree() ||
+        underlying_allocations_.Overlaps(tail_it->ptr_, tail_it->size_)) {
+      break;
+    }
+    EraseUnmappedFreeBlock(tail_it);
+    all_blocks_.erase(tail_it);
   }
-  return static_cast<size_t>(all_blocks_.back().end_va() -
-                             underlying_allocator_->virtual_mem_base());
+}
+
+size_t VMMAutoGrowthBestFitAllocatorV2::ComputeTailOffset() const {
+  for (auto it = all_blocks_.rbegin(); it != all_blocks_.rend(); ++it) {
+    if (it->IsUnmappedFree() &&
+        !underlying_allocations_.Overlaps(it->ptr_, it->size_)) {
+      continue;
+    }
+    return static_cast<size_t>(it->end_va() -
+                               underlying_allocator_->virtual_mem_base());
+  }
+  return 0;
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::IsRangeEntirelyFree(uint8_t* base,

@@ -154,6 +154,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
   void TryMerge(BlockListIt it);
   void TryMergeUnmappedFree(BlockListIt it);
   uint64_t FreeIdleChunks();
+  void TrimTrailingUnmappedFreeBlocks();
   size_t ComputeTailOffset() const;
   bool IsRangeEntirelyFree(uint8_t* base, size_t size) const;
   void ReplaceRangeWithUnmappedFree(uint8_t* base, size_t size);

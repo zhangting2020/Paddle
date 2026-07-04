@@ -38,6 +38,13 @@ __global__ void BusyWaitKernel(uint64_t cycles) {
   }
 }
 
+__global__ void DelayedStoreKernel(uint8_t* ptr, uint64_t cycles) {
+  uint64_t start = clock64();
+  while (clock64() - start < cycles) {
+  }
+  ptr[0] = 1;
+}
+
 size_t CountBlocksOfType(const VMMAutoGrowthBestFitAllocatorV2& allocator,
                          BlockType type) {
   size_t count = 0;
@@ -410,6 +417,48 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   EXPECT_EQ(underlying->tail_offset(), tail_after_allocs);
 }
 
+TEST(VMMAutoGrowthBestFitAllocatorV2, ReleaseTailChunkRetreatsTailOffset) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kSmall);
+  const size_t handle_size = underlying->handle_size();
+
+  auto head = allocator.Allocate(handle_size);
+  auto tail = allocator.Allocate(handle_size);
+  ASSERT_NE(head, nullptr);
+  ASSERT_NE(tail, nullptr);
+  auto* expected_next_tail =
+      reinterpret_cast<uint8_t*>(head->ptr()) + handle_size;
+
+  tail.reset();
+  EXPECT_EQ(allocator.Release(phi::GPUPlace()), handle_size);
+  EXPECT_EQ(underlying->tail_offset(), handle_size);
+  EXPECT_EQ(allocator.all_blocks().size(), 1UL);
+  EXPECT_FALSE(allocator.all_blocks().back().IsUnmappedFree());
+
+  auto grow = allocator.Allocate(handle_size * 2);
+  ASSERT_NE(grow, nullptr);
+  EXPECT_EQ(grow->ptr(), expected_next_tail);
+  EXPECT_EQ(underlying->tail_offset(), handle_size * 3);
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2, ReleaseWaitsBeforeUnmappingBacking) {
+  auto underlying = CreateUnderlyingAllocator();
+  VMMAutoGrowthBestFitAllocatorV2 allocator(
+      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
+
+  auto allocation = allocator.Allocate(underlying->handle_size());
+  ASSERT_NE(allocation, nullptr);
+  auto* ptr = reinterpret_cast<uint8_t*>(allocation->ptr());
+
+  DelayedStoreKernel<<<1, 1>>>(ptr, 20000000ULL);
+  ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+
+  allocation.reset();
+  EXPECT_EQ(allocator.Release(phi::GPUPlace()), underlying->handle_size());
+  EXPECT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+}
+
 TEST(VMMAutoGrowthBestFitAllocatorV2,
      CollectTensorPartsMarksIpcExportedButAllowsRegularReuse) {
   auto underlying = CreateUnderlyingAllocator();
@@ -477,8 +526,6 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   ASSERT_NE(exported, nullptr);
   ASSERT_NE(regular, nullptr);
   auto* exported_ptr = exported->ptr();
-  auto* regular_ptr = regular->ptr();
-  const size_t tail_after_two_allocs = underlying->tail_offset();
 
   std::vector<BlockPart> parts;
   ASSERT_TRUE(allocator.CollectTensorParts(
@@ -501,22 +548,19 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
 
   auto released = allocator.Release(phi::GPUPlace());
   EXPECT_EQ(released, underlying->handle_size());
-  ASSERT_EQ(allocator.all_blocks().size(), 2UL);
+  ASSERT_EQ(allocator.all_blocks().size(), 1UL);
   auto block_it = allocator.all_blocks().begin();
   ASSERT_TRUE(block_it->IsFree());
   EXPECT_EQ(block_it->ptr_, exported_ptr);
   EXPECT_EQ(block_it->size_, underlying->handle_size());
-  ++block_it;
-  ASSERT_TRUE(block_it->IsUnmappedFree());
-  EXPECT_EQ(block_it->ptr_, regular_ptr);
-  EXPECT_EQ(block_it->size_, underlying->handle_size());
+  EXPECT_EQ(underlying->tail_offset(), underlying->handle_size());
   EXPECT_TRUE(underlying->HasIpcExportedRange(
       reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->handle_size()));
 
   auto next = allocator.Allocate(underlying->handle_size());
   ASSERT_NE(next, nullptr);
   EXPECT_EQ(next->ptr(), exported_ptr);
-  EXPECT_EQ(underlying->tail_offset(), tail_after_two_allocs);
+  EXPECT_EQ(underlying->tail_offset(), underlying->handle_size());
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
