@@ -327,6 +327,7 @@ try:
         _set_warmup,
         _switch_tracer,
         _test_enforce_gpu_success,
+        _vmm_v2_step_stats_snapshot_and_reset,
         _xpu_device_synchronize,
         _xpu_get_current_stream,
         _xpu_set_current_stream,

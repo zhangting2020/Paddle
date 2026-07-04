@@ -36,6 +36,7 @@ if(CUDA_VERSION VERSION_GREATER_EQUAL 10.2)
     cuda_virtual_mem_allocator.cc
     cuda_virtual_mem_allocator_v2.cc
     vmm_backing_map.cc
+    vmm_v2_step_stats.cc
     remap_transaction.cc
     free_block_remap_compactor.cc
     vmm_auto_growth_best_fit_allocator_v2.cc

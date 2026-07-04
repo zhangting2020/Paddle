@@ -25,6 +25,7 @@
 #include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
 #include "paddle/phi/core/memory/allocation/free_block_remap_compactor.h"
+#include "paddle/phi/core/memory/allocation/vmm_v2_step_stats.h"
 #include "paddle/phi/core/memory/stats.h"
 #include "paddle/phi/core/platform/cuda_device_guard.h"
 #include "paddle/phi/core/platform/device/gpu/gpu_info.h"
@@ -252,13 +253,33 @@ bool VMMAutoGrowthBestFitBlockAllocationV2::SetVMMRemapEvent(
 }
 
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
+  const bool trace_step = VMMV2StepStatsEnabled();
+  const auto lock_wait_start = trace_step ? Clock::now() : Clock::time_point{};
   std::lock_guard<SpinLock> guard(spinlock_);
+  const uint64_t lock_wait_us =
+      trace_step ? ElapsedMicros(lock_wait_start, Clock::now()) : 0;
+  const auto op_start = trace_step ? Clock::now() : Clock::time_point{};
+  auto record_alloc = [&](const char* path, phi::Allocation* allocation) {
+    if (trace_step) {
+      RecordVMMV2Alloc(place_.device,
+                       pool_type_,
+                       path,
+                       size,
+                       ElapsedMicros(op_start, Clock::now()),
+                       lock_wait_us,
+                       all_blocks_.size(),
+                       free_blocks_.size(),
+                       unmapped_free_blocks_.size(),
+                       underlying_allocator_->tail_offset());
+    }
+    return allocation;
+  };
   const size_t requested_size = AlignedSize(size, alignment_);
   if (auto* allocation = AllocFromFreeBlocks(requested_size)) {
-    return allocation;
+    return record_alloc("mapped_free", allocation);
   }
   if (auto* allocation = AllocFromUnmappedFreeBlocks(requested_size)) {
-    return allocation;
+    return record_alloc("unmapped_free", allocation);
   }
 
   // Tail reuse: if the last block in the address space is FREE, detach it
@@ -351,7 +372,8 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
     InsertFreeBlock(remain_it);
   }
 
-  return new VMMAutoGrowthBestFitBlockAllocationV2(it, place_, this);
+  return record_alloc(
+      "grow", new VMMAutoGrowthBestFitBlockAllocationV2(it, place_, this));
 }
 
 size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
@@ -762,9 +784,15 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
+  const bool trace_step = VMMV2StepStatsEnabled();
+  const auto lock_wait_start = trace_step ? Clock::now() : Clock::time_point{};
   std::lock_guard<SpinLock> guard(spinlock_);
+  const uint64_t lock_wait_us =
+      trace_step ? ElapsedMicros(lock_wait_start, Clock::now()) : 0;
+  const auto op_start = trace_step ? Clock::now() : Clock::time_point{};
   auto* wrapped_allocation =
       static_cast<VMMAutoGrowthBestFitBlockAllocationV2*>(allocation);
+  const size_t allocation_size = wrapped_allocation->size();
   auto it = wrapped_allocation->block_it();
   PADDLE_ENFORCE_NE(
       it,
@@ -786,6 +814,16 @@ void VMMAutoGrowthBestFitAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   }
   it->MarkFree();
   TryMerge(it);
+  if (trace_step) {
+    RecordVMMV2Free(place_.device,
+                    pool_type_,
+                    allocation_size,
+                    ElapsedMicros(op_start, Clock::now()),
+                    lock_wait_us,
+                    all_blocks_.size(),
+                    free_blocks_.size(),
+                    unmapped_free_blocks_.size());
+  }
   delete allocation;
 }
 
