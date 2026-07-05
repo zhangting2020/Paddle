@@ -142,7 +142,6 @@ struct BlockV2 {
   bool IsActive() const { return type_ == BlockType::kActive; }
   bool IsFree() const { return type_ == BlockType::kFree; }
   bool IsMappedFree() const { return IsFree(); }
-  bool CanBeRemapSource() const { return IsMappedFree(); }
   bool IsUnmappedFree() const { return type_ == BlockType::kUnmappedFree; }
   void* ptr() const { return ptr_; }
   size_t size() const { return size_; }

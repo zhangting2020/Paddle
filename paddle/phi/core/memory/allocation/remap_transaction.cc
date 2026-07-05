@@ -52,7 +52,7 @@ std::vector<std::pair<VMMDevicePtr, size_t>> CollectFreeRanges(
     const std::list<BlockV2>& blocks) {
   std::vector<std::pair<VMMDevicePtr, size_t>> ranges;
   for (const auto& block : blocks) {
-    if (!block.CanBeRemapSource()) {
+    if (!block.IsMappedFree()) {
       continue;
     }
     ranges.emplace_back(block.va_range());
@@ -128,7 +128,7 @@ bool RemapStateReady(VMMBlockRemapState* state) {
 }
 
 bool IsRemapSafe(BlockV2* block) {
-  if (!block->CanBeRemapSource()) {
+  if (!block->IsMappedFree()) {
     return false;
   }
   if (block->HasUnknownRemapSafety()) {
@@ -452,7 +452,7 @@ RemapTransaction::SourceMovePlan RemapTransaction::CollectRemapSourcePlan(
   for (auto it = blocks->begin(); it != blocks->end();) {
     auto current = it++;
     if (current->IsFree()) plan.stats.free_block_count++;
-    if (!current->CanBeRemapSource()) {
+    if (!current->IsMappedFree()) {
       continue;
     }
     if (current->HasUnknownRemapSafety()) {
