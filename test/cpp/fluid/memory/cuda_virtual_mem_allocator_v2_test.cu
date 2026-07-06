@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <cstdint>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -22,6 +23,7 @@
 #define private public
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator_v2.h"
 #undef private
+#include "paddle/phi/core/memory/allocation/remap_transaction.h"
 #include "paddle/phi/core/memory/allocation/vmm_backing_map.h"
 
 namespace paddle {
@@ -679,6 +681,56 @@ TEST(CUDAVirtualMemAllocatorV2, StagedRemapDestinationBlocksSource) {
   auto committed =
       allocator.AdoptCommittedSyntheticAllocation(staged.allocation);
   staged.allocation = nullptr;
+}
+
+TEST(CUDAVirtualMemAllocatorV2,
+     RemapTransactionCommitExceptionDoesNotDoubleDestroyStagedDestination) {
+  CUDAVirtualMemAllocatorV2 allocator(
+      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
+
+  auto allocation_with_block =
+      allocator.AppendWithBlock(allocator.handle_size());
+  ASSERT_NE(allocation_with_block.allocation, nullptr);
+
+  const VMMDevicePtr source_va =
+      reinterpret_cast<VMMDevicePtr>(allocation_with_block.allocation->ptr());
+  const VMMDevicePtr target_va = source_va + allocator.handle_size();
+  std::vector<std::pair<VMMDevicePtr, size_t>> source_ranges = {
+      {source_va, allocator.handle_size()}};
+  std::vector<std::pair<VMMDevicePtr, size_t>> target_ranges = {
+      {target_va, allocator.handle_size()}};
+  auto source_pages =
+      allocator.CollectMappedPages(source_ranges, allocator.handle_size());
+  auto target_pages =
+      allocator.CollectUnmappedPages(target_ranges, allocator.handle_size());
+  ASSERT_EQ(source_pages.size(), 1UL);
+  ASSERT_EQ(target_pages.size(), 1UL);
+
+  auto meta = source_pages[0].meta;
+  ASSERT_NE(meta, nullptr);
+  ASSERT_TRUE(allocator.MoveBackingPageForRemap(
+      source_pages[0], target_pages[0], meta));
+
+  bool commit_called = false;
+  RemapTransaction transaction(
+      &allocator,
+      allocator.handle_size(),
+      [&](DecoratedAllocationPtr allocation) {
+        commit_called = true;
+        ASSERT_NE(allocation, nullptr);
+        throw std::runtime_error("injected commit failure");
+      });
+  auto materialized = transaction.MaterializeMappedRange(
+      target_va,
+      std::vector<VMMAllocHandle>{source_pages[0].handle},
+      0,
+      1,
+      PoolType::kLarge);
+  EXPECT_EQ(materialized.bytes, allocator.handle_size());
+
+  EXPECT_THROW(transaction.Commit(), std::runtime_error);
+  EXPECT_TRUE(commit_called);
+  EXPECT_NO_THROW(transaction.Rollback());
 }
 
 TEST(CUDAVirtualMemAllocatorV2, CollectsAndPinsIPCBlockBacking) {
