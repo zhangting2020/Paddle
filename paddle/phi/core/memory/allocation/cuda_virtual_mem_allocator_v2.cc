@@ -475,6 +475,11 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   int prev_id = -1;
   auto runtime_status = cudaGetDevice(&prev_id);
   if (IsCudaRuntimeDeinitialized(runtime_status)) {
+    // CUDA teardown path only. At this point the runtime/context may no longer
+    // accept cuMemUnmap/cuMemRelease, and this allocator will not serve further
+    // allocations/remap/IPC queries. Drop host-side ownership records to avoid
+    // throwing from process-exit cleanup; do not treat this as a normal release
+    // path or as evidence that backing_map_ still reflects driver state.
     UnregisterHandleLayout(static_cast<Allocation*>(allocation), ptr);
     delete allocation;
     return;
@@ -504,12 +509,17 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
     auto unmap_status =
         phi::dynload::cuMemUnmap(handle->base(), handle->size());
     if (IsCudaDeinitialized(unmap_status)) {
+      // Terminal cleanup after CUDA teardown. The remaining driver state is no
+      // longer observable through CUDA APIs, so backing_map_ is intentionally
+      // left untouched; normal runtime failures are still enforced below.
       continue;
     }
     PADDLE_ENFORCE_GPU_SUCCESS(unmap_status);
     auto release_status = platform::RecordedGpuMemRelease(
         handle->handle(), handle->size(), place_.device);
     if (IsCudaDeinitialized(release_status)) {
+      // Same terminal-cleanup rule as the unmap path above. Only CUDA teardown
+      // errors are tolerated here; other release failures must be surfaced.
       continue;
     }
     PADDLE_ENFORCE_GPU_SUCCESS(release_status);
