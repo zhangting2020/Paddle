@@ -248,11 +248,11 @@ bool VMMBackingMap::ClearRemapDestinationOwnership(VMMDevicePtr va,
   return true;
 }
 
-size_t VMMBackingMap::ClearRemapDestinationOwnershipFullyInRange(
-    VMMDevicePtr va, size_t size) {
+size_t VMMBackingMap::ClearRemapDestinationOwnershipInRange(VMMDevicePtr va,
+                                                            size_t size) {
   std::lock_guard<SpinLock> guard(spinlock_);
   if (!configured_) {
-    VLOG(0) << "VMM V2 BackingMap ClearRemapDestinationOwnershipFullyInRange "
+    VLOG(0) << "VMM V2 BackingMap ClearRemapDestinationOwnershipInRange "
             << "before Configure, va=" << reinterpret_cast<void*>(va)
             << " size=" << size;
     return 0;
@@ -260,7 +260,7 @@ size_t VMMBackingMap::ClearRemapDestinationOwnershipFullyInRange(
   if (size == 0 || page_size_ == 0 || AddOverflow(base_, size_) || va < base_ ||
       va + size < va || va + size > base_ + size_) {
     VLOG(0) << "VMM V2 BackingMap invalid range in "
-            << "ClearRemapDestinationOwnershipFullyInRange"
+            << "ClearRemapDestinationOwnershipInRange"
             << ": va=" << reinterpret_cast<void*>(va) << " size=" << size
             << " base=" << reinterpret_cast<void*>(base_)
             << " backing_size=" << size_ << " page_size=" << page_size_;
@@ -337,7 +337,7 @@ void VMMBackingMap::MarkReleased(VMMDevicePtr va,
   }
 }
 
-void VMMBackingMap::MarkIpcExported(VMMDevicePtr va, size_t size) {
+void VMMBackingMap::MarkIPCExported(VMMDevicePtr va, size_t size) {
   std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
   size_t count = 0;
@@ -346,7 +346,7 @@ void VMMBackingMap::MarkIpcExported(VMMDevicePtr va, size_t size) {
                               page_size_,
                               va,
                               size,
-                              "MarkIpcExported",
+                              "MarkIPCExported",
                               &start,
                               &count)) {
     return;
@@ -467,12 +467,12 @@ bool VMMBackingMap::ValidateLayout(const HandleLayout& layout,
   return ok;
 }
 
-bool VMMBackingMap::CollectIpcPartDescriptors(
+bool VMMBackingMap::CollectIPCPartDescriptors(
     VMMDevicePtr va,
     size_t size,
-    std::vector<IpcBlockPartDescriptor>* descriptors) const {
+    std::vector<IPCBlockPartDescriptor>* descriptors) const {
   std::lock_guard<SpinLock> guard(spinlock_);
-  return CollectIpcPartDescriptorsLocked(va, size, descriptors);
+  return CollectIPCPartDescriptorsLocked(va, size, descriptors);
 }
 
 bool VMMBackingMap::IsRangeMapped(VMMDevicePtr va, size_t size) const {
@@ -549,7 +549,7 @@ bool VMMBackingMap::CanReleaseHandle(VMMDevicePtr va,
   return true;
 }
 
-bool VMMBackingMap::HasIpcExportedPages(VMMDevicePtr va, size_t size) const {
+bool VMMBackingMap::HasIPCExportedPages(VMMDevicePtr va, size_t size) const {
   std::lock_guard<SpinLock> guard(spinlock_);
   size_t start = 0;
   size_t count = 0;
@@ -558,7 +558,7 @@ bool VMMBackingMap::HasIpcExportedPages(VMMDevicePtr va, size_t size) const {
                               page_size_,
                               va,
                               size,
-                              "HasIpcExportedPages",
+                              "HasIPCExportedPages",
                               &start,
                               &count)) {
     return true;
@@ -571,7 +571,7 @@ bool VMMBackingMap::HasIpcExportedPages(VMMDevicePtr va, size_t size) const {
   return false;
 }
 
-size_t VMMBackingMap::CountIpcExportedBytes(
+size_t VMMBackingMap::CountIPCExportedBytes(
     const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const {
   std::lock_guard<SpinLock> guard(spinlock_);
   size_t bytes = 0;
@@ -585,7 +585,7 @@ size_t VMMBackingMap::CountIpcExportedBytes(
                                 page_size_,
                                 va,
                                 size,
-                                "CountIpcExportedBytes",
+                                "CountIPCExportedBytes",
                                 &start,
                                 &count)) {
       continue;
@@ -941,10 +941,10 @@ void VMMBackingMap::AppendMappedPagesFullyInRangeLocked(
   }
 }
 
-bool VMMBackingMap::CollectIpcPartDescriptorsLocked(
+bool VMMBackingMap::CollectIPCPartDescriptorsLocked(
     VMMDevicePtr va,
     size_t size,
-    std::vector<IpcBlockPartDescriptor>* descriptors) const {
+    std::vector<IPCBlockPartDescriptor>* descriptors) const {
   size_t start = 0;
   size_t count = 0;
   if (!ComputeOverlappedPages(base_,
@@ -952,7 +952,7 @@ bool VMMBackingMap::CollectIpcPartDescriptorsLocked(
                               page_size_,
                               va,
                               size,
-                              "CollectIpcPartDescriptors",
+                              "CollectIPCPartDescriptors",
                               &start,
                               &count)) {
     return false;
@@ -971,7 +971,7 @@ bool VMMBackingMap::CollectIpcPartDescriptorsLocked(
       const VMMDevicePtr page_va = base_ + (start + i) * page_size_;
       const VMMDevicePtr slice_begin = std::max(va, page_va);
       const VMMDevicePtr slice_end = std::min(va + size, page_va + page_size_);
-      descriptors->push_back(IpcBlockPartDescriptor{
+      descriptors->push_back(IPCBlockPartDescriptor{
           page.meta->base(),
           page.meta->size(),
           page.meta->handle(),

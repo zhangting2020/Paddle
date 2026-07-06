@@ -430,7 +430,7 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   size_t ipc_exported_backing_bytes = 0;
   if (FLAGS_vmm_v2_compact_detailed_stats) {
     ipc_exported_backing_bytes =
-        underlying_allocator_->CountIpcExportedBytes(compact_source_ranges);
+        underlying_allocator_->CountIPCExportedBytes(compact_source_ranges);
   }
   const bool has_tail_block = !all_blocks_.empty();
   const bool tail_is_indexable =
@@ -736,17 +736,17 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   auto commit_synthetic_allocation = [this](DecoratedAllocationPtr allocation) {
     TrackUnderlyingAllocation(std::move(allocation));
   };
-  auto can_prepare_synthetic_allocation = [this](void* ptr, size_t size) {
-    return CanReleaseRemapDestinationUnderlyingAllocations(ptr, size);
+  auto can_use_destination_range = [this](void* ptr, size_t size) {
+    return CanPrepareRemapDestinationRange(ptr, size);
   };
-  auto prepare_synthetic_allocation = [this](void* ptr, size_t size) {
-    return ReleaseRemapDestinationUnderlyingAllocations(ptr, size);
+  auto release_stale_destination_allocations = [this](void* ptr, size_t size) {
+    return PrepareRemapDestinationRange(ptr, size);
   };
   FreeBlockRemapCompactor compactor(underlying_allocator_,
                                     pool_type_,
                                     commit_synthetic_allocation,
-                                    can_prepare_synthetic_allocation,
-                                    prepare_synthetic_allocation);
+                                    can_use_destination_range,
+                                    release_stale_destination_allocations);
   const size_t remap_target =
       FLAGS_vmm_v2_compact_all ? static_cast<size_t>(0) : compact_target;
   const auto compactor_start = Clock::now();
@@ -877,13 +877,13 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
 
   std::vector<BlockPart> collected;
   auto collect_ipc_parts = [&] {
-    return underlying_allocator_->CollectIpcParts(
+    return underlying_allocator_->CollectIPCParts(
         target_va, size, parts != nullptr ? &collected : nullptr);
   };
   if (!collect_ipc_parts()) {
     const size_t cleared =
-        underlying_allocator_->ClearRemapDestinationOwnershipFullyInRange(
-            target_va, size);
+        underlying_allocator_->ClearRemapDestinationOwnershipInRange(target_va,
+                                                                     size);
     if (cleared > 0) {
       collected.clear();
     }
@@ -897,7 +897,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::CollectTensorParts(
     }
   }
   if (mark_ipc_exported) {
-    if (!underlying_allocator_->MarkIpcExported(target_va, size)) {
+    if (!underlying_allocator_->MarkIPCExported(target_va, size)) {
       VLOG(4) << "[VMM-IPC/export] VMM v2 best-fit failed to mark IPC exported "
               << "for active block ptr=" << block_it->ptr_
               << " block_size=" << block_it->size_ << " target_ptr=" << ptr
@@ -1084,9 +1084,8 @@ bool VMMAutoGrowthBestFitAllocatorV2::AllocationOwnedByRemapDestination(
   return true;
 }
 
-bool VMMAutoGrowthBestFitAllocatorV2::
-    CanReleaseRemapDestinationUnderlyingAllocations(void* ptr,
-                                                    size_t size) const {
+bool VMMAutoGrowthBestFitAllocatorV2::CanPrepareRemapDestinationRange(
+    void* ptr, size_t size) const {
   if (underlying_allocations_.AllOverlapsSatisfy(
           ptr,
           size,
@@ -1099,8 +1098,8 @@ bool VMMAutoGrowthBestFitAllocatorV2::
       reinterpret_cast<VMMDevicePtr>(ptr), size);
 }
 
-bool VMMAutoGrowthBestFitAllocatorV2::
-    ReleaseRemapDestinationUnderlyingAllocations(void* ptr, size_t size) {
+bool VMMAutoGrowthBestFitAllocatorV2::PrepareRemapDestinationRange(
+    void* ptr, size_t size) {
   const bool released_owned_overlaps = underlying_allocations_.EraseOverlapsIf(
       ptr, size, [this, ptr, size](const DecoratedAllocationPtr& allocation) {
         if (!AllocationOwnedByRemapDestination(allocation, ptr, size)) {
@@ -1161,7 +1160,7 @@ bool VMMAutoGrowthBestFitAllocatorV2::TryReleaseIdleUnderlying(
 
   if (underlying_allocator_->IsAllocationOwnedByRemapDestination(base)) {
     const size_t cleared =
-        underlying_allocator_->ClearRemapDestinationOwnershipFullyInRange(
+        underlying_allocator_->ClearRemapDestinationOwnershipInRange(
             reinterpret_cast<VMMDevicePtr>(base), alloc_size);
     VLOG(5) << "VMM V2 pool " << static_cast<int>(pool_type_)
             << " cleared remap-destination ownership for " << cleared

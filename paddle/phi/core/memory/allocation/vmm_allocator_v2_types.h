@@ -100,7 +100,7 @@ struct VMMHandleMeta {
 
 using HandleLayout = std::vector<std::shared_ptr<VMMHandleMeta>>;
 
-struct IpcBlockPartDescriptor {
+struct IPCBlockPartDescriptor {
   VMMDevicePtr handle_base;
   size_t handle_size;
   VMMAllocHandle handle;

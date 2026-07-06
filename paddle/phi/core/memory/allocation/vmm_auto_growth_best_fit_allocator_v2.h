@@ -139,9 +139,8 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
       const DecoratedAllocationPtr& allocation,
       void* target_ptr,
       size_t target_size) const;
-  bool CanReleaseRemapDestinationUnderlyingAllocations(void* ptr,
-                                                       size_t size) const;
-  bool ReleaseRemapDestinationUnderlyingAllocations(void* ptr, size_t size);
+  bool CanPrepareRemapDestinationRange(void* ptr, size_t size) const;
+  bool PrepareRemapDestinationRange(void* ptr, size_t size);
   bool CanReleaseIdleUnderlying(uint8_t* base, size_t size) const;
   bool HasReleasableIdleUnderlying() const;
   bool TryReleaseIdleUnderlying(

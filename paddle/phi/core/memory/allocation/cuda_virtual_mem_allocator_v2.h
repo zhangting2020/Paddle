@@ -51,7 +51,7 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
     BlockV2 block;
   };
 
-  struct StagedAllocationWithBlock {
+  struct StagedRemapDestination {
     Allocation* allocation{nullptr};
     BlockV2 block;
     size_t bytes{0};
@@ -146,14 +146,13 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   AllocationWithBlock PlaceAtVAWithBlock(VMMDevicePtr ptr, size_t size);
   bool IsAllocationOwnedByRemapDestination(void* ptr) const;
   bool ClearRemapDestinationOwnership(VMMDevicePtr ptr, size_t size);
-  size_t ClearRemapDestinationOwnershipFullyInRange(VMMDevicePtr ptr,
-                                                    size_t size);
+  size_t ClearRemapDestinationOwnershipInRange(VMMDevicePtr ptr, size_t size);
 
   // Create a staged synthetic Allocation and mapped-free block for handles
   // moved by remap compaction. The handles already exist (cuMemCreate was done
   // earlier); rollback paths must explicitly destroy the staged allocation
   // before discarding the block view.
-  StagedAllocationWithBlock CreateStagedRemapDestinationAllocationWithBlock(
+  StagedRemapDestination CreateStagedRemapDestination(
       VMMDevicePtr ptr,
       const std::vector<VMMAllocHandle>& handles,
       size_t start,
@@ -163,16 +162,16 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
       Allocation* allocation);
   void DestroyStagedSyntheticAllocation(Allocation* allocation);
 
-  void MarkBackingIpcExported(VMMDevicePtr ptr, size_t size);
-  bool HasIpcExportedRange(VMMDevicePtr ptr, size_t size) const;
-  size_t CountIpcExportedBytes(
+  void MarkBackingIPCExported(VMMDevicePtr ptr, size_t size);
+  bool HasIPCExportedRange(VMMDevicePtr ptr, size_t size) const;
+  size_t CountIPCExportedBytes(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const;
   bool IsRangeUnmapped(VMMDevicePtr ptr, size_t size) const;
   bool IsRangeReleasable(VMMDevicePtr ptr, size_t size) const;
-  bool CollectIpcParts(VMMDevicePtr ptr,
+  bool CollectIPCParts(VMMDevicePtr ptr,
                        size_t size,
                        std::vector<BlockPart>* ipc_parts) const;
-  bool MarkIpcExported(VMMDevicePtr ptr, size_t size);
+  bool MarkIPCExported(VMMDevicePtr ptr, size_t size);
   bool SetBlockRemapEvent(const BlockV2& block,
                           gpuStream_t stream,
                           std::shared_ptr<CUDAEventGuard> event);

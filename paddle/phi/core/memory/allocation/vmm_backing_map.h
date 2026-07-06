@@ -68,11 +68,10 @@ class VMMBackingMap {
                                   const std::shared_ptr<VMMHandleMeta>& meta,
                                   size_t size);
   bool ClearRemapDestinationOwnership(VMMDevicePtr va, size_t size);
-  size_t ClearRemapDestinationOwnershipFullyInRange(VMMDevicePtr va,
-                                                    size_t size);
+  size_t ClearRemapDestinationOwnershipInRange(VMMDevicePtr va, size_t size);
   void MarkUnmapped(VMMDevicePtr va, size_t size);
   void MarkReleased(VMMDevicePtr va, VMMAllocHandle handle, size_t size);
-  void MarkIpcExported(VMMDevicePtr va, size_t size);
+  void MarkIPCExported(VMMDevicePtr va, size_t size);
   void MarkPendingEvent(VMMDevicePtr va,
                         size_t size,
                         gpuStream_t stream,
@@ -83,10 +82,10 @@ class VMMBackingMap {
                                 std::shared_ptr<CUDAEventGuard> event);
 
   bool ValidateLayout(const HandleLayout& layout, const char* context) const;
-  bool CollectIpcPartDescriptors(
+  bool CollectIPCPartDescriptors(
       VMMDevicePtr va,
       size_t size,
-      std::vector<IpcBlockPartDescriptor>* descriptors) const;
+      std::vector<IPCBlockPartDescriptor>* descriptors) const;
   bool IsRangeMapped(VMMDevicePtr va, size_t size) const;
   bool IsRangeUnmapped(VMMDevicePtr va, size_t size) const;
   bool IsRangeReleasable(VMMDevicePtr va, size_t size) const;
@@ -94,8 +93,8 @@ class VMMBackingMap {
                         VMMAllocHandle handle,
                         const std::shared_ptr<VMMHandleMeta>& meta,
                         size_t size) const;
-  bool HasIpcExportedPages(VMMDevicePtr va, size_t size) const;
-  size_t CountIpcExportedBytes(
+  bool HasIPCExportedPages(VMMDevicePtr va, size_t size) const;
+  size_t CountIPCExportedBytes(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const;
   std::vector<MappedPage> CollectMappedPages(
       const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges,
@@ -151,10 +150,10 @@ class VMMBackingMap {
                                const char* context,
                                size_t max_pages,
                                std::vector<MappedPage>* pages) const;
-  bool CollectIpcPartDescriptorsLocked(
+  bool CollectIPCPartDescriptorsLocked(
       VMMDevicePtr va,
       size_t size,
-      std::vector<IpcBlockPartDescriptor>* descriptors) const;
+      std::vector<IPCBlockPartDescriptor>* descriptors) const;
   void AppendMappedPagesFullyInRangeLocked(
       VMMDevicePtr va,
       size_t size,

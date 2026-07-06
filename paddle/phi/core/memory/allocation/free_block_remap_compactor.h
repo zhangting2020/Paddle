@@ -30,23 +30,22 @@ class FreeBlockRemapCompactor {
  public:
   using CommitSyntheticAllocationFn =
       RemapTransaction::CommitSyntheticAllocationFn;
-  using CanPrepareSyntheticAllocationFn =
-      RemapTransaction::CanPrepareSyntheticAllocationFn;
-  using PrepareSyntheticAllocationFn =
-      RemapTransaction::PrepareSyntheticAllocationFn;
+  using CanUseDestinationRangeFn = RemapTransaction::CanUseDestinationRangeFn;
+  using ReleaseStaleDestinationAllocationsFn =
+      RemapTransaction::ReleaseStaleDestinationAllocationsFn;
   FreeBlockRemapCompactor(
       const std::shared_ptr<CUDAVirtualMemAllocatorV2>& vmm_allocator,
       PoolType pool_type,
       CommitSyntheticAllocationFn commit_synthetic_allocation = {},
-      CanPrepareSyntheticAllocationFn can_prepare_synthetic_allocation = {},
-      PrepareSyntheticAllocationFn prepare_synthetic_allocation = {})
+      CanUseDestinationRangeFn can_use_destination_range = {},
+      ReleaseStaleDestinationAllocationsFn
+          release_stale_destination_allocations = {})
       : vmm_allocator_(vmm_allocator),
         pool_type_(pool_type),
         commit_synthetic_allocation_(std::move(commit_synthetic_allocation)),
-        can_prepare_synthetic_allocation_(
-            std::move(can_prepare_synthetic_allocation)),
-        prepare_synthetic_allocation_(std::move(prepare_synthetic_allocation)) {
-  }
+        can_use_destination_range_(std::move(can_use_destination_range)),
+        release_stale_destination_allocations_(
+            std::move(release_stale_destination_allocations)) {}
 
   // Remap fully-covered handles from FREE blocks to consolidate fragmented VA.
   // If requested_size > 0, performs bounded compaction: stops collecting
@@ -60,8 +59,8 @@ class FreeBlockRemapCompactor {
   std::shared_ptr<CUDAVirtualMemAllocatorV2> vmm_allocator_;
   PoolType pool_type_;
   CommitSyntheticAllocationFn commit_synthetic_allocation_;
-  CanPrepareSyntheticAllocationFn can_prepare_synthetic_allocation_;
-  PrepareSyntheticAllocationFn prepare_synthetic_allocation_;
+  CanUseDestinationRangeFn can_use_destination_range_;
+  ReleaseStaleDestinationAllocationsFn release_stale_destination_allocations_;
 };
 
 }  // namespace allocation

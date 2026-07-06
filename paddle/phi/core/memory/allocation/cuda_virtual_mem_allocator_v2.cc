@@ -454,17 +454,17 @@ bool CUDAVirtualMemAllocatorV2::ClearRemapDestinationOwnership(VMMDevicePtr ptr,
   return backing_map_.ClearRemapDestinationOwnership(ptr, size);
 }
 
-size_t CUDAVirtualMemAllocatorV2::ClearRemapDestinationOwnershipFullyInRange(
+size_t CUDAVirtualMemAllocatorV2::ClearRemapDestinationOwnershipInRange(
     VMMDevicePtr ptr, size_t size) {
   if (!IsReservedVARange(ptr, size)) {
-    VLOG(0) << "ClearRemapDestinationOwnershipFullyInRange: range outside "
+    VLOG(0) << "ClearRemapDestinationOwnershipInRange: range outside "
             << "reserved VA, ptr=" << reinterpret_cast<void*>(ptr)
             << " size=" << size
             << " base=" << reinterpret_cast<void*>(virtual_mem_base_)
             << " reserved_size=" << virtual_mem_size_;
     return 0;
   }
-  return backing_map_.ClearRemapDestinationOwnershipFullyInRange(ptr, size);
+  return backing_map_.ClearRemapDestinationOwnershipInRange(ptr, size);
 }
 
 void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
@@ -974,8 +974,8 @@ Allocation* CUDAVirtualMemAllocatorV2::CreateStagedSyntheticAllocation(
   return CreateTrackedAllocation(ptr, size, layout);
 }
 
-CUDAVirtualMemAllocatorV2::StagedAllocationWithBlock
-CUDAVirtualMemAllocatorV2::CreateStagedRemapDestinationAllocationWithBlock(
+CUDAVirtualMemAllocatorV2::StagedRemapDestination
+CUDAVirtualMemAllocatorV2::CreateStagedRemapDestination(
     VMMDevicePtr ptr,
     const std::vector<VMMAllocHandle>& handles,
     size_t start,
@@ -992,7 +992,7 @@ CUDAVirtualMemAllocatorV2::CreateStagedRemapDestinationAllocationWithBlock(
     layout.push_back(std::move(meta));
   }
 
-  StagedAllocationWithBlock result;
+  StagedRemapDestination result;
   result.bytes = count * handle_size_;
   try {
     result.allocation =
@@ -1003,7 +1003,7 @@ CUDAVirtualMemAllocatorV2::CreateStagedRemapDestinationAllocationWithBlock(
                                             pool_type);
     MarkRemapDestinationLayoutMapped(layout);
   } catch (const std::exception& e) {
-    VLOG(0) << "CreateStagedRemapDestinationAllocationWithBlock: failed to "
+    VLOG(0) << "CreateStagedRemapDestination: failed to "
                "materialize destination, destroying staged allocation. dst="
             << reinterpret_cast<void*>(ptr) << " bytes=" << result.bytes
             << " start=" << start << " count=" << count
@@ -1012,7 +1012,7 @@ CUDAVirtualMemAllocatorV2::CreateStagedRemapDestinationAllocationWithBlock(
     result.allocation = nullptr;
     throw;
   } catch (...) {
-    VLOG(0) << "CreateStagedRemapDestinationAllocationWithBlock: unknown "
+    VLOG(0) << "CreateStagedRemapDestination: unknown "
                "failure while materializing destination, destroying staged "
                "allocation. dst="
             << reinterpret_cast<void*>(ptr) << " bytes=" << result.bytes
@@ -1045,22 +1045,22 @@ void CUDAVirtualMemAllocatorV2::DestroyStagedSyntheticAllocation(
   delete allocation;
 }
 
-void CUDAVirtualMemAllocatorV2::MarkBackingIpcExported(VMMDevicePtr ptr,
+void CUDAVirtualMemAllocatorV2::MarkBackingIPCExported(VMMDevicePtr ptr,
                                                        size_t size) {
-  backing_map_.MarkIpcExported(ptr, size);
+  backing_map_.MarkIPCExported(ptr, size);
 }
 
-bool CUDAVirtualMemAllocatorV2::HasIpcExportedRange(VMMDevicePtr ptr,
+bool CUDAVirtualMemAllocatorV2::HasIPCExportedRange(VMMDevicePtr ptr,
                                                     size_t size) const {
   if (!IsReservedVARange(ptr, size)) {
     return false;
   }
-  return backing_map_.HasIpcExportedPages(ptr, size);
+  return backing_map_.HasIPCExportedPages(ptr, size);
 }
 
-size_t CUDAVirtualMemAllocatorV2::CountIpcExportedBytes(
+size_t CUDAVirtualMemAllocatorV2::CountIPCExportedBytes(
     const std::vector<std::pair<VMMDevicePtr, size_t>>& ranges) const {
-  return backing_map_.CountIpcExportedBytes(ranges);
+  return backing_map_.CountIPCExportedBytes(ranges);
 }
 
 bool CUDAVirtualMemAllocatorV2::IsRangeUnmapped(VMMDevicePtr ptr,
@@ -1082,10 +1082,10 @@ bool CUDAVirtualMemAllocatorV2::IsReservedVARange(VMMDevicePtr ptr,
   return offset <= virtual_mem_size_ && size <= virtual_mem_size_ - offset;
 }
 
-bool CUDAVirtualMemAllocatorV2::CollectIpcParts(
+bool CUDAVirtualMemAllocatorV2::CollectIPCParts(
     VMMDevicePtr ptr, size_t size, std::vector<BlockPart>* ipc_parts) const {
-  std::vector<IpcBlockPartDescriptor> descriptors;
-  if (!backing_map_.CollectIpcPartDescriptors(
+  std::vector<IPCBlockPartDescriptor> descriptors;
+  if (!backing_map_.CollectIPCPartDescriptors(
           ptr, size, ipc_parts != nullptr ? &descriptors : nullptr)) {
     return false;
   }
@@ -1107,11 +1107,11 @@ bool CUDAVirtualMemAllocatorV2::CollectIpcParts(
   return true;
 }
 
-bool CUDAVirtualMemAllocatorV2::MarkIpcExported(VMMDevicePtr ptr, size_t size) {
+bool CUDAVirtualMemAllocatorV2::MarkIPCExported(VMMDevicePtr ptr, size_t size) {
   if (!IsReservedVARange(ptr, size)) {
     return false;
   }
-  MarkBackingIpcExported(ptr, size);
+  MarkBackingIPCExported(ptr, size);
   return true;
 }
 

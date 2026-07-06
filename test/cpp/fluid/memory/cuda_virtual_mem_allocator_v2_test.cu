@@ -125,10 +125,10 @@ TEST(VMMBackingMap, TracksMappedAndUnmappedRanges) {
   EXPECT_EQ(candidates.source_pages[0].va, base + page_size);
   EXPECT_EQ(candidates.target_pages[0].va, base + page_size * 2);
 
-  map.MarkIpcExported(base + page_size, page_size);
-  EXPECT_FALSE(map.HasIpcExportedPages(base, page_size));
-  EXPECT_TRUE(map.HasIpcExportedPages(base + page_size, page_size));
-  EXPECT_TRUE(map.HasIpcExportedPages(base, page_size * 2));
+  map.MarkIPCExported(base + page_size, page_size);
+  EXPECT_FALSE(map.HasIPCExportedPages(base, page_size));
+  EXPECT_TRUE(map.HasIPCExportedPages(base + page_size, page_size));
+  EXPECT_TRUE(map.HasIPCExportedPages(base, page_size * 2));
   EXPECT_FALSE(map.IsRangeReleasable(base, page_size * 2));
   mapped_pages = map.CollectMappedPagesFullyInRange(unaligned_free_ranges);
   EXPECT_TRUE(mapped_pages.empty());
@@ -256,7 +256,7 @@ TEST(VMMBackingMap, ValidateMappedPagesDetectsMissingAndMismatchedPages) {
       "handle mismatch"));
 }
 
-TEST(VMMBackingMap, MarkReleasedAllowsMismatchAndIpcBlocksReleasableRange) {
+TEST(VMMBackingMap, MarkReleasedAllowsMismatchAndIPCBlocksReleasableRange) {
   VMMBackingMap map;
   const VMMDevicePtr base = 0x24000000;
   const size_t page_size = 2UL << 20;
@@ -265,7 +265,7 @@ TEST(VMMBackingMap, MarkReleasedAllowsMismatchAndIpcBlocksReleasableRange) {
   map.MarkMapped(base, static_cast<VMMAllocHandle>(0), page_size);
   EXPECT_TRUE(map.IsRangeMapped(base, page_size));
   EXPECT_TRUE(map.IsRangeReleasable(base, page_size));
-  map.MarkIpcExported(base, page_size);
+  map.MarkIPCExported(base, page_size);
   EXPECT_FALSE(map.IsRangeReleasable(base, page_size));
 
   auto meta = std::make_shared<VMMHandleMeta>(
@@ -651,7 +651,7 @@ TEST(CUDAVirtualMemAllocatorV2, StagedRemapDestinationBlocksSource) {
       source_pages[0], target_pages[0], meta));
   EXPECT_TRUE(meta->IsOwnedByRemapDestination());
 
-  auto staged = allocator.CreateStagedRemapDestinationAllocationWithBlock(
+  auto staged = allocator.CreateStagedRemapDestination(
       target_va,
       std::vector<VMMAllocHandle>{source_pages[0].handle},
       0,
@@ -668,7 +668,7 @@ TEST(CUDAVirtualMemAllocatorV2, StagedRemapDestinationBlocksSource) {
             VMMBackingMap::RemapSourceState::kRemapDestinationOwned);
 
   std::vector<BlockPart> ipc_parts;
-  EXPECT_TRUE(allocator.CollectIpcParts(
+  EXPECT_TRUE(allocator.CollectIPCParts(
       staged.block.begin_va(), staged.block.size(), &ipc_parts));
   EXPECT_EQ(ipc_parts.size(), 1UL);
   ASSERT_NE(ipc_parts[0].chunk, nullptr);
@@ -681,7 +681,7 @@ TEST(CUDAVirtualMemAllocatorV2, StagedRemapDestinationBlocksSource) {
   staged.allocation = nullptr;
 }
 
-TEST(CUDAVirtualMemAllocatorV2, CollectsAndPinsIpcBlockBacking) {
+TEST(CUDAVirtualMemAllocatorV2, CollectsAndPinsIPCBlockBacking) {
   CUDAVirtualMemAllocatorV2 allocator(
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
 
@@ -700,7 +700,7 @@ TEST(CUDAVirtualMemAllocatorV2, CollectsAndPinsIpcBlockBacking) {
   ASSERT_EQ(pages.size(), 2UL);
   std::vector<BlockPart> ipc_parts;
   ASSERT_TRUE(
-      allocator.CollectIpcParts(block.begin_va(), block.size(), &ipc_parts));
+      allocator.CollectIPCParts(block.begin_va(), block.size(), &ipc_parts));
   ASSERT_EQ(ipc_parts.size(), 2UL);
   EXPECT_EQ(ipc_parts[0].chunk->base, pages[0].va);
   EXPECT_EQ(ipc_parts[0].chunk->size, allocator.handle_size());
@@ -712,14 +712,14 @@ TEST(CUDAVirtualMemAllocatorV2, CollectsAndPinsIpcBlockBacking) {
   EXPECT_EQ(ipc_parts[1].len, 2048UL);
 
   EXPECT_TRUE(allocator.IsRangeReleasable(block.begin_va(), block.size()));
-  ASSERT_TRUE(allocator.MarkIpcExported(block.begin_va(), block.size()));
-  EXPECT_TRUE(allocator.HasIpcExportedRange(block.begin_va(), block.size()));
+  ASSERT_TRUE(allocator.MarkIPCExported(block.begin_va(), block.size()));
+  EXPECT_TRUE(allocator.HasIPCExportedRange(block.begin_va(), block.size()));
   EXPECT_FALSE(allocator.IsRangeReleasable(block.begin_va(), block.size()));
 
   ASSERT_NE(pages[0].meta, nullptr);
   pages[0].meta->MarkOwnedByRemapDestination();
   EXPECT_FALSE(
-      allocator.CollectIpcParts(block.begin_va(), block.size(), &ipc_parts));
+      allocator.CollectIPCParts(block.begin_va(), block.size(), &ipc_parts));
   pages[0].meta->RestoreOriginalOwnership();
 
   BlockV2 invalid_block = BlockV2::MakeMappedBlock(
@@ -728,11 +728,11 @@ TEST(CUDAVirtualMemAllocatorV2, CollectsAndPinsIpcBlockBacking) {
                               allocator.handle_size()),
       allocator.handle_size(),
       PoolType::kLarge);
-  EXPECT_FALSE(allocator.CollectIpcParts(
+  EXPECT_FALSE(allocator.CollectIPCParts(
       invalid_block.begin_va(), invalid_block.size(), &ipc_parts));
-  EXPECT_FALSE(allocator.MarkIpcExported(invalid_block.begin_va(),
+  EXPECT_FALSE(allocator.MarkIPCExported(invalid_block.begin_va(),
                                          invalid_block.size()));
-  EXPECT_FALSE(allocator.HasIpcExportedRange(invalid_block.begin_va(),
+  EXPECT_FALSE(allocator.HasIPCExportedRange(invalid_block.begin_va(),
                                              invalid_block.size()));
 }
 

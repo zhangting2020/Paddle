@@ -329,9 +329,9 @@ RemapTransaction::MaterializedRange RemapTransaction::MaterializeMappedRange(
     size_t start,
     size_t count,
     PoolType pool_type) {
-  CUDAVirtualMemAllocatorV2::StagedAllocationWithBlock staged;
+  CUDAVirtualMemAllocatorV2::StagedRemapDestination staged;
   try {
-    staged = vmm_allocator_->CreateStagedRemapDestinationAllocationWithBlock(
+    staged = vmm_allocator_->CreateStagedRemapDestination(
         dst, handles, start, count, pool_type);
   } catch (const std::exception& e) {
     VLOG(0) << "VMM V2 remap transaction: materialize mapped range failed, "
@@ -414,18 +414,18 @@ bool RemapTransaction::PrepareMoveDestinationPlacement(
       placement.dst, placement.count * handle_size_, context);
 }
 
-bool RemapTransaction::CanPrepareSyntheticAllocationRange(VMMDevicePtr dst,
-                                                          size_t size) const {
-  if (!can_prepare_synthetic_allocation_) {
+bool RemapTransaction::CanUseDestinationRange(VMMDevicePtr dst,
+                                              size_t size) const {
+  if (!can_use_destination_range_) {
     return true;
   }
-  return can_prepare_synthetic_allocation_(reinterpret_cast<void*>(dst), size);
+  return can_use_destination_range_(reinterpret_cast<void*>(dst), size);
 }
 
 bool RemapTransaction::PrepareDestinationRange(VMMDevicePtr dst,
                                                size_t size,
                                                const char* context) const {
-  if (PrepareSyntheticAllocationRange(dst, size)) {
+  if (ReleaseStaleDestinationAllocations(dst, size)) {
     return true;
   }
   VLOG(0) << "VMM V2 remap transaction: synthetic allocation preparation "
@@ -435,12 +435,13 @@ bool RemapTransaction::PrepareDestinationRange(VMMDevicePtr dst,
   return false;
 }
 
-bool RemapTransaction::PrepareSyntheticAllocationRange(VMMDevicePtr dst,
-                                                       size_t size) const {
-  if (!prepare_synthetic_allocation_) {
+bool RemapTransaction::ReleaseStaleDestinationAllocations(VMMDevicePtr dst,
+                                                          size_t size) const {
+  if (!release_stale_destination_allocations_) {
     return true;
   }
-  return prepare_synthetic_allocation_(reinterpret_cast<void*>(dst), size);
+  return release_stale_destination_allocations_(reinterpret_cast<void*>(dst),
+                                                size);
 }
 
 RemapTransaction::SourceMovePlan RemapTransaction::CollectRemapSourcePlan(
@@ -619,7 +620,7 @@ RemapTransaction::PlanUnmappedFreeDestinations(BlockList* blocks,
           CountLeadingUnmappedBackingPages(it->begin_va(), it->size());
       const size_t capacity_bytes = unmapped_free_cap * handle_size_;
       if (capacity_bytes >= required_bytes &&
-          CanPrepareSyntheticAllocationRange(it->begin_va(), required_bytes)) {
+          CanUseDestinationRange(it->begin_va(), required_bytes)) {
         plan.single_it = it;
         return plan;
       }
@@ -639,13 +640,13 @@ RemapTransaction::PlanUnmappedFreeDestinations(BlockList* blocks,
 
     auto dst = it->begin_va();
     const size_t capacity_bytes = unmapped_free_cap * handle_size_;
-    if (CanPrepareSyntheticAllocationRange(dst, capacity_bytes)) {
+    if (CanUseDestinationRange(dst, capacity_bytes)) {
       plan.total_capacity += capacity_bytes;
     }
 
     if (handle_idx >= handle_count) continue;
     size_t to_fill = std::min(unmapped_free_cap, handle_count - handle_idx);
-    if (!CanPrepareSyntheticAllocationRange(dst, to_fill * handle_size_)) {
+    if (!CanUseDestinationRange(dst, to_fill * handle_size_)) {
       continue;
     }
     plan.scatter_placements.push_back(
@@ -668,7 +669,7 @@ RemapTransaction::DestinationPlan RemapTransaction::SelectDestinationPlan(
   const bool tail_driver_va_usable =
       TailIsUsable(tail_va, total_remapped, va_limit);
   if (tail_driver_va_usable &&
-      CanPrepareSyntheticAllocationRange(tail_va, total_remapped)) {
+      CanUseDestinationRange(tail_va, total_remapped)) {
     VLOG(10) << "VMM remap compact using " << log_prefix
              << " tail path, dst_va=" << reinterpret_cast<void*>(tail_va)
              << " bytes=" << total_remapped;

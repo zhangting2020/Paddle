@@ -30,8 +30,9 @@ class RemapTransaction {
  public:
   using CommitSyntheticAllocationFn =
       std::function<void(DecoratedAllocationPtr)>;
-  using CanPrepareSyntheticAllocationFn = std::function<bool(void*, size_t)>;
-  using PrepareSyntheticAllocationFn = std::function<bool(void*, size_t)>;
+  using CanUseDestinationRangeFn = std::function<bool(void*, size_t)>;
+  using ReleaseStaleDestinationAllocationsFn =
+      std::function<bool(void*, size_t)>;
   using RollbackMappedDestinationFn = std::function<void()>;
   using RollbackSourceMappingsFn = std::function<void()>;
   using VaRanges = std::vector<std::pair<VMMDevicePtr, size_t>>;
@@ -167,19 +168,18 @@ class RemapTransaction {
     bool success{false};
     bool used_tail{false};
   };
-  RemapTransaction(
-      CUDAVirtualMemAllocatorV2* vmm_allocator,
-      size_t handle_size,
-      CommitSyntheticAllocationFn commit_synthetic_allocation = {},
-      CanPrepareSyntheticAllocationFn can_prepare_synthetic_allocation = {},
-      PrepareSyntheticAllocationFn prepare_synthetic_allocation = {})
+  RemapTransaction(CUDAVirtualMemAllocatorV2* vmm_allocator,
+                   size_t handle_size,
+                   CommitSyntheticAllocationFn commit_synthetic_allocation = {},
+                   CanUseDestinationRangeFn can_use_destination_range = {},
+                   ReleaseStaleDestinationAllocationsFn
+                       release_stale_destination_allocations = {})
       : vmm_allocator_(vmm_allocator),
         handle_size_(handle_size),
         commit_synthetic_allocation_(std::move(commit_synthetic_allocation)),
-        can_prepare_synthetic_allocation_(
-            std::move(can_prepare_synthetic_allocation)),
-        prepare_synthetic_allocation_(std::move(prepare_synthetic_allocation)) {
-  }
+        can_use_destination_range_(std::move(can_use_destination_range)),
+        release_stale_destination_allocations_(
+            std::move(release_stale_destination_allocations)) {}
   ~RemapTransaction();
 
   void PrepareCandidates(const VaRanges& source_ranges,
@@ -217,11 +217,11 @@ class RemapTransaction {
       const DestinationPlacement& placement,
       const char* context,
       std::vector<VMMBackingMap::UnmappedPage>* target_pages) const;
-  bool CanPrepareSyntheticAllocationRange(VMMDevicePtr dst, size_t size) const;
+  bool CanUseDestinationRange(VMMDevicePtr dst, size_t size) const;
   bool PrepareDestinationRange(VMMDevicePtr dst,
                                size_t size,
                                const char* context) const;
-  bool PrepareSyntheticAllocationRange(VMMDevicePtr dst, size_t size) const;
+  bool ReleaseStaleDestinationAllocations(VMMDevicePtr dst, size_t size) const;
   SourceMovePlan CollectRemapSourcePlan(BlockList* blocks,
                                         size_t requested_size,
                                         PoolType pool_type);
@@ -306,8 +306,8 @@ class RemapTransaction {
   size_t handle_size_;
   VMMBackingMap::CompactCandidates candidates_;
   CommitSyntheticAllocationFn commit_synthetic_allocation_;
-  CanPrepareSyntheticAllocationFn can_prepare_synthetic_allocation_;
-  PrepareSyntheticAllocationFn prepare_synthetic_allocation_;
+  CanUseDestinationRangeFn can_use_destination_range_;
+  ReleaseStaleDestinationAllocationsFn release_stale_destination_allocations_;
   std::vector<RollbackMappedDestinationFn> rollback_mapped_destinations_;
   RollbackSourceMappingsFn rollback_source_mappings_;
   std::vector<Allocation*> pending_synthetic_allocations_;

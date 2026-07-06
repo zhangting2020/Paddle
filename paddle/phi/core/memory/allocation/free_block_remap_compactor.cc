@@ -31,8 +31,8 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
   RemapTransaction transaction(vmm_allocator_.get(),
                                handle_size,
                                commit_synthetic_allocation_,
-                               can_prepare_synthetic_allocation_,
-                               prepare_synthetic_allocation_);
+                               can_use_destination_range_,
+                               release_stale_destination_allocations_);
 
   VLOG(3) << "VMM V2 compactor: entering Compact, blocks=" << blocks->size()
           << " handle_size=" << handle_size;

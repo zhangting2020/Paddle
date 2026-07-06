@@ -708,7 +708,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   allocation.reset();
   ASSERT_EQ(allocator.all_blocks().size(), 1UL);
   EXPECT_TRUE(allocator.all_blocks().front().IsFree());
-  EXPECT_TRUE(underlying->HasIpcExportedRange(
+  EXPECT_TRUE(underlying->HasIPCExportedRange(
       reinterpret_cast<VMMDevicePtr>(ptr), underlying->handle_size() * 2));
   ExpectIndexedFreeStats(
       &allocator, underlying->handle_size() * 2, underlying->handle_size() * 2);
@@ -716,7 +716,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   auto released = allocator.Release(phi::GPUPlace());
   EXPECT_EQ(released, 0UL);
   ASSERT_EQ(allocator.all_blocks().size(), 1UL);
-  EXPECT_TRUE(underlying->HasIpcExportedRange(
+  EXPECT_TRUE(underlying->HasIPCExportedRange(
       reinterpret_cast<VMMDevicePtr>(ptr), underlying->handle_size() * 2));
 
   auto compacted =
@@ -730,7 +730,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
-     BackingIpcPinAllowsRegularMergedNeighborRelease) {
+     BackingIPCPinAllowsRegularMergedNeighborRelease) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
       underlying, 256, phi::GPUPlace(), PoolType::kLarge);
@@ -753,7 +753,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   exported.reset();
   ASSERT_EQ(allocator.all_blocks().size(), 1UL);
   EXPECT_TRUE(allocator.all_blocks().front().IsFree());
-  EXPECT_TRUE(underlying->HasIpcExportedRange(
+  EXPECT_TRUE(underlying->HasIPCExportedRange(
       reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->handle_size()));
   EXPECT_EQ(allocator.all_blocks().front().size_,
             underlying->handle_size() * 2);
@@ -768,7 +768,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   EXPECT_EQ(block_it->ptr_, exported_ptr);
   EXPECT_EQ(block_it->size_, underlying->handle_size());
   EXPECT_EQ(underlying->tail_offset(), underlying->handle_size());
-  EXPECT_TRUE(underlying->HasIpcExportedRange(
+  EXPECT_TRUE(underlying->HasIPCExportedRange(
       reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->handle_size()));
 
   auto next = allocator.Allocate(underlying->handle_size());
@@ -778,7 +778,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2,
-     BackingIpcPinAllowsPartialCompactOfRegularMergedNeighbor) {
+     BackingIPCPinAllowsPartialCompactOfRegularMergedNeighbor) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
       underlying, 256, phi::GPUPlace(), PoolType::kLarge);
@@ -802,7 +802,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   exported.reset();
   ASSERT_EQ(allocator.all_blocks().size(), 2UL);
   EXPECT_TRUE(allocator.all_blocks().front().IsFree());
-  EXPECT_TRUE(underlying->HasIpcExportedRange(
+  EXPECT_TRUE(underlying->HasIPCExportedRange(
       reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->handle_size()));
   EXPECT_EQ(allocator.all_blocks().front().size_,
             underlying->handle_size() * 2);
@@ -817,7 +817,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   ASSERT_NE(exported_block, nullptr);
   EXPECT_TRUE(exported_block->IsFree());
   EXPECT_EQ(exported_block->size_, underlying->handle_size());
-  EXPECT_TRUE(underlying->HasIpcExportedRange(
+  EXPECT_TRUE(underlying->HasIPCExportedRange(
       reinterpret_cast<VMMDevicePtr>(exported_ptr), underlying->handle_size()));
 
   const auto* regular_block = FindBlockByPtr(allocator, regular_ptr);
@@ -889,7 +889,7 @@ TEST(VMMAutoGrowthBestFitAllocatorV2, CollectTensorPartsMarksIpcExported) {
   ASSERT_EQ(parts.size(), 1UL);
   EXPECT_EQ(parts[0].chunk_rel_off, 0UL);
   EXPECT_EQ(parts[0].len, underlying->handle_size());
-  EXPECT_TRUE(underlying->HasIpcExportedRange(
+  EXPECT_TRUE(underlying->HasIPCExportedRange(
       reinterpret_cast<VMMDevicePtr>(allocation->ptr()),
       underlying->handle_size()));
 }
