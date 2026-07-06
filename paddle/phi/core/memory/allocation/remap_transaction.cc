@@ -1291,12 +1291,22 @@ void RemapTransaction::Commit() {
           "an ownership sink.",
           pending_synthetic_allocations_.size()));
   if (commit_synthetic_allocation_) {
-    for (auto* allocation : pending_synthetic_allocations_) {
-      commit_synthetic_allocation_(
-          vmm_allocator_->AdoptCommittedSyntheticAllocation(allocation));
+    while (!pending_synthetic_allocations_.empty()) {
+      auto* allocation = pending_synthetic_allocations_.back();
+      pending_synthetic_allocations_.pop_back();
+      try {
+        auto committed_allocation =
+            vmm_allocator_->AdoptCommittedSyntheticAllocation(allocation);
+        allocation = nullptr;
+        commit_synthetic_allocation_(std::move(committed_allocation));
+      } catch (...) {
+        if (allocation != nullptr) {
+          vmm_allocator_->DestroyStagedSyntheticAllocation(allocation);
+        }
+        throw;
+      }
     }
   }
-  pending_synthetic_allocations_.clear();
   rollback_mapped_destinations_.clear();
   rollback_source_mappings_ = {};
   completed_ = true;
