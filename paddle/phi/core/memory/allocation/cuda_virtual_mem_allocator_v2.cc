@@ -292,7 +292,7 @@ CUDAVirtualMemAllocatorV2::PlaceAtVAWithLayout(VMMDevicePtr ptr, size_t size) {
       virtual_mem_base_,
       common::errors::InvalidArgument(
           "VMMAllocatorV2 PlaceAtVA ptr is before reserved VA range."));
-  PADDLE_ENFORCE_LE(
+  PADDLE_ENFORCE_LT(
       ptr,
       virtual_mem_base_ + virtual_mem_size_,
       common::errors::InvalidArgument(
@@ -903,7 +903,10 @@ CUDAVirtualMemAllocatorV2::BuildAllocationWithBlock(
 
 Allocation* CUDAVirtualMemAllocatorV2::CreateTrackedAllocation(
     VMMDevicePtr ptr, size_t size, const HandleLayout& layout) {
-  auto* allocation = new Allocation(reinterpret_cast<void*>(ptr), size, place_);
+  auto* allocation = new Allocation(  // NOLINT
+      reinterpret_cast<void*>(ptr),
+      size,
+      place_);
   RegisterHandleLayout(allocation, reinterpret_cast<void*>(ptr), layout);
   return allocation;
 }

@@ -83,8 +83,10 @@ phi::Allocation* VMMAutoGrowthBestFitMultiPoolAllocatorV2::AllocateImpl(
       common::errors::NotFound("No VMM pool allocator found for pool %d.",
                                static_cast<int>(route.pool_type)));
   auto allocation = route.allocator->Allocate(size);
-  return new VMMAutoGrowthBestFitMultiPoolAllocationV2(
-      std::move(allocation), route.allocator, route.pool_type);
+  return new VMMAutoGrowthBestFitMultiPoolAllocationV2(  // NOLINT
+      std::move(allocation),
+      route.allocator,
+      route.pool_type);
 }
 
 size_t VMMAutoGrowthBestFitMultiPoolAllocatorV2::CompactImpl(

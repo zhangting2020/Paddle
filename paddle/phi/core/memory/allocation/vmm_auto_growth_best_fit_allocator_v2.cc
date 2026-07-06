@@ -373,7 +373,8 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocateImpl(size_t size) {
   }
 
   return record_alloc(
-      "grow", new VMMAutoGrowthBestFitBlockAllocationV2(it, place_, this));
+      "grow",
+      new VMMAutoGrowthBestFitBlockAllocationV2(it, place_, this));  // NOLINT
 }
 
 size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
@@ -969,7 +970,10 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromFreeBlocks(
   }
 
   block_it->MarkActive();
-  return new VMMAutoGrowthBestFitBlockAllocationV2(block_it, place_, this);
+  return new VMMAutoGrowthBestFitBlockAllocationV2(  // NOLINT
+      block_it,
+      place_,
+      this);  // NOLINT
 }
 
 phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
@@ -1053,7 +1057,10 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
     InsertUnmappedFreeBlock(tail_it);
   }
 
-  return new VMMAutoGrowthBestFitBlockAllocationV2(best, place_, this);
+  return new VMMAutoGrowthBestFitBlockAllocationV2(  // NOLINT
+      best,
+      place_,
+      this);  // NOLINT
 }
 
 void VMMAutoGrowthBestFitAllocatorV2::TrackUnderlyingAllocation(
