@@ -677,50 +677,59 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
       required_releasable_bytes > releasable_bytes
           ? required_releasable_bytes - releasable_bytes
           : 0;
-  LOG(INFO) << "VMM V2 compact attempt: seq=" << compact_seq
-            << " pool=" << static_cast<int>(pool_type_) << " action=compact"
+  if (FLAGS_vmm_v2_compact_detailed_stats) {
+    LOG(INFO)
+        << "VMM V2 compact attempt: seq=" << compact_seq
+        << " pool=" << static_cast<int>(pool_type_) << " action=compact"
+        << " requested=" << requested_size
+        << " compact_target=" << compact_target
+        << " partial=" << (compact_target < requested_size)
+        << " pre_compact_us=" << ElapsedMicros(compact_start, Clock::now())
+        << " lock_wait_us=" << lock_wait_us
+        << " block_scan_us=" << block_scan_us
+        << " source_precheck_us=" << source_precheck_us
+        << " driver_topup_us=" << driver_topup_us
+        << " required_releasable_bytes=" << required_releasable_bytes
+        << " releasable_target_bytes=" << releasable_target_bytes
+        << " releasable_handles=" << releasable_handles
+        << " releasable_bytes=" << releasable_bytes
+        << " driver_topup_bytes=" << driver_topup_bytes
+        << " source_ranges=" << compact_source_ranges.size()
+        << " source_pages=" << source_pages.size()
+        << " total_free=" << total_free << " max_free=" << max_free
+        << " tail_free=" << tail_free
+        << " mapped_free_blocks=" << mapped_free_blocks
+        << " mapped_free_bytes=" << mapped_free_bytes
+        << " largest_mapped_free=" << largest_mapped_free
+        << " indexable_mapped_free_blocks=" << indexable_mapped_free_blocks
+        << " indexable_mapped_free_bytes=" << indexable_mapped_free_bytes
+        << " largest_indexable_mapped_free=" << max_free
+        << " ipc_exported_backing_bytes=" << ipc_exported_backing_bytes
+        << " unmapped_free_blocks=" << unmapped_free_blocks_count
+        << " unmapped_free_bytes=" << unmapped_free_bytes
+        << " largest_unmapped_free=" << largest_unmapped_free
+        << " all_blocks=" << all_blocks_.size()
+        << " free_index_size=" << free_blocks_.size()
+        << " unmapped_free_index_size=" << unmapped_free_blocks_.size()
+        << " paddle_allocated_bytes=" << memory_stats->paddle_allocated_bytes
+        << " paddle_reserved_bytes=" << memory_stats->paddle_reserved_bytes
+        << " paddle_peak_allocated_bytes="
+        << memory_stats->paddle_peak_allocated_bytes
+        << " paddle_peak_reserved_bytes="
+        << memory_stats->paddle_peak_reserved_bytes
+        << " driver_actual_avail=" << memory_stats->driver_actual_avail
+        << " driver_actual_total=" << memory_stats->driver_actual_total
+        << " driver_mem_info_collected="
+        << memory_stats->driver_mem_info_collected << " mem_info_status="
+        << static_cast<int>(memory_stats->mem_info_status);
+  } else {
+    VLOG(3) << "VMM V2 compact attempt: seq=" << compact_seq
+            << " pool=" << static_cast<int>(pool_type_)
             << " requested=" << requested_size
             << " compact_target=" << compact_target
-            << " partial=" << (compact_target < requested_size)
-            << " pre_compact_us=" << ElapsedMicros(compact_start, Clock::now())
-            << " lock_wait_us=" << lock_wait_us
-            << " block_scan_us=" << block_scan_us
-            << " source_precheck_us=" << source_precheck_us
-            << " driver_topup_us=" << driver_topup_us
-            << " required_releasable_bytes=" << required_releasable_bytes
-            << " releasable_target_bytes=" << releasable_target_bytes
-            << " releasable_handles=" << releasable_handles
             << " releasable_bytes=" << releasable_bytes
-            << " driver_topup_bytes=" << driver_topup_bytes
-            << " source_ranges=" << compact_source_ranges.size()
-            << " source_pages=" << source_pages.size()
-            << " total_free=" << total_free << " max_free=" << max_free
-            << " tail_free=" << tail_free
-            << " mapped_free_blocks=" << mapped_free_blocks
-            << " mapped_free_bytes=" << mapped_free_bytes
-            << " largest_mapped_free=" << largest_mapped_free
-            << " indexable_mapped_free_blocks=" << indexable_mapped_free_blocks
-            << " indexable_mapped_free_bytes=" << indexable_mapped_free_bytes
-            << " largest_indexable_mapped_free=" << max_free
-            << " ipc_exported_backing_bytes=" << ipc_exported_backing_bytes
-            << " unmapped_free_blocks=" << unmapped_free_blocks_count
-            << " unmapped_free_bytes=" << unmapped_free_bytes
-            << " largest_unmapped_free=" << largest_unmapped_free
-            << " all_blocks=" << all_blocks_.size()
-            << " free_index_size=" << free_blocks_.size()
-            << " unmapped_free_index_size=" << unmapped_free_blocks_.size()
-            << " paddle_allocated_bytes="
-            << memory_stats->paddle_allocated_bytes
-            << " paddle_reserved_bytes=" << memory_stats->paddle_reserved_bytes
-            << " paddle_peak_allocated_bytes="
-            << memory_stats->paddle_peak_allocated_bytes
-            << " paddle_peak_reserved_bytes="
-            << memory_stats->paddle_peak_reserved_bytes
-            << " driver_actual_avail=" << memory_stats->driver_actual_avail
-            << " driver_actual_total=" << memory_stats->driver_actual_total
-            << " driver_mem_info_collected="
-            << memory_stats->driver_mem_info_collected << " mem_info_status="
-            << static_cast<int>(memory_stats->mem_info_status);
+            << " source_pages=" << source_pages.size();
+  }
 
   VLOG(3) << "VMM V2 pool " << static_cast<int>(pool_type_)
           << " compact: total_free=" << total_free << " max_free=" << max_free
@@ -761,26 +770,35 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   RebuildFreeBlockIndex();
   const uint64_t rebuild_index_us =
       ElapsedMicros(rebuild_index_start, Clock::now());
-  LOG(INFO) << "VMM V2 compact finish: seq=" << compact_seq
+  if (FLAGS_vmm_v2_compact_detailed_stats) {
+    LOG(INFO) << "VMM V2 compact finish: seq=" << compact_seq
+              << " pool=" << static_cast<int>(pool_type_)
+              << " requested=" << requested_size
+              << " compact_target=" << compact_target
+              << " remap_target=" << remap_target
+              << " remapped_bytes=" << remapped
+              << " total_us=" << ElapsedMicros(compact_start, Clock::now())
+              << " lock_wait_us=" << lock_wait_us
+              << " block_scan_us=" << block_scan_us
+              << " source_precheck_us=" << source_precheck_us
+              << " driver_topup_us=" << driver_topup_us
+              << " compactor_us=" << compactor_us
+              << " rebuild_index_us=" << rebuild_index_us
+              << " source_ranges=" << compact_source_ranges.size()
+              << " source_pages=" << source_pages.size()
+              << " releasable_handles=" << releasable_handles
+              << " releasable_bytes=" << releasable_bytes
+              << " driver_mem_info_needed="
+              << (requested_size > 0 && !FLAGS_vmm_v2_compact_all &&
+                  releasable_bytes < required_releasable_bytes);
+  } else {
+    VLOG(3) << "VMM V2 compact finish: seq=" << compact_seq
             << " pool=" << static_cast<int>(pool_type_)
-            << " requested=" << requested_size
-            << " compact_target=" << compact_target
-            << " remap_target=" << remap_target
-            << " remapped_bytes=" << remapped
+            << " requested=" << requested_size << " remapped_bytes=" << remapped
             << " total_us=" << ElapsedMicros(compact_start, Clock::now())
-            << " lock_wait_us=" << lock_wait_us
-            << " block_scan_us=" << block_scan_us
-            << " source_precheck_us=" << source_precheck_us
-            << " driver_topup_us=" << driver_topup_us
             << " compactor_us=" << compactor_us
-            << " rebuild_index_us=" << rebuild_index_us
-            << " source_ranges=" << compact_source_ranges.size()
-            << " source_pages=" << source_pages.size()
-            << " releasable_handles=" << releasable_handles
-            << " releasable_bytes=" << releasable_bytes
-            << " driver_mem_info_needed="
-            << (requested_size > 0 && !FLAGS_vmm_v2_compact_all &&
-                releasable_bytes < required_releasable_bytes);
+            << " rebuild_index_us=" << rebuild_index_us;
+  }
   return remapped;
 }
 

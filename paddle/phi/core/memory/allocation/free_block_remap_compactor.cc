@@ -20,6 +20,8 @@
 
 #include "glog/logging.h"
 
+COMMON_DECLARE_bool(vmm_v2_compact_detailed_stats);
+
 namespace paddle {
 namespace memory {
 namespace allocation {
@@ -92,24 +94,36 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
             << " remapped_blocked_bytes=" << stats.remapped_blocked_bytes
             << " backing_blocked=" << stats.backing_blocked_count
             << " backing_blocked_bytes=" << stats.backing_blocked_bytes;
-    LOG(INFO) << "VMM V2 compact summary: seq=" << compact_seq << " phase1=done"
+    const bool log_summary_as_info =
+        FLAGS_vmm_v2_compact_detailed_stats || !compact_result.success;
+    if (log_summary_as_info) {
+      LOG(INFO) << "VMM V2 compact summary: seq=" << compact_seq
+                << " phase1=done"
+                << " pool=" << static_cast<int>(pool_type_)
+                << " requested=" << requested_size
+                << " success=" << compact_result.success
+                << " remapped_handles=" << compact_result.remapped_handle_count
+                << " remapped_bytes=" << compact_result.remapped_bytes
+                << " used_tail=" << compact_result.used_tail
+                << " source_collect_us=" << compact_result.source_collect_us
+                << " destination_plan_us=" << compact_result.destination_plan_us
+                << " move_commit_us=" << compact_result.move_commit_us
+                << " free_blocks=" << stats.free_block_count
+                << " safe_blocks=" << stats.safe_block_count
+                << " fully_covered=" << stats.fully_covered_count
+                << " event_blocked=" << stats.event_blocked_count
+                << " unknown_safety_blocked="
+                << stats.unknown_safety_blocked_count
+                << " remapped_blocked=" << stats.remapped_blocked_count
+                << " backing_blocked=" << stats.backing_blocked_count;
+    } else {
+      VLOG(3) << "VMM V2 compact summary: seq=" << compact_seq << " phase1=done"
               << " pool=" << static_cast<int>(pool_type_)
               << " requested=" << requested_size
-              << " success=" << compact_result.success
               << " remapped_handles=" << compact_result.remapped_handle_count
               << " remapped_bytes=" << compact_result.remapped_bytes
-              << " used_tail=" << compact_result.used_tail
-              << " source_collect_us=" << compact_result.source_collect_us
-              << " destination_plan_us=" << compact_result.destination_plan_us
-              << " move_commit_us=" << compact_result.move_commit_us
-              << " free_blocks=" << stats.free_block_count
-              << " safe_blocks=" << stats.safe_block_count
-              << " fully_covered=" << stats.fully_covered_count
-              << " event_blocked=" << stats.event_blocked_count
-              << " unknown_safety_blocked="
-              << stats.unknown_safety_blocked_count
-              << " remapped_blocked=" << stats.remapped_blocked_count
-              << " backing_blocked=" << stats.backing_blocked_count;
+              << " move_commit_us=" << compact_result.move_commit_us;
+    }
     auto compact_cuda_err = cudaPeekAtLastError();
     PADDLE_ENFORCE_EQ(
         compact_cuda_err,
