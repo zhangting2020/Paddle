@@ -24,6 +24,7 @@
 #include "glog/logging.h"
 #include "paddle/phi/core/platform/cuda_device_guard.h"
 #include "paddle/phi/core/platform/device/gpu/gpu_info.h"
+#include "paddle/phi/core/scope_guard.h"
 
 namespace paddle {
 namespace memory {
@@ -39,6 +40,14 @@ uint64_t ElapsedMicros(Clock::time_point start, Clock::time_point end) {
   return static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::microseconds>(end - start)
           .count());
+}
+
+bool IsCudaDeinitialized(CUresult result) {
+  return result == CUDA_ERROR_DEINITIALIZED;
+}
+
+bool IsCudaRuntimeDeinitialized(cudaError_t result) {
+  return result == cudaErrorCudartUnloading;
 }
 
 void ClearGpuLastError() {
@@ -463,7 +472,28 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
   HandleLayout layout =
       RequireHandleLayout(static_cast<Allocation*>(allocation));
 
-  platform::CUDADeviceGuard guard(place_.device);
+  int prev_id = -1;
+  auto runtime_status = cudaGetDevice(&prev_id);
+  if (IsCudaRuntimeDeinitialized(runtime_status)) {
+    UnregisterHandleLayout(static_cast<Allocation*>(allocation), ptr);
+    delete allocation;
+    return;
+  }
+  PADDLE_ENFORCE_GPU_SUCCESS(runtime_status);
+  const bool restore_device = prev_id != place_.device;
+  if (restore_device) {
+    PADDLE_ENFORCE_GPU_SUCCESS(cudaSetDevice(place_.device));
+  }
+  DEFINE_PADDLE_SCOPE_GUARD([&] {
+    if (restore_device) {
+      auto status = cudaSetDevice(prev_id);
+      if (status != cudaSuccess && !IsCudaRuntimeDeinitialized(status)) {
+        VLOG(0) << "Failed to restore CUDA device from " << place_.device
+                << " to " << prev_id << ": " << cudaGetErrorString(status);
+      }
+    }
+  });
+
   for (const auto& handle : layout) {
     if (handle->IsOwnedByRemapDestination()) {
       VLOG(6) << "FreeImpl: skipping remap-destination-owned handle base="
@@ -471,29 +501,20 @@ void CUDAVirtualMemAllocatorV2::FreeImpl(phi::Allocation* allocation) {
               << " size=" << handle->size();
       continue;
     }
-    PADDLE_ENFORCE_GPU_SUCCESS(
-        phi::dynload::cuMemUnmap(handle->base(), handle->size()));
-    backing_map_.MarkUnmapped(handle->base(), handle->size());
-    // Use non-throwing release: if the handle was already released by a
-    // subsequent compactor remap (which created a new synthetic allocation
-    // for the same physical handle), cuMemRelease returns
-    // CUDA_ERROR_INVALID_VALUE. This is expected and safe to ignore:
-    // the handle's physical memory is now owned by the newer synthetic
-    // allocation.
+    auto unmap_status =
+        phi::dynload::cuMemUnmap(handle->base(), handle->size());
+    if (IsCudaDeinitialized(unmap_status)) {
+      continue;
+    }
+    PADDLE_ENFORCE_GPU_SUCCESS(unmap_status);
     auto release_status = platform::RecordedGpuMemRelease(
         handle->handle(), handle->size(), place_.device);
-    if (release_status != CUDA_SUCCESS) {
-      VLOG(0) << "FreeImpl: cuMemRelease returned " << release_status
-              << " for handle " << handle->handle()
-              << " base=" << reinterpret_cast<void*>(handle->base())
-              << " size=" << handle->size() << " owned_by_remap_destination="
-              << handle->IsOwnedByRemapDestination()
-              << " (likely already released by remap ownership transfer), "
-              << "skipping";
-    } else {
-      backing_map_.MarkReleased(
-          handle->base(), handle->handle(), handle->size());
+    if (IsCudaDeinitialized(release_status)) {
+      continue;
     }
+    PADDLE_ENFORCE_GPU_SUCCESS(release_status);
+    backing_map_.MarkUnmapped(handle->base(), handle->size());
+    backing_map_.MarkReleased(handle->base(), handle->handle(), handle->size());
   }
 
   UnregisterHandleLayout(static_cast<Allocation*>(allocation), ptr);

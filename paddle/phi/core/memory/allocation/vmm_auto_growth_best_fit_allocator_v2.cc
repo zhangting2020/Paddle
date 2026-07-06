@@ -1013,10 +1013,11 @@ phi::Allocation* VMMAutoGrowthBestFitAllocatorV2::AllocFromUnmappedFreeBlocks(
   try {
     unmapped_free_alloc = underlying_allocator_->PlaceAtVAWithBlock(
         unmapped_free_ptr, backing_size);
-  } catch (...) {
+  } catch (const BadAlloc&) {
     // Do not mutate the allocation view if backing cannot be created in this
-    // unmapped-free range. The normal grow path will surface the allocation
-    // failure if needed.
+    // unmapped-free range due to physical memory pressure. The normal grow
+    // path will surface the allocation failure if needed. Other exceptions
+    // indicate allocator state bugs and must not be hidden as a cache miss.
     return nullptr;
   }
 
@@ -1137,6 +1138,16 @@ bool VMMAutoGrowthBestFitAllocatorV2::CanReleaseIdleUnderlying(
   }
   return underlying_allocator_->IsRangeReleasable(
       reinterpret_cast<VMMDevicePtr>(base), size);
+}
+
+bool VMMAutoGrowthBestFitAllocatorV2::HasReleasableIdleUnderlying() const {
+  for (const auto& allocation : underlying_allocations_) {
+    auto* base = reinterpret_cast<uint8_t*>(allocation->ptr());
+    if (CanReleaseIdleUnderlying(base, allocation->size())) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool VMMAutoGrowthBestFitAllocatorV2::TryReleaseIdleUnderlying(
@@ -1277,6 +1288,9 @@ void VMMAutoGrowthBestFitAllocatorV2::TryMergeUnmappedFree(BlockListIt it) {
 uint64_t VMMAutoGrowthBestFitAllocatorV2::ReleaseImpl(
     const Place& place UNUSED) {
   std::lock_guard<SpinLock> guard(spinlock_);
+  if (!HasReleasableIdleUnderlying()) {
+    return 0;
+  }
   // FreeIdleChunks may release CUDA VMM mappings and physical handles. Those
   // driver calls are not ordered by the stream-safe wrapper, so wait before
   // making any previously returned VA range invalid.

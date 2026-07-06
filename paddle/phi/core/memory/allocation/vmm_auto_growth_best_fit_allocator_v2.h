@@ -143,6 +143,7 @@ class VMMAutoGrowthBestFitAllocatorV2 : public Allocator {
                                                        size_t size) const;
   bool ReleaseRemapDestinationUnderlyingAllocations(void* ptr, size_t size);
   bool CanReleaseIdleUnderlying(uint8_t* base, size_t size) const;
+  bool HasReleasableIdleUnderlying() const;
   bool TryReleaseIdleUnderlying(
       UnderlyingAllocationRegistry::iterator* alloc_it, uint64_t* released);
   bool CanIndexFreeBlock(const BlockV2& block) const;
