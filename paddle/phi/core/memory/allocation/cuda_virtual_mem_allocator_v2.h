@@ -146,6 +146,7 @@ class CUDAVirtualMemAllocatorV2 : public Allocator {
   AllocationWithBlock PlaceAtVAWithBlock(VMMDevicePtr ptr, size_t size);
   bool IsAllocationOwnedByRemapDestination(void* ptr) const;
   bool ClearRemapDestinationOwnership(VMMDevicePtr ptr, size_t size);
+  // Clears ownership only for backing pages fully covered by [ptr, ptr + size).
   size_t ClearRemapDestinationOwnershipInRange(VMMDevicePtr ptr, size_t size);
 
   // Create a staged synthetic Allocation and mapped-free block for handles

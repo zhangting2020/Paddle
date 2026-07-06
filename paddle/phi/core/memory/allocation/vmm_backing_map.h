@@ -68,6 +68,7 @@ class VMMBackingMap {
                                   const std::shared_ptr<VMMHandleMeta>& meta,
                                   size_t size);
   bool ClearRemapDestinationOwnership(VMMDevicePtr va, size_t size);
+  // Clears ownership only for backing pages fully covered by [va, va + size).
   size_t ClearRemapDestinationOwnershipInRange(VMMDevicePtr va, size_t size);
   void MarkUnmapped(VMMDevicePtr va, size_t size);
   void MarkReleased(VMMDevicePtr va, VMMAllocHandle handle, size_t size);

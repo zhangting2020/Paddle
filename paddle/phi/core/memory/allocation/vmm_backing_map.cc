@@ -270,6 +270,8 @@ size_t VMMBackingMap::ClearRemapDestinationOwnershipInRange(VMMDevicePtr va,
   const VMMDevicePtr range_end = va + size;
   const size_t start_offset = va - base_;
   const size_t end_offset = range_end - base_;
+  // Only pages fully covered by the requested range can safely lose remap
+  // destination ownership. Partially overlapped backing pages keep their state.
   const size_t first_page = (start_offset + page_size_ - 1) / page_size_;
   const size_t end_page = end_offset / page_size_;
   if (first_page >= end_page) {
