@@ -1086,8 +1086,11 @@ if(WITH_GPU AND NOT WIN32)
 endif()
 set_tests_properties(test_eigvals_op PROPERTIES TIMEOUT 400)
 set_tests_properties(
-  test_cuda_memory_reserved PROPERTIES ENVIRONMENT
-                                       "FLAGS_allocator_strategy=auto_growth")
+  test_cuda_memory_reserved
+  PROPERTIES
+    ENVIRONMENT
+    "FLAGS_allocator_strategy=auto_growth;FLAGS_use_vmm_auto_growth_best_fit_allocator_v2=false"
+)
 if(WITH_GLOO)
   set_tests_properties(test_parallel_dygraph_dataparallel_cpuonly
                        PROPERTIES TIMEOUT 30)
