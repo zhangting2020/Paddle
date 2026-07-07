@@ -89,7 +89,6 @@ limitations under the License. */
 #include "paddle/phi/common/logging_utils.h"
 #include "paddle/phi/core/framework/reader.h"
 #include "paddle/phi/core/memory/allocation/allocator_strategy.h"
-#include "paddle/phi/core/memory/allocation/vmm_v2_step_stats.h"
 #include "paddle/phi/core/raw_tensor.h"
 #include "paddle/phi/core/tensor_meta.h"
 #if defined(PADDLE_WITH_CUDA) || defined(PADDLE_WITH_HIP)
@@ -3794,10 +3793,6 @@ All parameter, weight, gradient are variables in Paddle.
   });
   m.def("vmm_all_block_info", [](int device_id) {
     return paddle::memory::AllBlockInfoOfAllocator(GPUPlace(device_id));
-  });
-  m.def("_vmm_v2_step_stats_snapshot_and_reset", [](int device_id) {
-    return paddle::memory::allocation::SnapshotAndResetVMMV2StepStats(
-        device_id);
   });
   m.def("get_allocate_record", [](int device_id) {
     return paddle::memory::GetAllocateEvent(GPUPlace(device_id));

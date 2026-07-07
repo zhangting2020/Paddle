@@ -23,10 +23,8 @@
 #include "paddle/phi/core/memory/allocation/stat_allocator.h"
 #include "paddle/phi/core/memory/allocation/vmm_allocator_v2_types.h"
 #include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_multi_pool_allocator_v2.h"
-#include "paddle/phi/core/memory/allocation/vmm_v2_step_stats.h"
 
 COMMON_DECLARE_bool(vmm_v2_remap_on_oom);
-PHI_DECLARE_bool(vmm_v2_skip_remap_safety_hot_path);
 
 #if defined(PADDLE_WITH_CUDA)
 #include "paddle/phi/backends/gpu/cuda/cuda_graph.h"
@@ -37,14 +35,6 @@ PHI_DECLARE_bool(vmm_v2_skip_remap_safety_hot_path);
 namespace paddle::memory::allocation {
 
 namespace {
-
-using Clock = std::chrono::steady_clock;
-
-uint64_t ElapsedMicros(Clock::time_point start, Clock::time_point end) {
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(end - start)
-          .count());
-}
 
 VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVMMV2MultiPoolAllocator(
     const std::shared_ptr<Allocator>& allocator) {
@@ -66,21 +56,13 @@ VMMAutoGrowthBestFitMultiPoolAllocatorV2* GetVMMV2MultiPoolAllocator(
 
 void MarkVMMV2RemapPendingStream(StreamSafeCUDAAllocator* allocator,
                                  StreamSafeCUDAAllocation* allocation) {
-  if (FLAGS_vmm_v2_skip_remap_safety_hot_path || !FLAGS_vmm_v2_remap_on_oom) {
+  if (!FLAGS_vmm_v2_remap_on_oom) {
     return;
   }
   if (allocator->GetVMMV2Allocator() == nullptr) {
     return;
   }
-  const bool detail_stats = VMMV2DetailStatsEnabled();
-  const auto start = detail_stats ? Clock::now() : Clock::time_point{};
   const bool ok = allocation->SetVMMV2RemapEvent();
-  if (detail_stats) {
-    VMMV2FreeDetailStats detail;
-    detail.remap_safety_count = 1;
-    detail.remap_safety_us = ElapsedMicros(start, Clock::now());
-    RecordVMMV2FreeDetail(allocation->place().device, detail);
-  }
   if (!ok) {
     VLOG(0) << "VMM V2 failed to mark remap pending stream for allocation "
             << allocation->ptr()
@@ -433,30 +415,16 @@ void StreamSafeCUDAAllocator::ProcessUnfreedAllocations() {
     return;
   }
 
-  const bool trace_step = VMMV2StepStatsEnabled();
-  const auto process_start = trace_step ? Clock::now() : Clock::time_point{};
-  size_t scanned = 0;
-  size_t released = 0;
   std::lock_guard<SpinLock> lock_guard(unfreed_allocation_lock_);
   for (auto it = unfreed_allocations_.begin();
        it != unfreed_allocations_.end();) {
-    ++scanned;
     if ((*it)->CanBeFreed()) {
       MarkVMMV2RemapPendingStream(this, *it);
       delete *it;
       it = unfreed_allocations_.erase(it);
-      ++released;
     } else {
       ++it;
     }
-  }
-  if (trace_step) {
-    RecordStreamSafeProcess(place_.device,
-                            scanned,
-                            released,
-                            scanned - released,
-                            unfreed_allocations_.size(),
-                            ElapsedMicros(process_start, Clock::now()));
   }
 }
 
