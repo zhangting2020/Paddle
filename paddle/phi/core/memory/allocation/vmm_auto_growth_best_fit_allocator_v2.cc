@@ -25,12 +25,10 @@
 #include "glog/logging.h"
 #include "paddle/phi/core/enforce.h"
 #include "paddle/phi/core/memory/allocation/free_block_remap_compactor.h"
-#include "paddle/phi/core/memory/stats.h"
 #include "paddle/phi/core/platform/cuda_device_guard.h"
 #include "paddle/phi/core/platform/device/gpu/gpu_info.h"
 
 COMMON_DECLARE_bool(vmm_v2_compact_all);
-COMMON_DECLARE_bool(vmm_v2_compact_detailed_stats);
 
 namespace paddle {
 namespace memory {
@@ -64,71 +62,23 @@ void EmplaceOrEnforce(Map* map,
           map_name));
 }
 
-struct RemapSourceStateCounters {
-  size_t ready{0};
-  size_t remap_destination_owned{0};
-  size_t pending_event{0};
-  size_t partial_or_invalid{0};
-};
-
-struct RuntimeMemoryStats {
-  int64_t paddle_allocated_bytes{0};
-  int64_t paddle_reserved_bytes{0};
-  int64_t paddle_peak_allocated_bytes{0};
-  int64_t paddle_peak_reserved_bytes{0};
-  bool driver_mem_info_collected{false};
+struct DriverMemoryStats {
   size_t driver_actual_avail{0};
   size_t driver_actual_total{0};
   phi::gpuError_t mem_info_status{phi::gpuSuccess};
 };
 
-RuntimeMemoryStats CollectRuntimeMemoryStats(int device,
-                                             bool collect_driver_mem_info) {
-  RuntimeMemoryStats stats;
-  if (FLAGS_vmm_v2_compact_detailed_stats) {
-    stats.paddle_allocated_bytes =
-        paddle::memory::DeviceMemoryStatCurrentValue("Allocated", device);
-    stats.paddle_reserved_bytes =
-        paddle::memory::DeviceMemoryStatCurrentValue("Reserved", device);
-    stats.paddle_peak_allocated_bytes =
-        paddle::memory::DeviceMemoryStatPeakValue("Allocated", device);
-    stats.paddle_peak_reserved_bytes =
-        paddle::memory::DeviceMemoryStatPeakValue("Reserved", device);
-  }
-  if (collect_driver_mem_info) {
-    platform::CUDADeviceGuard guard(device);
-    stats.driver_mem_info_collected = true;
-    stats.mem_info_status =
-        cudaMemGetInfo(&stats.driver_actual_avail, &stats.driver_actual_total);
-    if (stats.mem_info_status != phi::gpuSuccess) {
-      stats.driver_actual_avail = 0;
-      stats.driver_actual_total = 0;
-      (void)platform::GpuGetLastError();
-    }
+DriverMemoryStats CollectDriverMemoryStats(int device) {
+  DriverMemoryStats stats;
+  platform::CUDADeviceGuard guard(device);
+  stats.mem_info_status =
+      cudaMemGetInfo(&stats.driver_actual_avail, &stats.driver_actual_total);
+  if (stats.mem_info_status != phi::gpuSuccess) {
+    stats.driver_actual_avail = 0;
+    stats.driver_actual_total = 0;
+    (void)platform::GpuGetLastError();
   }
   return stats;
-}
-
-RemapSourceStateCounters CountRemapSourceStates(
-    const std::vector<VMMBackingMap::MappedPage>& pages) {
-  RemapSourceStateCounters counters;
-  for (const auto& page : pages) {
-    switch (page.remap_source_state) {
-      case VMMBackingMap::RemapSourceState::kReady:
-        ++counters.ready;
-        break;
-      case VMMBackingMap::RemapSourceState::kRemapDestinationOwned:
-        ++counters.remap_destination_owned;
-        break;
-      case VMMBackingMap::RemapSourceState::kPendingEvent:
-        ++counters.pending_event;
-        break;
-      case VMMBackingMap::RemapSourceState::kPartialOrInvalid:
-        ++counters.partial_or_invalid;
-        break;
-    }
-  }
-  return counters;
 }
 
 }  // namespace
@@ -407,11 +357,6 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
       largest_unmapped_free = std::max(largest_unmapped_free, blk.size_);
     }
   }
-  size_t ipc_exported_backing_bytes = 0;
-  if (FLAGS_vmm_v2_compact_detailed_stats) {
-    ipc_exported_backing_bytes =
-        underlying_allocator_->CountIPCExportedBytes(compact_source_ranges);
-  }
   const bool has_tail_block = !all_blocks_.empty();
   const bool tail_is_indexable =
       has_tail_block && CanIndexFreeBlock(all_blocks_.back());
@@ -432,36 +377,17 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
           size_t current_releasable_handles,
           size_t current_releasable_bytes,
           size_t bounded_source_page_count,
-          const RuntimeMemoryStats* memory_stats_override = nullptr) {
-        const bool detailed_stats = FLAGS_vmm_v2_compact_detailed_stats;
-        RuntimeMemoryStats collected_memory_stats;
-        const RuntimeMemoryStats* memory_stats = memory_stats_override;
-        if (memory_stats == nullptr) {
-          collected_memory_stats =
-              CollectRuntimeMemoryStats(place_.device, detailed_stats);
-          memory_stats = &collected_memory_stats;
-        }
-        std::vector<VMMBackingMap::MappedPage> all_source_pages;
-        RemapSourceStateCounters all_source_state_counts;
-        if (detailed_stats) {
-          all_source_pages = underlying_allocator_->CollectRemapSourcePages(
-              compact_source_ranges, 0);
-          all_source_state_counts = CountRemapSourceStates(all_source_pages);
-        }
+          const DriverMemoryStats* driver_memory_stats = nullptr) {
         const size_t missing_releasable_bytes =
             current_required_releasable_bytes > current_releasable_bytes
                 ? current_required_releasable_bytes - current_releasable_bytes
                 : 0;
-        const size_t all_source_page_count =
-            detailed_stats ? all_source_pages.size() : 0;
-        const size_t blocked_source_pages =
-            all_source_page_count > all_source_state_counts.ready
-                ? all_source_page_count - all_source_state_counts.ready
-                : 0;
         const size_t driver_topup_gap_bytes =
-            memory_stats->driver_mem_info_collected &&
-                    missing_releasable_bytes > memory_stats->driver_actual_avail
-                ? missing_releasable_bytes - memory_stats->driver_actual_avail
+            driver_memory_stats != nullptr &&
+                    missing_releasable_bytes >
+                        driver_memory_stats->driver_actual_avail
+                ? missing_releasable_bytes -
+                      driver_memory_stats->driver_actual_avail
                 : 0;
 
         LOG(INFO)
@@ -477,22 +403,12 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
             << " missing_releasable_bytes=" << missing_releasable_bytes
             << " bounded_source_pages=" << bounded_source_page_count
             << " source_ranges=" << compact_source_ranges.size()
-            << " detailed_source_stats=" << detailed_stats
-            << " all_source_pages=" << all_source_page_count
-            << " source_ready=" << all_source_state_counts.ready
-            << " source_blocked_pages=" << blocked_source_pages
-            << " source_remap_destination_owned="
-            << all_source_state_counts.remap_destination_owned
-            << " source_pending_event=" << all_source_state_counts.pending_event
-            << " source_partial_or_invalid="
-            << all_source_state_counts.partial_or_invalid
             << " mapped_free_blocks=" << mapped_free_blocks
             << " mapped_free_bytes=" << mapped_free_bytes
             << " largest_mapped_free=" << largest_mapped_free
             << " indexable_mapped_free_blocks=" << indexable_mapped_free_blocks
             << " indexable_mapped_free_bytes=" << indexable_mapped_free_bytes
             << " largest_indexable_mapped_free=" << max_free
-            << " ipc_exported_backing_bytes=" << ipc_exported_backing_bytes
             << " unmapped_free_blocks=" << unmapped_free_blocks_count
             << " unmapped_free_bytes=" << unmapped_free_bytes
             << " largest_unmapped_free=" << largest_unmapped_free
@@ -502,24 +418,25 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
             << " all_blocks=" << all_blocks_.size()
             << " free_index_size=" << free_blocks_.size()
             << " unmapped_free_index_size=" << unmapped_free_blocks_.size()
-            << " paddle_allocated_bytes="
-            << memory_stats->paddle_allocated_bytes
-            << " paddle_reserved_bytes=" << memory_stats->paddle_reserved_bytes
-            << " paddle_peak_allocated_bytes="
-            << memory_stats->paddle_peak_allocated_bytes
-            << " paddle_peak_reserved_bytes="
-            << memory_stats->paddle_peak_reserved_bytes
-            << " driver_actual_avail=" << memory_stats->driver_actual_avail
-            << " driver_actual_total=" << memory_stats->driver_actual_total
+            << " driver_actual_avail="
+            << (driver_memory_stats == nullptr
+                    ? 0UL
+                    : driver_memory_stats->driver_actual_avail)
+            << " driver_actual_total="
+            << (driver_memory_stats == nullptr
+                    ? 0UL
+                    : driver_memory_stats->driver_actual_total)
             << " driver_topup_gap_bytes=" << driver_topup_gap_bytes
             << " total_us=" << ElapsedMicros(compact_start, Clock::now())
             << " lock_wait_us=" << lock_wait_us
             << " block_scan_us=" << block_scan_us
             << " source_precheck_us=" << source_precheck_us
             << " driver_topup_us=" << driver_topup_us
-            << " driver_mem_info_collected="
-            << memory_stats->driver_mem_info_collected << " mem_info_status="
-            << static_cast<int>(memory_stats->mem_info_status);
+            << " driver_mem_info_collected=" << (driver_memory_stats != nullptr)
+            << " mem_info_status="
+            << static_cast<int>(driver_memory_stats == nullptr
+                                    ? phi::gpuSuccess
+                                    : driver_memory_stats->mem_info_status);
       };
 
   size_t compact_target = requested_size;
@@ -580,13 +497,13 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   source_precheck_us = ElapsedMicros(source_precheck_start, Clock::now());
   const size_t releasable_bytes =
       releasable_handles * underlying_allocator_->handle_size();
-  RuntimeMemoryStats topup_memory_stats;
-  const RuntimeMemoryStats* topup_memory_stats_ptr = nullptr;
+  DriverMemoryStats topup_memory_stats;
+  const DriverMemoryStats* topup_memory_stats_ptr = nullptr;
 
   if (requested_size > 0 && !FLAGS_vmm_v2_compact_all &&
       releasable_bytes < required_releasable_bytes) {
     const auto driver_topup_start = Clock::now();
-    topup_memory_stats = CollectRuntimeMemoryStats(place_.device, true);
+    topup_memory_stats = CollectDriverMemoryStats(place_.device);
     topup_memory_stats_ptr = &topup_memory_stats;
     driver_topup_us = ElapsedMicros(driver_topup_start, Clock::now());
     const size_t driver_topup_bytes =
@@ -646,70 +563,17 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
     return 0;
   }
 
-  RuntimeMemoryStats collected_memory_stats;
-  const RuntimeMemoryStats* memory_stats = topup_memory_stats_ptr;
-  if (memory_stats == nullptr) {
-    collected_memory_stats = CollectRuntimeMemoryStats(
-        place_.device, FLAGS_vmm_v2_compact_detailed_stats);
-    memory_stats = &collected_memory_stats;
-  }
   const size_t driver_topup_bytes =
       required_releasable_bytes > releasable_bytes
           ? required_releasable_bytes - releasable_bytes
           : 0;
-  if (FLAGS_vmm_v2_compact_detailed_stats) {
-    LOG(INFO)
-        << "VMM V2 compact attempt: seq=" << compact_seq
-        << " pool=" << static_cast<int>(pool_type_) << " action=compact"
-        << " requested=" << requested_size
-        << " compact_target=" << compact_target
-        << " partial=" << (compact_target < requested_size)
-        << " pre_compact_us=" << ElapsedMicros(compact_start, Clock::now())
-        << " lock_wait_us=" << lock_wait_us
-        << " block_scan_us=" << block_scan_us
-        << " source_precheck_us=" << source_precheck_us
-        << " driver_topup_us=" << driver_topup_us
-        << " required_releasable_bytes=" << required_releasable_bytes
-        << " releasable_target_bytes=" << releasable_target_bytes
-        << " releasable_handles=" << releasable_handles
-        << " releasable_bytes=" << releasable_bytes
-        << " driver_topup_bytes=" << driver_topup_bytes
-        << " source_ranges=" << compact_source_ranges.size()
-        << " source_pages=" << source_pages.size()
-        << " total_free=" << total_free << " max_free=" << max_free
-        << " tail_free=" << tail_free
-        << " mapped_free_blocks=" << mapped_free_blocks
-        << " mapped_free_bytes=" << mapped_free_bytes
-        << " largest_mapped_free=" << largest_mapped_free
-        << " indexable_mapped_free_blocks=" << indexable_mapped_free_blocks
-        << " indexable_mapped_free_bytes=" << indexable_mapped_free_bytes
-        << " largest_indexable_mapped_free=" << max_free
-        << " ipc_exported_backing_bytes=" << ipc_exported_backing_bytes
-        << " unmapped_free_blocks=" << unmapped_free_blocks_count
-        << " unmapped_free_bytes=" << unmapped_free_bytes
-        << " largest_unmapped_free=" << largest_unmapped_free
-        << " all_blocks=" << all_blocks_.size()
-        << " free_index_size=" << free_blocks_.size()
-        << " unmapped_free_index_size=" << unmapped_free_blocks_.size()
-        << " paddle_allocated_bytes=" << memory_stats->paddle_allocated_bytes
-        << " paddle_reserved_bytes=" << memory_stats->paddle_reserved_bytes
-        << " paddle_peak_allocated_bytes="
-        << memory_stats->paddle_peak_allocated_bytes
-        << " paddle_peak_reserved_bytes="
-        << memory_stats->paddle_peak_reserved_bytes
-        << " driver_actual_avail=" << memory_stats->driver_actual_avail
-        << " driver_actual_total=" << memory_stats->driver_actual_total
-        << " driver_mem_info_collected="
-        << memory_stats->driver_mem_info_collected << " mem_info_status="
-        << static_cast<int>(memory_stats->mem_info_status);
-  } else {
-    VLOG(3) << "VMM V2 compact attempt: seq=" << compact_seq
-            << " pool=" << static_cast<int>(pool_type_)
-            << " requested=" << requested_size
-            << " compact_target=" << compact_target
-            << " releasable_bytes=" << releasable_bytes
-            << " source_pages=" << source_pages.size();
-  }
+  VLOG(3) << "VMM V2 compact attempt: seq=" << compact_seq
+          << " pool=" << static_cast<int>(pool_type_)
+          << " requested=" << requested_size
+          << " compact_target=" << compact_target
+          << " releasable_bytes=" << releasable_bytes
+          << " driver_topup_bytes=" << driver_topup_bytes
+          << " source_pages=" << source_pages.size();
 
   VLOG(3) << "VMM V2 pool " << static_cast<int>(pool_type_)
           << " compact: total_free=" << total_free << " max_free=" << max_free
@@ -750,35 +614,12 @@ size_t VMMAutoGrowthBestFitAllocatorV2::CompactImpl(const Place& place,
   RebuildFreeBlockIndex();
   const uint64_t rebuild_index_us =
       ElapsedMicros(rebuild_index_start, Clock::now());
-  if (FLAGS_vmm_v2_compact_detailed_stats) {
-    LOG(INFO) << "VMM V2 compact finish: seq=" << compact_seq
-              << " pool=" << static_cast<int>(pool_type_)
-              << " requested=" << requested_size
-              << " compact_target=" << compact_target
-              << " remap_target=" << remap_target
-              << " remapped_bytes=" << remapped
-              << " total_us=" << ElapsedMicros(compact_start, Clock::now())
-              << " lock_wait_us=" << lock_wait_us
-              << " block_scan_us=" << block_scan_us
-              << " source_precheck_us=" << source_precheck_us
-              << " driver_topup_us=" << driver_topup_us
-              << " compactor_us=" << compactor_us
-              << " rebuild_index_us=" << rebuild_index_us
-              << " source_ranges=" << compact_source_ranges.size()
-              << " source_pages=" << source_pages.size()
-              << " releasable_handles=" << releasable_handles
-              << " releasable_bytes=" << releasable_bytes
-              << " driver_mem_info_needed="
-              << (requested_size > 0 && !FLAGS_vmm_v2_compact_all &&
-                  releasable_bytes < required_releasable_bytes);
-  } else {
-    VLOG(3) << "VMM V2 compact finish: seq=" << compact_seq
-            << " pool=" << static_cast<int>(pool_type_)
-            << " requested=" << requested_size << " remapped_bytes=" << remapped
-            << " total_us=" << ElapsedMicros(compact_start, Clock::now())
-            << " compactor_us=" << compactor_us
-            << " rebuild_index_us=" << rebuild_index_us;
-  }
+  VLOG(3) << "VMM V2 compact finish: seq=" << compact_seq
+          << " pool=" << static_cast<int>(pool_type_)
+          << " requested=" << requested_size << " remapped_bytes=" << remapped
+          << " total_us=" << ElapsedMicros(compact_start, Clock::now())
+          << " compactor_us=" << compactor_us
+          << " rebuild_index_us=" << rebuild_index_us;
   return remapped;
 }
 

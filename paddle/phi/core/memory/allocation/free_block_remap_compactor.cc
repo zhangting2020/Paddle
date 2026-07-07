@@ -20,8 +20,6 @@
 
 #include "glog/logging.h"
 
-COMMON_DECLARE_bool(vmm_v2_compact_detailed_stats);
-
 namespace paddle {
 namespace memory {
 namespace allocation {
@@ -94,9 +92,7 @@ size_t FreeBlockRemapCompactor::Compact(std::list<BlockV2>* blocks,
             << " remapped_blocked_bytes=" << stats.remapped_blocked_bytes
             << " backing_blocked=" << stats.backing_blocked_count
             << " backing_blocked_bytes=" << stats.backing_blocked_bytes;
-    const bool log_summary_as_info =
-        FLAGS_vmm_v2_compact_detailed_stats || !compact_result.success;
-    if (log_summary_as_info) {
+    if (!compact_result.success) {
       LOG(INFO) << "VMM V2 compact summary: seq=" << compact_seq
                 << " phase1=done"
                 << " pool=" << static_cast<int>(pool_type_)

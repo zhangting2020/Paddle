@@ -106,11 +106,6 @@ PHI_DEFINE_EXPORTED_bool(
     false,
     "When true, VMM V2 compact remaps ALL releasable handles instead of "
     "stopping once requested_size is satisfied (bounded compact).");
-PHI_DEFINE_EXPORTED_bool(
-    vmm_v2_compact_detailed_stats,
-    false,
-    "When true, VMM V2 compact logs detailed Paddle allocator memory stats. "
-    "Keep disabled in performance-sensitive runs.");
 PHI_DEFINE_EXPORTED_uint64(vmm_v2_small_pool_handle_size_in_mb,
                            2,
                            "VMM V2 small-pool physical handle size in MiB.");
