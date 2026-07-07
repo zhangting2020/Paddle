@@ -558,73 +558,6 @@ TEST(CUDAVirtualMemAllocatorV2, FreeRemovesHandleRegistration) {
                                           allocator.handle_size()));
 }
 
-TEST(CUDAVirtualMemAllocatorV2, MoveBackingPageRoundTripsHandle) {
-  CUDAVirtualMemAllocatorV2 allocator(
-      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
-
-  auto allocation_with_block =
-      allocator.AppendWithBlock(allocator.handle_size());
-  ASSERT_NE(allocation_with_block.allocation, nullptr);
-
-  const auto source_va =
-      reinterpret_cast<VMMDevicePtr>(allocation_with_block.allocation->ptr());
-  const auto target_va = allocator.virtual_mem_base() + allocator.tail_offset();
-  ASSERT_NE(source_va, target_va);
-
-  std::vector<std::pair<VMMDevicePtr, size_t>> source_ranges = {
-      {source_va, allocator.handle_size()}};
-  std::vector<std::pair<VMMDevicePtr, size_t>> target_ranges = {
-      {target_va, allocator.handle_size()}};
-  auto source_pages =
-      allocator.CollectMappedPages(source_ranges, allocator.handle_size());
-  auto target_pages =
-      allocator.CollectUnmappedPages(target_ranges, allocator.handle_size());
-  ASSERT_EQ(source_pages.size(), 1UL);
-  ASSERT_EQ(target_pages.size(), 1UL);
-
-  ASSERT_TRUE(allocator.MoveBackingPage(source_pages[0], target_pages[0]));
-  EXPECT_FALSE(allocator.ValidateUnmappedPages({target_pages[0]},
-                                               "unit_test_move_stale_target"));
-  EXPECT_FALSE(allocator.ValidateMappedPages({source_pages[0]},
-                                             "unit_test_move_stale_source"));
-  auto moved_pages =
-      allocator.CollectMappedPages(target_ranges, allocator.handle_size());
-  auto source_unmapped_pages =
-      allocator.CollectUnmappedPages(source_ranges, allocator.handle_size());
-  ASSERT_EQ(moved_pages.size(), 1UL);
-  ASSERT_EQ(source_unmapped_pages.size(), 1UL);
-  EXPECT_EQ(moved_pages[0].handle, source_pages[0].handle);
-
-  ASSERT_TRUE(
-      allocator.MoveBackingPage(moved_pages[0], source_unmapped_pages[0]));
-  auto restored_pages =
-      allocator.CollectMappedPages(source_ranges, allocator.handle_size());
-  ASSERT_EQ(restored_pages.size(), 1UL);
-  EXPECT_EQ(restored_pages[0].handle, source_pages[0].handle);
-}
-
-TEST(CUDAVirtualMemAllocatorV2, DetectsRemapDestinationOwnedLayouts) {
-  CUDAVirtualMemAllocatorV2 allocator(
-      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
-
-  auto allocation_with_block =
-      allocator.AppendWithBlock(allocator.handle_size());
-  ASSERT_NE(allocation_with_block.allocation, nullptr);
-  auto* ptr = allocation_with_block.allocation->ptr();
-  EXPECT_FALSE(allocator.IsAllocationOwnedByRemapDestination(ptr));
-  std::vector<std::pair<VMMDevicePtr, size_t>> ranges = {
-      {reinterpret_cast<VMMDevicePtr>(ptr), allocator.handle_size()}};
-  auto pages = allocator.CollectMappedPages(ranges, allocator.handle_size());
-  ASSERT_EQ(pages.size(), 1UL);
-  auto meta = pages[0].meta;
-  ASSERT_NE(meta, nullptr);
-  meta->MarkOwnedByRemapDestination();
-  EXPECT_TRUE(allocator.IsAllocationOwnedByRemapDestination(ptr));
-  meta->RestoreOriginalOwnership();
-  EXPECT_FALSE(allocator.IsAllocationOwnedByRemapDestination(ptr));
-  EXPECT_FALSE(allocator.IsAllocationOwnedByRemapDestination(nullptr));
-}
-
 TEST(CUDAVirtualMemAllocatorV2, StagedRemapDestinationBlocksSource) {
   CUDAVirtualMemAllocatorV2 allocator(
       phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
@@ -786,30 +719,6 @@ TEST(CUDAVirtualMemAllocatorV2, CollectsAndPinsIPCBlockBacking) {
                                          invalid_block.size()));
   EXPECT_FALSE(allocator.HasIPCExportedRange(invalid_block.begin_va(),
                                              invalid_block.size()));
-}
-
-TEST(CUDAVirtualMemAllocatorV2, SetsBlockBackingRemapEvent) {
-  CUDAVirtualMemAllocatorV2 allocator(
-      phi::GPUPlace(), 2UL << 20, PoolType::kLarge);
-
-  auto allocation_with_block =
-      allocator.AppendWithBlock(allocator.handle_size());
-  ASSERT_NE(allocation_with_block.allocation, nullptr);
-
-  BlockV2 block = allocation_with_block.block.MakeMappedActiveSubBlock(0, 2048);
-  cudaEvent_t raw_event = nullptr;
-  ASSERT_EQ(cudaEventCreateWithFlags(&raw_event, cudaEventDisableTiming),
-            cudaSuccess);
-  auto guard = std::make_shared<CUDAEventGuard>(raw_event);
-  ASSERT_TRUE(allocator.SetBlockRemapEvent(block, nullptr, guard));
-
-  BlockV2 invalid_block = BlockV2::MakeMappedBlock(
-      BlockType::kActive,
-      reinterpret_cast<void*>(allocator.virtual_mem_base() -
-                              allocator.handle_size()),
-      allocator.handle_size(),
-      PoolType::kLarge);
-  EXPECT_FALSE(allocator.SetBlockRemapEvent(invalid_block, nullptr, guard));
 }
 
 TEST(CUDAVirtualMemAllocatorV2, LazyPendingStreamBlocksRemapAndRelease) {

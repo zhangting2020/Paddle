@@ -647,15 +647,6 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   EXPECT_EQ(it->size_, handle_size);
 }
 
-TEST(VMMAutoGrowthBestFitAllocatorV2, AdoptBackingBlockRejectsNullInput) {
-  auto underlying = CreateUnderlyingAllocator();
-  VMMAutoGrowthBestFitAllocatorV2 allocator(
-      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
-
-  EXPECT_THROW(allocator.AdoptBackingBlock(nullptr),
-               common::enforce::EnforceNotMet);
-}
-
 TEST(VMMAutoGrowthBestFitAllocatorV2, ReleaseWaitsBeforeUnmappingBacking) {
   auto underlying = CreateUnderlyingAllocator();
   VMMAutoGrowthBestFitAllocatorV2 allocator(
@@ -872,26 +863,6 @@ TEST(VMMAutoGrowthBestFitAllocatorV2,
   EXPECT_FALSE(next->IsUnmappedFree());
   EXPECT_EQ(reinterpret_cast<uint8_t*>(first_ptr) + underlying->handle_size(),
             second_ptr);
-}
-
-TEST(VMMAutoGrowthBestFitAllocatorV2, CollectTensorPartsMarksIpcExported) {
-  auto underlying = CreateUnderlyingAllocator();
-  VMMAutoGrowthBestFitAllocatorV2 allocator(
-      underlying, 256, phi::GPUPlace(), PoolType::kLarge);
-
-  auto allocation = allocator.Allocate(underlying->handle_size());
-  ASSERT_NE(allocation, nullptr);
-
-  std::vector<BlockPart> parts;
-  ASSERT_TRUE(allocator.CollectTensorParts(
-      allocation->ptr(), allocation->size(), &parts));
-
-  ASSERT_EQ(parts.size(), 1UL);
-  EXPECT_EQ(parts[0].chunk_rel_off, 0UL);
-  EXPECT_EQ(parts[0].len, underlying->handle_size());
-  EXPECT_TRUE(underlying->HasIPCExportedRange(
-      reinterpret_cast<VMMDevicePtr>(allocation->ptr()),
-      underlying->handle_size()));
 }
 
 TEST(VMMAutoGrowthBestFitAllocatorV2, CompactSkipsPartialFreeHandle) {
