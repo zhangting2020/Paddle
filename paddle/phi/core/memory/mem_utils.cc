@@ -178,6 +178,13 @@ FreeBlockInfoOfVmmAllocator(const GPUPlace& place) {
   return free_blocks_info_visitor.GetFreeBlocksInfo();
 }
 
+std::vector<std::vector<std::pair<size_t, uintptr_t>>>
+UnmappedBlockInfoOfVmmAllocator(const GPUPlace& place) {
+  VMMUnmappedBlocksInfoVisitor visitor;
+  allocation::AllocatorFacade::Instance().Accept(place, &visitor);
+  return std::move(visitor).GetUnmappedBlocksInfo();
+}
+
 std::vector<std::vector<std::tuple<size_t, uintptr_t, bool>>>
 AllBlockInfoOfAllocator(const GPUPlace& place) {
   AllBlocksInfoVisitor all_blocks_info_visitor;

@@ -104,6 +104,10 @@ PADDLE_API extern size_t VmmCompact(const GPUPlace& place);
 PADDLE_API extern std::vector<std::vector<std::pair<size_t, uintptr_t>>>
 FreeBlockInfoOfVmmAllocator(const GPUPlace& place);
 
+// Get VMM V2 virtual-address holes that have no physical backing.
+PADDLE_API extern std::vector<std::vector<std::pair<size_t, uintptr_t>>>
+UnmappedBlockInfoOfVmmAllocator(const GPUPlace& place);
+
 // Get allocator all block info.
 PADDLE_API extern std::vector<std::vector<std::tuple<size_t, uintptr_t, bool>>>
 AllBlockInfoOfAllocator(const GPUPlace& place);

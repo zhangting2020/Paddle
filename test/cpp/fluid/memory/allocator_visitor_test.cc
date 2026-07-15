@@ -11,12 +11,16 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#include <algorithm>
+
 #include "paddle/phi/core/memory/allocation/allocator.h"
 #include "paddle/phi/core/memory/allocation/auto_growth_best_fit_allocator.h"
 #include "paddle/phi/core/memory/allocation/cpu_allocator.h"
 #include "paddle/phi/core/memory/allocation/cuda_virtual_mem_allocator.h"
 #include "paddle/phi/core/memory/allocation/retry_allocator.h"
 #include "paddle/phi/core/memory/allocation/virtual_memory_auto_growth_best_fit_allocator.h"
+#include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_allocator_v2.h"
+#include "paddle/phi/core/memory/allocation/vmm_auto_growth_best_fit_multi_pool_allocator_v2.h"
 #include "paddle/phi/core/platform/device/gpu/gpu_info.h"
 #ifdef PADDLE_WITH_CUDA
 #include <cuda.h>
@@ -206,6 +210,109 @@ TEST(MultiScalePoolAllocator, TestPoolFilterLargeOnly) {
     EXPECT_NE(std::get<1>(block),
               reinterpret_cast<uintptr_t>(small_allocation->ptr()));
   }
+}
+
+TEST(VMMAutoGrowthBestFitMultiPoolAllocatorV2, TestBlockInfoVisitors) {
+  constexpr size_t kHandleSize = 2UL << 20;
+  constexpr size_t kSmallThreshold = 1UL << 20;
+  const GPUPlace place(0);
+
+  auto small_underlying = std::make_shared<CUDAVirtualMemAllocatorV2>(
+      place, kHandleSize, PoolType::kSmall);
+  auto large_underlying = std::make_shared<CUDAVirtualMemAllocatorV2>(
+      place, kHandleSize, PoolType::kLarge);
+  auto small_allocator = std::make_shared<VMMAutoGrowthBestFitAllocatorV2>(
+      small_underlying, 256, place, PoolType::kSmall);
+  auto large_allocator = std::make_shared<VMMAutoGrowthBestFitAllocatorV2>(
+      large_underlying, 256, place, PoolType::kLarge);
+  auto allocator = std::make_shared<VMMAutoGrowthBestFitMultiPoolAllocatorV2>(
+      small_allocator, large_allocator, kSmallThreshold, place);
+
+  auto small = allocator->Allocate(256);
+  auto large = allocator->Allocate(2UL << 20);
+  const auto small_ptr = reinterpret_cast<uintptr_t>(small->ptr());
+  const auto large_ptr = reinterpret_cast<uintptr_t>(large->ptr());
+
+  auto contains_active = [](const auto& blocks, uintptr_t ptr) {
+    return std::any_of(blocks.begin(), blocks.end(), [ptr](const auto& block) {
+      return std::get<1>(block) == ptr && !std::get<2>(block);
+    });
+  };
+
+  AllBlocksInfoVisitor all_visitor;
+  allocator->Accept(&all_visitor);
+  auto all_info = std::move(all_visitor).GetAllBlocksInfo();
+  ASSERT_EQ(all_info.size(), 2UL);
+  EXPECT_TRUE(contains_active(all_info[0], small_ptr));
+  EXPECT_TRUE(contains_active(all_info[1], large_ptr));
+
+  AllBlocksInfoVisitor large_visitor(
+      AllBlocksInfoVisitor::PoolFilter::kLargeOnly);
+  allocator->Accept(&large_visitor);
+  auto large_info = std::move(large_visitor).GetAllBlocksInfo();
+  ASSERT_EQ(large_info.size(), 1UL);
+  EXPECT_TRUE(contains_active(large_info[0], large_ptr));
+  EXPECT_FALSE(contains_active(large_info[0], small_ptr));
+
+  AllBlocksInfoVisitor small_visitor(
+      AllBlocksInfoVisitor::PoolFilter::kSmallOnly);
+  allocator->Accept(&small_visitor);
+  auto small_info = std::move(small_visitor).GetAllBlocksInfo();
+  ASSERT_EQ(small_info.size(), 1UL);
+  EXPECT_TRUE(contains_active(small_info[0], small_ptr));
+  EXPECT_FALSE(contains_active(small_info[0], large_ptr));
+
+  small.reset();
+  large.reset();
+  VMMFreeBlocksInfoVisitor free_visitor;
+  allocator->Accept(&free_visitor);
+  auto free_info = free_visitor.GetFreeBlocksInfo();
+  ASSERT_EQ(free_info.size(), 2UL);
+  auto contains_free = [](const auto& blocks, uintptr_t ptr) {
+    return std::any_of(blocks.begin(), blocks.end(), [ptr](const auto& block) {
+      const size_t size = block.first;
+      const uintptr_t begin = block.second;
+      return ptr >= begin && ptr - begin < size;
+    });
+  };
+  EXPECT_TRUE(contains_free(free_info[0], small_ptr));
+  EXPECT_TRUE(contains_free(free_info[1], large_ptr));
+}
+
+TEST(VMMAutoGrowthBestFitAllocatorV2, SeparatesUnmappedBlockInfo) {
+  constexpr size_t kHandleSize = 2UL << 20;
+  const GPUPlace place(0);
+  auto underlying = std::make_shared<CUDAVirtualMemAllocatorV2>(
+      place, kHandleSize, PoolType::kLarge);
+  auto allocator = std::make_shared<VMMAutoGrowthBestFitAllocatorV2>(
+      underlying, 256, place, PoolType::kLarge);
+
+  auto first = allocator->Allocate(kHandleSize);
+  auto middle = allocator->Allocate(kHandleSize);
+  auto last = allocator->Allocate(kHandleSize);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(middle, nullptr);
+  ASSERT_NE(last, nullptr);
+  const auto middle_ptr = reinterpret_cast<uintptr_t>(middle->ptr());
+  middle.reset();
+  ASSERT_EQ(allocator->Release(place), kHandleSize);
+
+  AllBlocksInfoVisitor all_visitor;
+  allocator->Accept(&all_visitor);
+  auto all_info = std::move(all_visitor).GetAllBlocksInfo();
+  ASSERT_EQ(all_info.size(), 1UL);
+  EXPECT_TRUE(std::none_of(
+      all_info[0].begin(), all_info[0].end(), [middle_ptr](const auto& block) {
+        return std::get<1>(block) == middle_ptr;
+      }));
+
+  VMMUnmappedBlocksInfoVisitor unmapped_visitor;
+  allocator->Accept(&unmapped_visitor);
+  auto unmapped_info = std::move(unmapped_visitor).GetUnmappedBlocksInfo();
+  ASSERT_EQ(unmapped_info.size(), 1UL);
+  ASSERT_EQ(unmapped_info[0].size(), 1UL);
+  EXPECT_EQ(unmapped_info[0][0].first, kHandleSize);
+  EXPECT_EQ(unmapped_info[0][0].second, middle_ptr);
 }
 
 }  // namespace allocation

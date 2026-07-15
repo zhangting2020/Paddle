@@ -3812,6 +3812,9 @@ All parameter, weight, gradient are variables in Paddle.
   m.def("vmm_free_block_info", [](int device_id) {
     return paddle::memory::FreeBlockInfoOfVmmAllocator(GPUPlace(device_id));
   });
+  m.def("vmm_unmapped_block_info", [](int device_id) {
+    return paddle::memory::UnmappedBlockInfoOfVmmAllocator(GPUPlace(device_id));
+  });
   m.def(
       "all_block_info",
       [](int device_id) -> AllBlocksInfoType {

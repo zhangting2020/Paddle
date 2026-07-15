@@ -244,6 +244,7 @@ class VMMFreeBlocksInfoVisitor : public AllocatorComputeStreamVisitor {
    * information is to be extracted.
    */
   void Visit(VirtualMemoryAutoGrowthBestFitAllocator* allocator) override;
+  void Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) override;
 
  private:
   /**
@@ -254,6 +255,24 @@ class VMMFreeBlocksInfoVisitor : public AllocatorComputeStreamVisitor {
    * distinguishes between different allocators (e.g., small, large allocator).
    */
   std::vector<std::vector<std::pair<size_t, uintptr_t>>> free_blocks_info_;
+};
+
+/**
+ * @brief Visitor that retrieves VMM V2 virtual-address holes without backing.
+ */
+class VMMUnmappedBlocksInfoVisitor : public AllocatorComputeStreamVisitor {
+  using AllocatorComputeStreamVisitor::Visit;
+
+ public:
+  std::vector<std::vector<std::pair<size_t, uintptr_t>>>
+  GetUnmappedBlocksInfo() && {
+    return std::move(unmapped_blocks_info_);
+  }
+
+  void Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) override;
+
+ private:
+  std::vector<std::vector<std::pair<size_t, uintptr_t>>> unmapped_blocks_info_;
 };
 
 /**
@@ -312,6 +331,8 @@ class AllBlocksInfoVisitor : public AllocatorComputeStreamVisitor {
   void Visit(AutoGrowthBestFitAllocator* allocator) override;
   void Visit(VirtualMemoryAutoGrowthBestFitMultiScalePoolAllocator* allocator)
       override;
+  void Visit(VMMAutoGrowthBestFitAllocatorV2* allocator) override;
+  void Visit(VMMAutoGrowthBestFitMultiPoolAllocatorV2* allocator) override;
 
  private:
   PoolFilter pool_filter_ = PoolFilter::kAll;

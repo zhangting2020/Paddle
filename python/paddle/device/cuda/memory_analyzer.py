@@ -110,6 +110,23 @@ class MemoryAnalysisTool:
         return core.vmm_free_block_info(device_id)
 
     @classmethod
+    def vmm_unmapped_block_info(
+        self,
+        device_id: int | None = None,
+    ) -> list[list[tuple[int, int]]]:
+        name = 'paddle.device.cuda.vmm_unmapped_block_info'
+        if not (core.is_compiled_with_cuda()):
+            raise ValueError(
+                f"The API {name} is not supported in CPU-only PaddlePaddle. Please reinstall PaddlePaddle with GPU support to call this API."
+            )
+        device_id = (
+            device_id
+            if device_id is not None
+            else core.get_cuda_current_device_id()
+        )
+        return core.vmm_unmapped_block_info(device_id)
+
+    @classmethod
     def all_block_info(
         self,
         device_id: int | None = None,
